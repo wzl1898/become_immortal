@@ -1,0 +1,114 @@
+:root {
+  --bg: #0f1115;
+  --panel: #161a21;
+  --ink: #e8e6df;
+  --muted: #8b8f99;
+  --accent: #b48a3c;
+  --accent-soft: #d8b56a;
+  --player: #6ea8c4;
+  --danger: #c46e6e;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: "Noto Serif SC", "Songti SC", "Source Han Serif SC", serif;
+}
+
+.app {
+  max-width: 780px;
+  margin: 0 auto;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid #23272f;
+}
+
+.topbar h1 {
+  margin: 0;
+  font-size: 22px;
+  letter-spacing: 0.4em;
+  color: var(--accent-soft);
+  text-indent: 0.4em;
+}
+
+.ghost {
+  background: transparent;
+  border: 1px solid #333842;
+  color: var(--muted);
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.ghost:hover { color: var(--ink); border-color: var(--accent); }
+
+.story {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px 20px 8px;
+  line-height: 1.9;
+  font-size: 17px;
+}
+
+.block { margin: 0 0 22px; white-space: pre-wrap; }
+.block.narration { color: var(--ink); }
+.block.player {
+  color: var(--player);
+  border-left: 2px solid var(--player);
+  padding-left: 12px;
+}
+.block.player::before { content: "› "; color: var(--muted); }
+.block.error { color: var(--danger); font-size: 15px; }
+
+.cursor::after {
+  content: "▍";
+  color: var(--accent-soft);
+  animation: blink 1s step-end infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }
+
+.input-bar {
+  display: flex;
+  gap: 10px;
+  padding: 14px 20px 20px;
+  border-top: 1px solid #23272f;
+}
+
+#action {
+  flex: 1;
+  background: var(--panel);
+  border: 1px solid #2a2f38;
+  color: var(--ink);
+  padding: 12px 14px;
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 16px;
+}
+#action:focus { outline: none; border-color: var(--accent); }
+#action:disabled { opacity: 0.5; }
+
+#send {
+  background: var(--accent);
+  border: none;
+  color: #1a1206;
+  font-weight: 700;
+  padding: 0 22px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 16px;
+}
+#send:disabled { opacity: 0.4; cursor: default; }
+#send:not(:disabled):hover { background: var(--accent-soft); }

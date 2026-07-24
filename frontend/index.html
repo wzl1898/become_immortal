@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>问道 · 修仙文字奇缘</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <h1>问道</h1>
+      <button id="restart" class="ghost" title="重开一世">重开一世</button>
+    </header>
+
+    <main id="story" class="story" aria-live="polite"></main>
+
+    <form id="input-form" class="input-bar" autocomplete="off">
+      <input
+        id="action"
+        type="text"
+        placeholder="你会怎么做？（例如：拜别双亲，独自入山寻仙）"
+        disabled
+      />
+      <button id="send" type="submit" disabled>行动</button>
+    </form>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
