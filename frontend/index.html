@@ -10,10 +10,26 @@
   <div class="app">
     <header class="topbar">
       <h1>问道</h1>
-      <button id="restart" class="ghost" title="重开一世">重开一世</button>
+      <div class="actions">
+        <span id="save-name" class="save-name" title="当前存档"></span>
+        <button id="saves-btn" class="ghost" title="存档 / 读档">存档</button>
+        <button id="restart" class="ghost" title="另起新的一世">新的一世</button>
+      </div>
     </header>
 
     <main id="story" class="story" aria-live="polite"></main>
+
+    <div id="drawer" class="drawer hidden">
+      <div class="drawer-panel">
+        <div class="drawer-head">
+          <h2>历世存档</h2>
+          <button id="drawer-close" class="ghost">关闭</button>
+        </div>
+        <ul id="save-list" class="save-list"></ul>
+        <p id="save-empty" class="save-empty hidden">还没有存档，去开启第一世吧。</p>
+      </div>
+      <div class="drawer-mask"></div>
+    </div>
 
     <form id="input-form" class="input-bar" autocomplete="off">
       <input
