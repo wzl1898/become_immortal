@@ -29,10 +29,14 @@ cp .env.example .env
 
 # 3. 启动
 cd backend
-../.venv/bin/python -m uvicorn main:app --reload --port 8000
+../.venv/bin/python -m uvicorn main:app --reload --port 8888 --timeout-graceful-shutdown 3
 ```
 
-打开浏览器访问 http://127.0.0.1:8000 即可开玩。
+打开浏览器访问 http://127.0.0.1:8888 即可开玩。
+
+> `--timeout-graceful-shutdown 3`：`--reload` 检测到改动重启时，最多等 3 秒就断开旧连接。
+> 否则正在进行的 SSE 流式请求（开场/行动生成）会让重启卡在 "Waiting for connections to close"。
+> 想连前端热更新一起开：在命令前加 `LIVE_RELOAD=1`（改前端文件浏览器自动刷新）。
 
 ## 配置项（.env）
 

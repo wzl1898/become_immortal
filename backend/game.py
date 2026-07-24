@@ -8,6 +8,8 @@
 - transcript : 展示用剧情块列表 [{role: narration|player, text}]，只增不删
 """
 
+import re
+
 import store
 from prompts import OPENING_PROMPT, SYSTEM_PROMPT
 
@@ -63,10 +65,100 @@ def messages_for_opening(session_id: str) -> list[dict]:
     return state["messages"] + [{"role": "user", "content": OPENING_PROMPT}]
 
 
+_STATUS_RE = re.compile(r"《状态》(.*?)《/状态》", re.S)
+_OBJECTS_RE = re.compile(r"《物件》(.*?)《/物件》", re.S)
+
+
+def _latest_block(transcript: list[dict], pattern: "re.Pattern") -> str | None:
+    """从最近一条 narration 里按 pattern 提取块内容；没有则 None。"""
+    for blk in reversed(transcript):
+        if blk.get("role") == "narration":
+            m = pattern.search(blk.get("text", ""))
+            if m:
+                return m.group(1)
+    return None
+
+
+def _split_top_level(val: str) -> list[str]:
+    """按顿号/逗号拆分，但忽略成对括号（全角/半角）内部的分隔符。"""
+    parts, buf, depth = [], [], 0
+    for ch in val:
+        if ch in "（(":
+            depth += 1
+            buf.append(ch)
+        elif ch in "）)":
+            depth = max(0, depth - 1)
+            buf.append(ch)
+        elif ch in "、,，" and depth == 0:
+            parts.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+    if buf:
+        parts.append("".join(buf))
+    return parts
+
+
+def _dossier_from_transcript(transcript: list[dict]) -> str:
+    """从完整 transcript（不受 MAX_TURNS 截断）里，取最近一次的关键物件，
+    拼成"既定物件档案"约束串，抑制跨回合属性漂移。
+
+    来源两处：
+    - 《状态》面板的"资源""法宝"——主角**拥有**的关键物（只取带括号的条目/非空法宝）；
+    - 《物件》块——主角**未拥有**但有剧情分量的关键物（整行留存，含归属）。
+
+    寻常消耗品（无括号）与空块天然排除。都没有则返回 ""。
+    """
+    items: list[str] = []
+
+    status = _latest_block(transcript, _STATUS_RE)
+    if status:
+        for line in status.splitlines():
+            line = line.strip()
+            m = re.match(r"^(资源|法宝)[：:]\s*(.*)$", line)
+            if not m:
+                continue
+            field, val = m.group(1), m.group(2).strip()
+            if not val or val in ("无", "暂无", "无。"):
+                continue
+            if field == "资源":
+                # 只取带括号（固有属性）的条目。按顿号/逗号拆分，但括号内的
+                # 分隔符不算（否则会把"（触之清凉，内藏硬物）"从中切断）。
+                for part in _split_top_level(val):
+                    part = part.strip()
+                    if part and ("（" in part or "(" in part):
+                        items.append(f"{part}（随身）")
+            else:  # 法宝：整行留存
+                items.append(f"法宝：{val}（随身）")
+
+    objects = _latest_block(transcript, _OBJECTS_RE)
+    if objects:
+        for line in objects.splitlines():
+            line = line.strip()
+            if line:
+                items.append(line)
+
+    if not items:
+        return ""
+    lines = "\n".join(f"- {it}" for it in items)
+    return (
+        "【既定物件档案（须与之保持一致，括号内属性不可无故矛盾）】\n"
+        f"{lines}\n"
+        "以上物件的既定属性除非剧情明确改变，否则须原样沿用。\n\n"
+    )
+
+
 def messages_for_action(session_id: str, action: str) -> list[dict]:
-    """构造用于响应玩家行动的消息。"""
+    """构造用于响应玩家行动的消息。
+
+    在玩家行动前注入"既定物件档案"，让关键物件的属性即使在上下文
+    被 MAX_TURNS 截断后也不丢失，抑制跨回合属性漂移。档案只随本次
+    请求发送，不写入历史（落库仍是玩家原始行动）。
+    """
     state = _get(session_id)
-    return state["messages"] + [{"role": "user", "content": action}]
+    dossier = _dossier_from_transcript(state["transcript"])
+    content = f"{dossier}{action}" if dossier else action
+    return state["messages"] + [{"role": "user", "content": content}]
 
 
 def commit(session_id: str, user_content: str | None, assistant_content: str) -> None:

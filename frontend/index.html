@@ -17,6 +17,12 @@
       </div>
     </header>
 
+    <aside id="status-panel" class="status-panel empty" aria-label="身体状态">
+      <h2 class="status-title">状态</h2>
+      <div id="status-body" class="status-body"></div>
+      <p class="status-empty">尚未入世</p>
+    </aside>
+
     <main id="story" class="story" aria-live="polite"></main>
 
     <div id="drawer" class="drawer hidden">
@@ -35,7 +41,7 @@
       <input
         id="action"
         type="text"
-        placeholder="你会怎么做？（例如：拜别双亲，独自入山寻仙）"
+        placeholder="你会怎么做？顺着灵光，或自行其事……"
         disabled
       />
       <button id="send" type="submit" disabled>行动</button>

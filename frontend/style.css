@@ -71,6 +71,70 @@ html, body {
 }
 .block.player::before { content: "› "; color: var(--muted); }
 .block.error { color: var(--danger); font-size: 15px; }
+.block.hint {
+  margin-top: -12px;
+  color: var(--accent-soft);
+  opacity: 0.72;
+  font-size: 14px;
+  line-height: 1.7;
+  padding-left: 12px;
+  border-left: 2px solid rgba(180, 138, 60, 0.4);
+}
+.block.hint::before { content: "❖ "; color: var(--accent); }
+
+/* 身体状态面板：宽屏固定在正文左侧的空白处 */
+.status-panel {
+  position: fixed;
+  top: 76px;
+  left: calc(50% - 390px - 236px);
+  width: 220px;
+  background: var(--panel);
+  border: 1px solid #2a2f38;
+  border-radius: 10px;
+  padding: 14px 16px;
+  font-size: 13px;
+  line-height: 1.7;
+}
+.status-title {
+  margin: 0 0 10px;
+  font-size: 15px;
+  letter-spacing: 0.3em;
+  color: var(--accent-soft);
+  text-indent: 0.3em;
+  border-bottom: 1px solid #23272f;
+  padding-bottom: 8px;
+}
+.status-body { display: flex; flex-direction: column; gap: 7px; }
+.status-row { display: flex; gap: 8px; }
+.status-row .k { flex: none; width: 2.6em; color: var(--muted); }
+.status-row .v { flex: 1; color: var(--ink); }
+.status-subhead {
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px dashed #2a2f38;
+  color: var(--accent-soft);
+  font-size: 12px;
+  letter-spacing: 0.15em;
+}
+.obj-row { display: flex; flex-direction: column; gap: 1px; }
+.obj-row .obj-name { color: var(--ink); }
+.obj-row .obj-loc { color: var(--muted); font-size: 12px; }
+.obj-row .obj-loc::before { content: "去向："; opacity: 0.7; }
+.status-empty { color: var(--muted); text-align: center; margin: 4px 0; }
+.status-panel:not(.empty) .status-empty { display: none; }
+.status-panel.empty .status-body { display: none; }
+
+/* 窄屏（放不下侧栏）：收进正文流顶部，横向铺开 */
+@media (max-width: 1300px) {
+  .status-panel {
+    position: static;
+    width: auto;
+    left: auto;
+    margin: 12px 20px 0;
+  }
+  .status-body { flex-direction: row; flex-wrap: wrap; gap: 6px 16px; }
+  .status-panel.empty { display: none; }
+}
 
 .cursor::after {
   content: "▍";

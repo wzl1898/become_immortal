@@ -11,6 +11,7 @@
 - 静态前端挂在 /
 """
 
+import asyncio
 import json
 import os
 
@@ -19,7 +20,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI, HTTPException  # noqa: E402
-from fastapi.responses import StreamingResponse  # noqa: E402
+from fastapi.responses import HTMLResponse, StreamingResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
@@ -27,6 +28,10 @@ import game  # noqa: E402
 from llm import stream_chat  # noqa: E402
 
 app = FastAPI(title="become_immortal")
+
+# 开发用前端热更新：设 LIVE_RELOAD=1 时，后端监视 frontend/ 变化并让页面自动刷新。
+# 不设则完全无影响，正常游玩。
+LIVE_RELOAD = os.getenv("LIVE_RELOAD") == "1"
 
 
 @app.on_event("startup")
@@ -130,5 +135,54 @@ async def action(sid: str, text: str):
     )
 
 
-# 静态前端（放最后，避免覆盖 /api）
+# ---- 开发用前端热更新（LIVE_RELOAD=1 时启用）----
+
+_LIVERELOAD_SNIPPET = """
+<script>
+(function () {
+  var es = new EventSource("/__livereload");
+  var seen = null;
+  es.addEventListener("change", function (e) {
+    if (seen !== null && seen !== e.data) location.reload();
+    seen = e.data;
+  });
+})();
+</script>
+"""
+
+
+def _frontend_mtime() -> float:
+    """frontend/ 目录下所有文件的最新修改时间。"""
+    latest = 0.0
+    for root, _dirs, files in os.walk(FRONTEND_DIR):
+        for f in files:
+            try:
+                latest = max(latest, os.path.getmtime(os.path.join(root, f)))
+            except OSError:
+                pass
+    return latest
+
+
+if LIVE_RELOAD:
+
+    from fastapi import Request  # noqa: E402
+
+    @app.get("/__livereload")
+    async def _livereload(request: Request):
+        async def gen():
+            # 客户端断开就退出，避免 reload 时这条长连接把优雅关闭卡死
+            while not await request.is_disconnected():
+                yield f"event: change\ndata: {_frontend_mtime()}\n\n"
+                await asyncio.sleep(0.5)
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    @app.get("/", response_class=HTMLResponse)
+    async def _index_dev():
+        with open(os.path.join(FRONTEND_DIR, "index.html"), encoding="utf-8") as f:
+            html = f.read()
+        return html.replace("</body>", _LIVERELOAD_SNIPPET + "</body>")
+
+
+# 静态前端（放最后，避免覆盖 /api 与热更新路由）
 app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
