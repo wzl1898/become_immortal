@@ -36,15 +36,18 @@ def init() -> None:
                 transcript  TEXT NOT NULL,   -- JSON: list[dict{role,text}]
                 turns       INTEGER NOT NULL DEFAULT 0,
                 lore        TEXT NOT NULL DEFAULT '[]',  -- JSON: list[dict{q,a,ts}]，见闻录
+                inventory   TEXT NOT NULL DEFAULT '[]',  -- JSON: list[dict{id,name,attrs,kind,last_turn}]，物品影子库
                 created_at  REAL NOT NULL,
                 updated_at  REAL NOT NULL
             )
             """
         )
-        # 老库迁移：改动前建的表没有 lore 列，幂等补上
+        # 老库迁移：改动前建的表没有 lore/inventory 列，幂等补上
         cols = {row["name"] for row in conn.execute("PRAGMA table_info(saves)")}
         if "lore" not in cols:
             conn.execute("ALTER TABLE saves ADD COLUMN lore TEXT NOT NULL DEFAULT '[]'")
+        if "inventory" not in cols:
+            conn.execute("ALTER TABLE saves ADD COLUMN inventory TEXT NOT NULL DEFAULT '[]'")
 
 
 def create(name: str, messages: list[dict]) -> str:
@@ -53,8 +56,8 @@ def create(name: str, messages: list[dict]) -> str:
     now = time.time()
     with _conn() as conn:
         conn.execute(
-            "INSERT INTO saves (id, name, messages, transcript, turns, lore, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, 0, '[]', ?, ?)",
+            "INSERT INTO saves (id, name, messages, transcript, turns, lore, inventory, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, 0, '[]', '[]', ?, ?)",
             (sid, name, json.dumps(messages, ensure_ascii=False), "[]", now, now),
         )
     return sid
@@ -84,6 +87,15 @@ def save_lore(sid: str, lore: list[dict]) -> None:
         )
 
 
+def save_inventory(sid: str, inventory: list[dict]) -> None:
+    """只更新物品影子库。"""
+    with _conn() as conn:
+        conn.execute(
+            "UPDATE saves SET inventory=?, updated_at=? WHERE id=?",
+            (json.dumps(inventory, ensure_ascii=False), time.time(), sid),
+        )
+
+
 def load(sid: str) -> dict | None:
     """读取单个存档的完整数据；不存在返回 None。"""
     with _conn() as conn:
@@ -97,6 +109,7 @@ def load(sid: str) -> dict | None:
         "transcript": json.loads(row["transcript"]),
         "turns": row["turns"],
         "lore": json.loads(row["lore"] or "[]"),
+        "inventory": json.loads(row["inventory"] or "[]"),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }

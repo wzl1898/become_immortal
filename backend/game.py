@@ -10,7 +10,9 @@
 
 import re
 import time
+import uuid
 
+import embed
 import store
 from prompts import INQUIRY_SYSTEM_PROMPT, OPENING_PROMPT, SYSTEM_PROMPT
 
@@ -27,6 +29,14 @@ LORE_INJECT_MAX_CHARS = 1500
 # 喂给问询的"当前情境"取最近多少条 narration 的正文
 INQUIRY_SCENE_TURNS = 3
 
+# ---- 物品冷热分离 ----
+# 热窗口：物品最后一次在剧情正文里被提及后，往后多少回合内算"热"（每回合注入）。
+# 连续 HOT_TURNS 回合正文都没提到 → 变冷、进折叠区、退出注入。
+HOT_TURNS = 5
+# 冷物品语义召回：命中数上限与相似度阈值（阈值实测微调）。
+RECALL_TOP_K = 3
+RECALL_THRESHOLD = 0.35
+
 DEFAULT_NAME = "无名修士"
 
 
@@ -38,7 +48,14 @@ def create_session(name: str = DEFAULT_NAME) -> str:
     """新建一局并落库，返回 save_id。"""
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     sid = store.create(name, messages)
-    _CACHE[sid] = {"messages": messages, "transcript": [], "turns": 0, "lore": []}
+    _CACHE[sid] = {
+        "messages": messages,
+        "transcript": [],
+        "turns": 0,
+        "lore": [],
+        "inventory": [],
+        "_injected": [],  # 上一回合注入过（热+召回）的物品归一化名，供 _reconcile 判失去
+    }
     return sid
 
 
@@ -58,6 +75,8 @@ def _get(session_id: str) -> dict | None:
         "transcript": data["transcript"],
         "turns": data["turns"],
         "lore": data.get("lore", []),
+        "inventory": data.get("inventory", []),
+        "_injected": [],
     }
     return _CACHE[session_id]
 
@@ -74,7 +93,7 @@ def messages_for_opening(session_id: str) -> list[dict]:
     开场一般无既往见闻/物件，但读档到空局再开场时可能已有见闻，一并注入。
     """
     state = _get(session_id)
-    inject = _injection(state)
+    inject = _injection(state, None)
     content = f"{inject}{OPENING_PROMPT}" if inject else OPENING_PROMPT
     return state["messages"] + [{"role": "user", "content": content}]
 
@@ -122,19 +141,45 @@ def _split_top_level(val: str) -> list[str]:
     return parts
 
 
-def _dossier_from_transcript(transcript: list[dict]) -> str:
-    """从完整 transcript（不受 MAX_TURNS 截断）里，取最近一次的关键物件，
-    拼成"既定物件档案"约束串，抑制跨回合属性漂移。
+# ---- 物品影子库：解析、冷热划分、召回、注入 ----
 
-    来源两处：
-    - 《状态》面板的"资源""法宝"——主角**拥有**的关键物（只取带括号的条目/非空法宝）；
-    - 《物件》块——主角**未拥有**但有剧情分量的关键物（整行留存，含归属）。
+# 名称归一化：去掉括号（属性）、去掉 ——归属 后缀、去掉 ×N 数量、去空白，取主名。
+_QTY_RE = re.compile(r"[×x]\s*\d+\s*$")
 
-    寻常消耗品（无括号）与空块天然排除。都没有则返回 ""。
+
+def _norm_name(raw: str) -> str:
+    """把带属性/归属/数量的物件描述归一到"主名"，用于跨回合匹配与正文子串命中。"""
+    s = raw.strip()
+    # 先切掉 ——归属（《物件》行是 名称（属性）——归属）
+    s = re.split(r"——|—{1,2}|--", s, maxsplit=1)[0]
+    # 去掉第一个括号及其后所有内容（属性）
+    for op in ("（", "("):
+        idx = s.find(op)
+        if idx != -1:
+            s = s[:idx]
+    s = _QTY_RE.sub("", s)
+    return s.strip()
+
+
+def _parse_panel_items(status: str | None, objects: str | None) -> list[dict]:
+    """从本回合面板（《状态》资源/法宝 + 《物件》块）解析出带属性的物件。
+
+    返回 [{name, attrs, kind}]：
+    - 资源行里带括号的条目 → kind="资源"
+    - 法宝行非空 → kind="法宝"
+    - 《物件》整行 → kind="物件"（attrs 取括号内容，name 取主名）
+    寻常消耗品（无括号资源）不入库。
     """
-    items: list[str] = []
+    parsed: list[dict] = []
 
-    status = _latest_block(transcript, _STATUS_RE)
+    def _attrs_of(text: str) -> str:
+        for op, cl in (("（", "）"), ("(", ")")):
+            i = text.find(op)
+            if i != -1:
+                j = text.find(cl, i)
+                return text[i + 1: j if j != -1 else len(text)].strip()
+        return ""
+
     if status:
         for line in status.splitlines():
             line = line.strip()
@@ -145,27 +190,140 @@ def _dossier_from_transcript(transcript: list[dict]) -> str:
             if not val or val in ("无", "暂无", "无。"):
                 continue
             if field == "资源":
-                # 只取带括号（固有属性）的条目。按顿号/逗号拆分，但括号内的
-                # 分隔符不算（否则会把"（触之清凉，内藏硬物）"从中切断）。
                 for part in _split_top_level(val):
                     part = part.strip()
                     if part and ("（" in part or "(" in part):
-                        items.append(f"{part}（随身）")
+                        parsed.append({"name": _norm_name(part), "attrs": _attrs_of(part), "kind": "资源"})
             else:  # 法宝：整行留存
-                items.append(f"法宝：{val}（随身）")
+                parsed.append({"name": _norm_name(val), "attrs": _attrs_of(val), "kind": "法宝"})
 
-    objects = _latest_block(transcript, _OBJECTS_RE)
     if objects:
         for line in objects.splitlines():
             line = line.strip()
             if line:
-                items.append(line)
+                parsed.append({"name": _norm_name(line), "attrs": _attrs_of(line), "kind": "物件"})
 
-    if not items:
+    return parsed
+
+
+def _reconcile_inventory(state: dict, narration: str) -> None:
+    """把本回合面板解析回影子库：新物入库、已知物更新 kind/attrs、失去物移除。
+
+    - last_turn 只由"正文子串命中"刷新（见 _touch_by_narration），此处新物落库时
+      记一次 last_turn=当前turn（首次获得也算"用到"）。注入 ≠ 用到，故不在别处刷。
+    - 失去判定：只针对"上回合注入过（热+召回）却在本回合面板消失"的物品，移除之；
+      纯冷物品（本就不在场景/prompt）不受影响，绝不误删。
+    """
+    inv = state["inventory"]
+    turn = state["turns"]  # commit 里已 +1，此处即本回合序号
+    status = _STATUS_RE.search(narration)
+    objects = _OBJECTS_RE.search(narration)
+    parsed = _parse_panel_items(
+        status.group(1) if status else None,
+        objects.group(1) if objects else None,
+    )
+
+    by_name = {it["name"]: it for it in inv}
+    present = set()
+    for p in parsed:
+        name = p["name"]
+        if not name:
+            continue
+        present.add(name)
+        cur = by_name.get(name)
+        if cur is None:
+            item = {
+                "id": uuid.uuid4().hex,
+                "name": name,
+                "attrs": p["attrs"],
+                "kind": p["kind"],
+                "last_turn": turn,
+            }
+            inv.append(item)
+            by_name[name] = item
+        else:
+            # 已知物：补全空属性、更新 kind（拥有关系可能迁移：物件→资源/法宝）
+            if p["attrs"] and not cur.get("attrs"):
+                cur["attrs"] = p["attrs"]
+            if p["kind"]:
+                cur["kind"] = p["kind"]
+
+    # 失去：上回合注入过、本回合面板里没有了 → LLM 已从面板移除 → 移除出库
+    injected = set(state.get("_injected") or [])
+    if injected:
+        lost = injected - present
+        if lost:
+            state["inventory"] = [it for it in inv if it["name"] not in lost]
+
+    # 正文子串命中刷新 last_turn（含刚入库的新物再确认一次）
+    _touch_by_narration(state, narration)
+
+
+def _touch_by_narration(state: dict, narration: str) -> None:
+    """保温信号：物品的归一化名若在本回合"正文"里被子串命中，则 last_turn=当前turn。
+
+    只看剧情正文（不含面板/提示），因为"剧情在用它"才算热；被注入进 prompt 不算。
+    """
+    body = _narration_body(narration)
+    if not body:
+        return
+    turn = state["turns"]
+    for it in state["inventory"]:
+        name = it.get("name") or ""
+        if name and name in body:
+            it["last_turn"] = turn
+
+
+def _hot_cold(inv: list[dict], turn: int) -> tuple[list[dict], list[dict]]:
+    """按最近相关回合划分热/冷：turn - last_turn < HOT_TURNS 为热，其余为冷。"""
+    hot, cold = [], []
+    for it in inv:
+        if turn - int(it.get("last_turn", 0)) < HOT_TURNS:
+            hot.append(it)
+        else:
+            cold.append(it)
+    return hot, cold
+
+
+def _cand_text(it: dict) -> str:
+    """召回用的候选文本：名 + 属性。"""
+    attrs = it.get("attrs") or ""
+    return f"{it.get('name', '')}　{attrs}".strip()
+
+
+def _recall_cold(state: dict, cold: list[dict], action: str) -> list[dict]:
+    """冷变热：对玩家输入做语义召回，命中的冷物品 last_turn 刷新为当前turn（升回热）。
+
+    embedding 不可用时 embed.recall 返回 []，等价于"不召回"。
+    """
+    if not cold or not action:
+        return []
+    idxs = embed.recall(action, [_cand_text(it) for it in cold],
+                        top_k=RECALL_TOP_K, threshold=RECALL_THRESHOLD)
+    recalled = [cold[i] for i in idxs]
+    turn = state["turns"]
+    for it in recalled:
+        it["last_turn"] = turn
+    return recalled
+
+
+def _item_line(it: dict) -> str:
+    """把一件物品拼成档案行：名称（属性）〔类别〕。"""
+    name = it.get("name", "")
+    attrs = it.get("attrs") or ""
+    kind = it.get("kind") or ""
+    head = f"{name}（{attrs}）" if attrs else name
+    return f"- {head}　类别：{kind}" if kind else f"- {head}"
+
+
+def _inventory_dossier(active: list[dict]) -> str:
+    """把当前相关物品（热+召回）拼成"当前物品档案"约束串。空则 ""。"""
+    if not active:
         return ""
-    lines = "\n".join(f"- {it}" for it in items)
+    lines = "\n".join(_item_line(it) for it in active)
     return (
-        "【既定物件档案（须与之保持一致，括号内属性不可无故矛盾）】\n"
+        "【当前物品档案（仅以下为主角当前相关的持有/关注之物，须与之属性一致；"
+        "勿凭空补列未在此的旧物）】\n"
         f"{lines}\n"
         "以上物件的既定属性除非剧情明确改变，否则须原样沿用。\n\n"
     )
@@ -204,20 +362,32 @@ def _lore_dossier(lore: list[dict]) -> str:
     )
 
 
-def _injection(state: dict) -> str:
-    """行动/开场前注入的约束串：既定物件档案 + 既定见闻。"""
-    return _dossier_from_transcript(state["transcript"]) + _lore_dossier(state["lore"])
+def _injection(state: dict, action: str | None) -> str:
+    """行动/开场前注入的约束串：当前物品档案（热+召回）+ 既定见闻。
+
+    冷热按 turn - last_turn < HOT_TURNS 划分。有玩家输入时对冷物品做语义召回，
+    命中者升回热并并入注入。把本次实际注入的物品名记入 state['_injected']，
+    供下回合 _reconcile 判定"注入过却从面板消失=失去"。
+    """
+    inv = state["inventory"]
+    turn = state["turns"]
+    hot, cold = _hot_cold(inv, turn)
+    recalled = _recall_cold(state, cold, action or "")
+    active = hot + recalled
+    state["_injected"] = [it["name"] for it in active]
+    return _inventory_dossier(active) + _lore_dossier(state["lore"])
 
 
 def messages_for_action(session_id: str, action: str) -> list[dict]:
     """构造用于响应玩家行动的消息。
 
-    在玩家行动前注入"既定物件档案"与"既定见闻"，让关键物件属性与已问明的
-    背景即使在上下文被 MAX_TURNS 截断后也不丢失，抑制跨回合漂移与矛盾。注入串
-    只随本次请求发送，不写入历史（落库仍是玩家原始行动）。
+    在玩家行动前注入"当前物品档案"（热物品 + 按本次输入语义召回的冷物品）与
+    "既定见闻"，让相关物件属性与已问明的背景即使在上下文被 MAX_TURNS 截断后也
+    不丢失。冷物品不进 prompt，故 LLM 不会再把无关旧物抄进面板，物品栏膨胀自止。
+    注入串只随本次请求发送，不写入历史（落库仍是玩家原始行动）。
     """
     state = _get(session_id)
-    inject = _injection(state)
+    inject = _injection(state, action)
     content = f"{inject}{action}" if inject else action
     return state["messages"] + [{"role": "user", "content": content}]
 
@@ -278,7 +448,10 @@ def commit(session_id: str, user_content: str | None, assistant_content: str) ->
 
     state["turns"] += 1
     _trim(state)
+    # 解析本回合面板回影子库（新物入库、失去物移除、正文命中刷 last_turn）
+    _reconcile_inventory(state, assistant_content)
     store.save_state(session_id, state["messages"], state["transcript"], state["turns"])
+    store.save_inventory(session_id, state["inventory"])
 
 
 def _trim(state: dict) -> None:
@@ -287,6 +460,28 @@ def _trim(state: dict) -> None:
     if len(rest) > MAX_TURNS * 2:
         rest = rest[-MAX_TURNS * 2:]
     state["messages"] = [system] + rest
+
+
+# ---- 物品影子库（供前端读档/流结束后渲染冷热分组）----
+
+def get_inventory(session_id: str) -> list[dict] | None:
+    """返回物品库视图，每件带 hot 标记（供前端分组：热=关注区，冷=折叠区）。
+
+    hot = turn - last_turn < HOT_TURNS。存档不存在返回 None。
+    """
+    state = _get(session_id)
+    if state is None:
+        return None
+    turn = state["turns"]
+    view = []
+    for it in state["inventory"]:
+        view.append({
+            "name": it.get("name", ""),
+            "attrs": it.get("attrs", ""),
+            "kind": it.get("kind", ""),
+            "hot": turn - int(it.get("last_turn", 0)) < HOT_TURNS,
+        })
+    return view
 
 
 # ---- 见闻录（问询旁路）----

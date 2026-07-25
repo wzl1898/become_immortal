@@ -66,6 +66,7 @@ async function streamSSE(url, onDelta) {
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let doneData = null;
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
@@ -76,9 +77,11 @@ async function streamSSE(url, onDelta) {
       const evt = parseEvent(raw);
       if (!evt) continue;
       if (evt.event === "delta") onDelta(evt.data.text);
+      else if (evt.event === "done") doneData = evt.data;
       else if (evt.event === "error") throw new Error(evt.data.message);
     }
   }
+  return doneData; // done 事件的 payload（叙事流会带上刷新后的 inventory）
 }
 
 function parseEvent(raw) {
@@ -174,6 +177,35 @@ function renderObjects(objects) {
   }
 }
 
+// 冷物品折叠区：后端结构化库里 hot=false 的物品，收进「其他随身物 (N)」折叠块。
+// 热物品仍由面板文本（《状态》/《物件》）驱动展示，这里只补冷物品。
+function renderColdItems(inventory) {
+  // 先清掉旧的折叠区，避免重复
+  const old = document.getElementById("cold-items");
+  if (old) old.remove();
+  const cold = (inventory || []).filter((it) => it && !it.hot);
+  if (!cold.length) return;
+  if (statusPanel.classList.contains("empty")) statusPanel.classList.remove("empty");
+
+  const details = document.createElement("details");
+  details.id = "cold-items";
+  details.className = "cold-items";
+  const summary = document.createElement("summary");
+  summary.textContent = `其他随身物 (${cold.length})`;
+  details.appendChild(summary);
+
+  for (const it of cold) {
+    const row = document.createElement("div");
+    row.className = "obj-row cold";
+    const head = it.attrs ? `${it.name}（${it.attrs}）` : it.name;
+    row.innerHTML = `<span class="obj-name"></span><span class="obj-loc"></span>`;
+    row.querySelector(".obj-name").textContent = head;
+    row.querySelector(".obj-loc").textContent = it.kind || "";
+    details.appendChild(row);
+  }
+  statusBodyEl.appendChild(details);
+}
+
 // 重放用：把一段完整叙事渲染成正文块（+ 可选提示块），并刷新状态面板
 function renderNarration(full) {
   const { body, status, objects, hint } = splitParts(full);
@@ -187,7 +219,7 @@ async function narrate(url) {
   let hintBlock = null;
   let full = "";
   try {
-    await streamSSE(url, (text) => {
+    const done = await streamSSE(url, (text) => {
       full += text;
       const { body, status, objects, hint } = splitParts(full);
       block.textContent = body;
@@ -198,6 +230,8 @@ async function narrate(url) {
       }
       storyEl.scrollTop = storyEl.scrollHeight;
     });
+    // 流结束：用后端刷新后的结构化库补上冷物品折叠区
+    if (done && done.inventory) renderColdItems(done.inventory);
   } catch (e) {
     block.remove();
     if (hintBlock) hintBlock.remove();
@@ -247,6 +281,8 @@ async function loadGame(sid, name) {
       if (blk.role === "player") addBlock("player", blk.text);
       else renderNarration(blk.text);
     }
+    // 读档还原冷物品折叠区（热物品已随最近一条面板重放出来）
+    if (data.inventory) renderColdItems(data.inventory);
     closeDrawer();
     // 空局（尚未落笔）：直接让 AI 生成开场，而不是停在占位文字上
     if (!data.transcript.length) {

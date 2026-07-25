@@ -130,6 +130,26 @@ html, body {
 .obj-row .obj-name { color: var(--ink); }
 .obj-row .obj-loc { color: var(--muted); font-size: 12px; }
 .obj-row .obj-loc::before { content: "去向："; opacity: 0.7; }
+
+/* 冷物品折叠区：沉底、淡色小字，点开才展示与当前剧情无关的旧物 */
+.cold-items {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed #2a2f38;
+}
+.cold-items > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  list-style: revert;
+  user-select: none;
+}
+.cold-items > summary:hover { color: var(--accent-soft); }
+.cold-items .obj-row.cold { margin-top: 6px; opacity: 0.85; }
+.cold-items .obj-row.cold .obj-loc::before { content: ""; }
+.cold-items .obj-row.cold .obj-loc { opacity: 0.7; }
+
 .status-empty { color: var(--muted); text-align: center; margin: 4px 0; }
 .status-panel:not(.empty) .status-empty { display: none; }
 .status-panel.empty .status-body { display: none; }

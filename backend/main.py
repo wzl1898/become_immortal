@@ -46,7 +46,11 @@ def _sse(event: str, data: dict) -> str:
 
 
 async def _stream(messages: list[dict], on_done):
-    """公共的流式生成器：边流边发 delta，结束后调 on_done(full_text) 落库。"""
+    """公共的流式生成器：边流边发 delta，结束后调 on_done(full_text) 落库。
+
+    on_done 可返回一个 dict 作为 done 事件的 payload（如刷新后的物品库）；返回
+    None 则 done 事件为空。
+    """
     full = []
     try:
         async for piece in stream_chat(messages):
@@ -55,13 +59,16 @@ async def _stream(messages: list[dict], on_done):
     except Exception as e:  # noqa: BLE001
         yield _sse("error", {"message": str(e)})
         return
-    on_done("".join(full))
-    yield _sse("done", {})
+    payload = on_done("".join(full)) or {}
+    yield _sse("done", payload)
 
 
 def _narrate(messages: list[dict], sid: str, user_content: str | None):
-    """叙事流：结束后把这一轮写入会话历史 + transcript。"""
-    return _stream(messages, lambda text: game.commit(sid, user_content, text))
+    """叙事流：结束后把这一轮写入会话历史 + transcript，done 带刷新后的物品库。"""
+    def _done(text: str) -> dict:
+        game.commit(sid, user_content, text)
+        return {"inventory": game.get_inventory(sid) or []}
+    return _stream(messages, _done)
 
 
 def _answer_inquiry(messages: list[dict], sid: str, question: str):
@@ -99,7 +106,12 @@ async def load(sid: str):
     transcript = game.get_transcript(sid)
     if transcript is None:
         raise HTTPException(404, "存档不存在")
-    return {"session_id": sid, "transcript": transcript, "lore": game.get_lore(sid) or []}
+    return {
+        "session_id": sid,
+        "transcript": transcript,
+        "lore": game.get_lore(sid) or [],
+        "inventory": game.get_inventory(sid) or [],
+    }
 
 
 @app.post("/api/rename")
