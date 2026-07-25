@@ -3,6 +3,7 @@
 一个存档(save) = 一整局游戏，包含：
 - messages   : 喂给 LLM 的消息数组（会按轮数截断，省 token）
 - transcript : 展示用的完整剧情，只增不删（读档时重放全程）
+- world_memory : 长期世界记忆（剧情事实、问询、人物、地点、物品等）
 
 单机单进程使用，每次操作开独立连接，简单可靠。
 """
@@ -36,6 +37,7 @@ def init() -> None:
                 transcript  TEXT NOT NULL,   -- JSON: list[dict{role,text}]
                 turns       INTEGER NOT NULL DEFAULT 0,
                 lore        TEXT NOT NULL DEFAULT '[]',  -- JSON: list[dict{q,a,ts}]，见闻录
+                world_memory TEXT NOT NULL DEFAULT '[]', -- JSON: list[dict]，长期世界记忆
                 inventory   TEXT NOT NULL DEFAULT '[]',  -- JSON: list[dict{id,name,attrs,kind,whereabouts,last_turn}]，物品影子库
                 created_at  REAL NOT NULL,
                 updated_at  REAL NOT NULL
@@ -48,6 +50,51 @@ def init() -> None:
             conn.execute("ALTER TABLE saves ADD COLUMN lore TEXT NOT NULL DEFAULT '[]'")
         if "inventory" not in cols:
             conn.execute("ALTER TABLE saves ADD COLUMN inventory TEXT NOT NULL DEFAULT '[]'")
+        if "world_memory" not in cols:
+            conn.execute("ALTER TABLE saves ADD COLUMN world_memory TEXT NOT NULL DEFAULT '[]'")
+        _migrate_lore_to_world_memory(conn)
+
+
+def _migrate_lore_to_world_memory(conn: sqlite3.Connection) -> None:
+    """把旧见闻录迁移成 qa 类型世界记忆；已迁移过的存档不重复写。"""
+    rows = conn.execute(
+        "SELECT id, turns, lore, world_memory FROM saves WHERE lore IS NOT NULL AND lore != '[]'"
+    ).fetchall()
+    for row in rows:
+        try:
+            existing = json.loads(row["world_memory"] or "[]")
+            lore = json.loads(row["lore"] or "[]")
+        except json.JSONDecodeError:
+            continue
+        if existing or not lore:
+            continue
+        migrated = []
+        for entry in lore:
+            q = (entry.get("q") or "").strip()
+            a = (entry.get("a") or "").strip()
+            if not q and not a:
+                continue
+            try:
+                ts = float(entry.get("ts") or time.time())
+            except (TypeError, ValueError):
+                ts = time.time()
+            migrated.append({
+                "id": uuid.uuid4().hex,
+                "type": "qa",
+                "text": f"问：{q}　答：{a}" if q else a,
+                "entities": [],
+                "turn": row["turns"],
+                "importance": 0.7,
+                "source": "inquiry_migration",
+                "q": q,
+                "a": a,
+                "ts": ts,
+            })
+        if migrated:
+            conn.execute(
+                "UPDATE saves SET world_memory=? WHERE id=?",
+                (json.dumps(migrated, ensure_ascii=False), row["id"]),
+            )
 
 
 def create(name: str, messages: list[dict]) -> str:
@@ -87,6 +134,35 @@ def save_lore(sid: str, lore: list[dict]) -> None:
         )
 
 
+def save_world_memory(sid: str, world_memory: list[dict]) -> None:
+    """只更新世界记忆。"""
+    with _conn() as conn:
+        conn.execute(
+            "UPDATE saves SET world_memory=?, updated_at=? WHERE id=?",
+            (json.dumps(world_memory, ensure_ascii=False), time.time(), sid),
+        )
+
+
+def append_world_memory(sid: str, items: list[dict]) -> list[dict] | None:
+    """追加世界记忆并返回新列表；存档不存在返回 None。"""
+    if not items:
+        return load(sid)["world_memory"] if exists(sid) else None
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT world_memory FROM saves WHERE id=?",
+            (sid,),
+        ).fetchone()
+        if row is None:
+            return None
+        current = json.loads(row["world_memory"] or "[]")
+        current.extend(items)
+        conn.execute(
+            "UPDATE saves SET world_memory=?, updated_at=? WHERE id=?",
+            (json.dumps(current, ensure_ascii=False), time.time(), sid),
+        )
+        return current
+
+
 def save_inventory(sid: str, inventory: list[dict]) -> None:
     """只更新物品影子库。"""
     with _conn() as conn:
@@ -109,6 +185,7 @@ def load(sid: str) -> dict | None:
         "transcript": json.loads(row["transcript"]),
         "turns": row["turns"],
         "lore": json.loads(row["lore"] or "[]"),
+        "world_memory": json.loads(row["world_memory"] or "[]"),
         "inventory": json.loads(row["inventory"] or "[]"),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],

@@ -10,7 +10,7 @@
 - 网页端流式打字机效果，边生成边显示。「新的一世」可开新局。
 - **自动存档**：每一手都写入 SQLite，重启不丢。点「存档」可查看所有历世、读档重放、改名或删除。启动时自动续上最近一局。
 - **状态与物品记忆**：AI 每回合输出身体状态与关键物件，后端维护物品影子库；近期相关物品会注入后续生成，冷物品收进折叠区，玩家提及时再召回。
-- **见闻录**：点「见闻」可打听主角此刻理应知道的背景；问明的内容会成为后续剧情约束，但不推进剧情。
+- **世界记忆**：点「记忆」可查看长期剧情事实，也可打听主角此刻理应知道的背景；问答与每轮提取出的关键情节会按需召回，约束后续剧情。
 
 ## 技术栈
 
@@ -88,8 +88,8 @@ frontend/
 
 - 存档落在 `backend/data/saves.db`（SQLite，已在 `.gitignore` 中忽略）。
 - 每完成一手（行动 + 续写）自动写盘，进程重启不丢。
-- 每个存档包含：`messages`（喂给 LLM 的上下文，按 40 轮截断省 token）、`transcript`（展示用完整剧情，只增不删）、`lore`（见闻录）与 `inventory`（物品影子库）。
-- 相关接口：`GET /api/saves` 列表、`GET /api/load` 读档、`POST /api/action` 行动续写、`POST /api/inquiry` 见闻问答、`GET /api/lore` 见闻列表、`POST /api/lore/delete` 删除见闻、`POST /api/rename` 改名、`POST /api/delete` 删除。
+- 每个存档包含：`messages`（喂给 LLM 的上下文，按 40 轮截断省 token）、`transcript`（展示用完整剧情，只增不删）、`world_memory`（长期世界记忆）与 `inventory`（物品影子库）。旧库中的 `lore` 会自动迁移为 `qa` 类型世界记忆。
+- 相关接口：`GET /api/saves` 列表、`GET /api/load` 读档、`POST /api/action` 行动续写、`POST /api/inquiry` 世界记忆问答、`GET /api/world-memory` 世界记忆列表、`POST /api/world-memory/delete` 删除世界记忆、`POST /api/rename` 改名、`POST /api/delete` 删除。旧 `/api/lore` 接口保留兼容。
 
 ## 物品召回
 

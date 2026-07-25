@@ -250,7 +250,7 @@ html, body {
 .save-empty { color: var(--muted); text-align: center; padding: 20px 0; }
 .save-empty.hidden { display: none; }
 
-/* 见闻抽屉 */
+/* 世界记忆抽屉 */
 .lore-tip { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
 .lore-list { list-style: none; margin: 0; padding: 0; flex: 1;
   display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
@@ -260,11 +260,13 @@ html, body {
 }
 .lore-item .q { color: var(--ink); font-size: 14px; line-height: 1.6; }
 .lore-item .q::before { content: "问 "; color: var(--player); font-weight: 700; }
+.lore-item.memory .q::before { content: "类 "; }
 .lore-item .a {
   margin-top: 8px; color: var(--accent-soft); opacity: 0.9;
   font-size: 14px; line-height: 1.7; white-space: pre-wrap;
 }
 .lore-item .a::before { content: "答 "; color: var(--accent); font-weight: 700; opacity: 1; }
+.lore-item.memory .a::before { content: "记 "; }
 .lore-item .a.error { color: var(--danger); }
 .lore-item .del {
   margin-top: 10px; font-family: inherit; font-size: 12px; padding: 3px 10px;

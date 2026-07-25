@@ -8,9 +8,9 @@
 - GET  /api/load?sid=...         读档，返回完整剧情用于重放
 - POST /api/rename              重命名存档
 - POST /api/delete              删除存档
-- POST /api/inquiry             SSE 流式返回见闻问答
-- GET  /api/lore?sid=...        读取见闻录
-- POST /api/lore/delete         删除一条见闻
+- POST /api/inquiry             SSE 流式返回世界记忆问答
+- GET  /api/world-memory?sid=... 读取世界记忆
+- POST /api/world-memory/delete 删除一条世界记忆
 - 静态前端挂在 /
 """
 
@@ -75,8 +75,8 @@ def _narrate(messages: list[dict], sid: str, user_content: str | None):
 
 
 def _answer_inquiry(messages: list[dict], sid: str, question: str):
-    """见闻问询流：结束后只把问答追加进见闻录，不推进剧情。"""
-    return _stream(messages, lambda text: game.commit_lore(sid, question, text))
+    """问询流：结束后只把问答追加进世界记忆，不推进剧情。"""
+    return _stream(messages, lambda text: game.commit_inquiry_memory(sid, question, text))
 
 
 class NewGameBody(BaseModel):
@@ -122,7 +122,8 @@ async def load(sid: str):
     return {
         "session_id": sid,
         "transcript": transcript,
-        "lore": game.get_lore(sid) or [],
+        "world_memory": game.get_world_memory(sid) or [],
+        "lore": game.get_world_memory(sid) or [],
         "inventory": game.get_inventory(sid) or [],
     }
 
@@ -178,9 +179,9 @@ async def action_legacy(sid: str, text: str):
     return _action_response(sid, text)
 
 
-# ---- 见闻问询（旁路：不推进剧情，只补全背景）----
+# ---- 世界记忆问询（旁路：不推进剧情，只补全背景）----
 
-class LoreDeleteBody(BaseModel):
+class WorldMemoryDeleteBody(BaseModel):
     sid: str
     index: int
 
@@ -208,20 +209,30 @@ async def inquiry_legacy(sid: str, q: str):
     return _inquiry_response(sid, q)
 
 
-@app.get("/api/lore")
-async def lore(sid: str):
-    items = game.get_lore(sid)
+@app.get("/api/world-memory")
+async def world_memory(sid: str):
+    items = game.get_world_memory(sid)
     if items is None:
         raise HTTPException(404, "存档不存在")
-    return {"lore": items}
+    return {"world_memory": items, "lore": items}
+
+
+@app.post("/api/world-memory/delete")
+async def world_memory_delete(body: WorldMemoryDeleteBody):
+    items = game.delete_world_memory(body.sid, body.index)
+    if items is None:
+        raise HTTPException(404, "世界记忆不存在")
+    return {"ok": True, "world_memory": items, "lore": items}
+
+
+@app.get("/api/lore")
+async def lore_compat(sid: str):
+    return await world_memory(sid)
 
 
 @app.post("/api/lore/delete")
-async def lore_delete(body: LoreDeleteBody):
-    items = game.delete_lore(body.sid, body.index)
-    if items is None:
-        raise HTTPException(404, "见闻不存在")
-    return {"ok": True, "lore": items}
+async def lore_delete_compat(body: WorldMemoryDeleteBody):
+    return await world_memory_delete(body)
 
 
 # ---- 开发用前端热更新（LIVE_RELOAD=1 时启用）----

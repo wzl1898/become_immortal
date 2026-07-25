@@ -29,7 +29,7 @@ function clearStatus() {
 let sessionId = null;
 let currentName = "";
 let busy = false;
-let lore = []; // 见闻录，[{q, a, ts}]
+let worldMemory = []; // 世界记忆，含 qa 与自动提取的长期事实
 let loreBusy = false; // 问询独立忙态，不锁主行动
 
 function addBlock(kind, text = "") {
@@ -256,7 +256,7 @@ async function newGame() {
   setBusy(true);
   storyEl.innerHTML = "";
   clearStatus();
-  lore = [];
+  worldMemory = [];
   addBlock("narration", "　　天地灵气涌动，你的故事即将开始……").classList.add("cursor");
   try {
     const data = await fetchJSON("/api/new", {
@@ -281,7 +281,7 @@ async function loadGame(sid, name) {
   try {
     const data = await fetchJSON(`/api/load?sid=${sid}`);
     setCurrent(sid, name);
-    lore = data.lore || [];
+    worldMemory = data.world_memory || data.lore || [];
     storyEl.innerHTML = "";
     clearStatus();
     for (const blk of data.transcript) {
@@ -405,7 +405,7 @@ async function deleteSave(s) {
       setCurrent(null, "");
       storyEl.innerHTML = "";
       clearStatus();
-      lore = [];
+      worldMemory = [];
     }
     renderSaves();
   } catch (e) {
@@ -417,10 +417,20 @@ savesBtn.addEventListener("click", openDrawer);
 drawerClose.addEventListener("click", closeDrawer);
 drawer.querySelector(".drawer-mask").addEventListener("click", closeDrawer);
 
-// ---- 见闻抽屉（问询旁路）----
-function openLoreDrawer() {
+// ---- 世界记忆抽屉（问询旁路）----
+async function fetchWorldMemory() {
+  const data = await fetchJSON(`/api/world-memory?sid=${sessionId}`);
+  return data.world_memory || data.lore || [];
+}
+
+async function openLoreDrawer() {
   if (!sessionId) return;
   loreDrawer.classList.remove("hidden");
+  try {
+    worldMemory = await fetchWorldMemory();
+  } catch (_) {
+    // 保留本地已有记忆，抽屉仍可打开。
+  }
   renderLore();
   loreInput.focus();
 }
@@ -428,33 +438,39 @@ function closeLoreDrawer() { loreDrawer.classList.add("hidden"); }
 
 function renderLore() {
   loreListEl.innerHTML = "";
-  loreEmptyEl.classList.toggle("hidden", lore.length > 0);
-  lore.forEach((item, i) => loreListEl.appendChild(renderLoreItem(item, i)));
+  loreEmptyEl.classList.toggle("hidden", worldMemory.length > 0);
+  worldMemory.forEach((item, i) => loreListEl.appendChild(renderLoreItem(item, i)));
 }
 
 function renderLoreItem(item, index) {
   const li = document.createElement("li");
-  li.className = "lore-item";
+  const type = item.type || "plot";
+  li.className = `lore-item ${type === "qa" ? "qa" : "memory"}`;
   li.innerHTML = `
     <div class="q"></div>
     <div class="a"></div>
-    <button class="del" title="删除这条见闻">删除</button>`;
-  li.querySelector(".q").textContent = item.q;
-  li.querySelector(".a").textContent = item.a;
+    <button class="del" title="删除这条世界记忆">删除</button>`;
+  if (type === "qa") {
+    li.querySelector(".q").textContent = item.q || "";
+    li.querySelector(".a").textContent = item.a || item.text || "";
+  } else {
+    li.querySelector(".q").textContent = `[${type}] ${item.entities && item.entities.length ? item.entities.join("、") : "剧情记忆"}`;
+    li.querySelector(".a").textContent = item.text || "";
+  }
   li.querySelector(".del").addEventListener("click", () => deleteLoreItem(index));
   return li;
 }
 
 async function deleteLoreItem(index) {
   if (loreBusy) return;
-  if (!confirm("删除这条见闻？此后剧情将不再受它约束。")) return;
+  if (!confirm("删除这条世界记忆？此后剧情将不再受它约束。")) return;
   try {
-    const data = await fetchJSON("/api/lore/delete", {
+    const data = await fetchJSON("/api/world-memory/delete", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sid: sessionId, index }),
     });
-    lore = data.lore || [];
+    worldMemory = data.world_memory || data.lore || [];
     renderLore();
   } catch (e) {
     alert(e.message);
@@ -492,7 +508,11 @@ async function askLore(q) {
       },
     );
     // 后端已落库，同步到内存并重渲染（补上删除按钮）
-    lore.push({ q, a: aEl.textContent, ts: Date.now() / 1000 });
+    try {
+      worldMemory = await fetchWorldMemory();
+    } catch (_) {
+      worldMemory.push({ type: "qa", q, a: aEl.textContent, ts: Date.now() / 1000 });
+    }
     renderLore();
   } catch (e) {
     aEl.classList.remove("cursor");

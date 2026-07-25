@@ -3,28 +3,41 @@
 内存里缓存活跃存档，SQLite 落盘。每手结束 write-through 写库，
 重启后可从库里读档继续。
 
-每个存档维护两份数据：
+每个存档维护三份核心数据：
 - messages   : 喂给 LLM 的消息（system + user/assistant，按 MAX_TURNS 截断）
 - transcript : 展示用剧情块列表 [{role: narration|player, text}]，只增不删
+- world_memory : 长期世界记忆，独立于短期上下文窗口，按需召回注入
 """
 
+import asyncio
+import json
+import logging
 import re
 import time
 import uuid
 
 import embed
 import store
-from prompts import INQUIRY_SYSTEM_PROMPT, OPENING_PROMPT, SYSTEM_PROMPT
+from llm import complete_chat
+from prompts import (
+    INQUIRY_SYSTEM_PROMPT,
+    MEMORY_EXTRACT_SYSTEM_PROMPT,
+    OPENING_PROMPT,
+    SYSTEM_PROMPT,
+)
 
-# save_id -> {"messages": list[dict], "transcript": list[dict], "turns": int, "lore": list[dict]}
+# save_id -> {"messages": list[dict], "transcript": list[dict], "turns": int, "world_memory": list[dict]}
 _CACHE: dict[str, dict] = {}
+_LOG = logging.getLogger(__name__)
 
 # 保留的历史轮数（system 之外），防止上下文无限增长
 MAX_TURNS = 40
 
-# 见闻录注入后续生成时的规模上限：只取最近 N 条，且总长截断到约 M 字
-LORE_INJECT_MAX_ITEMS = 12
-LORE_INJECT_MAX_CHARS = 1500
+# 世界记忆注入后续生成时的规模上限。
+WORLD_MEMORY_RECALL_TOP_K = 8
+WORLD_MEMORY_RECALL_THRESHOLD = 0.32
+WORLD_MEMORY_INJECT_MAX_CHARS = 2200
+MEMORY_EXTRACT_MAX_ITEMS = 5
 
 # 喂给问询的"当前情境"取最近多少条 narration 的正文
 INQUIRY_SCENE_TURNS = 3
@@ -52,7 +65,7 @@ def create_session(name: str = DEFAULT_NAME) -> str:
         "messages": messages,
         "transcript": [],
         "turns": 0,
-        "lore": [],
+        "world_memory": [],
         "inventory": [],
         "_injected": [],  # 上一回合注入过（热+召回）的物品归一化名，供 _reconcile 判失去
     }
@@ -79,7 +92,7 @@ def _get(session_id: str) -> dict | None:
         "messages": data["messages"],
         "transcript": data["transcript"],
         "turns": data["turns"],
-        "lore": data.get("lore", []),
+        "world_memory": data.get("world_memory", []),
         "inventory": data.get("inventory", []),
         "_injected": [],
     }
@@ -95,7 +108,7 @@ def get_transcript(session_id: str) -> list[dict] | None:
 def messages_for_opening(session_id: str) -> list[dict]:
     """构造用于生成开场的消息（不落库，落库由 commit 完成）。
 
-    开场一般无既往见闻/物件，但读档到空局再开场时可能已有见闻，一并注入。
+    开场一般无既往世界记忆/物件，但读档到空局再开场时可能已有世界记忆，一并注入。
     """
     state = _get(session_id)
     inject = _injection(state, None)
@@ -380,41 +393,82 @@ def _inventory_dossier(active: list[dict]) -> str:
     )
 
 
-def _lore_dossier(lore: list[dict]) -> str:
-    """把见闻录拼成"既定见闻"约束串，注入后续生成，防止情节与已答背景矛盾。
+def _memory_text(mem: dict) -> str:
+    """召回/注入用的记忆文本。"""
+    if mem.get("type") == "qa":
+        q = (mem.get("q") or "").strip()
+        a = (mem.get("a") or "").strip()
+        return f"问：{q}　答：{a}" if q else a
+    return (mem.get("text") or "").strip()
 
-    见闻是玩家问出、并已锚定为设定的背景。取最近若干条，总长截断防膨胀。
-    空则返回 ""。
-    """
-    if not lore:
+
+def _memory_candidate(mem: dict) -> str:
+    entities = " ".join(str(e) for e in mem.get("entities") or [])
+    return f"{mem.get('type', '')} {entities} {_memory_text(mem)}".strip()
+
+
+def _num(val, default: float = 0.0) -> float:
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return default
+
+
+def _fallback_memories(world_memory: list[dict]) -> list[dict]:
+    """embedding 不可用时退回最近且较重要的记忆，保证长期事实不完全断供。"""
+    items = sorted(
+        world_memory,
+        key=lambda m: (_num(m.get("importance")), _num(m.get("ts"))),
+        reverse=True,
+    )
+    return items[:WORLD_MEMORY_RECALL_TOP_K]
+
+
+def _recall_world_memory(state: dict, query: str) -> list[dict]:
+    """按玩家输入与最近场景召回世界记忆。"""
+    world_memory = state.get("world_memory") or []
+    if not world_memory:
+        return []
+    candidates = [_memory_candidate(m) for m in world_memory]
+    idxs = embed.recall(
+        query,
+        candidates,
+        top_k=WORLD_MEMORY_RECALL_TOP_K,
+        threshold=WORLD_MEMORY_RECALL_THRESHOLD,
+    )
+    if not idxs:
+        return _fallback_memories(world_memory)
+    return [world_memory[i] for i in idxs]
+
+
+def _world_memory_dossier(items: list[dict]) -> str:
+    """把召回到的长期记忆拼成约束串，注入后续生成。空则返回 ""。"""
+    if not items:
         return ""
-    items = lore[-LORE_INJECT_MAX_ITEMS:]
     lines: list[str] = []
     used = 0
-    # 从最近往前取，直到字数预算用尽，再恢复时间顺序
-    for entry in reversed(items):
-        q = (entry.get("q") or "").strip()
-        a = (entry.get("a") or "").strip()
-        if not a:
+    for entry in items:
+        text = _memory_text(entry)
+        if not text:
             continue
-        line = f"- 问：{q}　答：{a}"
-        if used + len(line) > LORE_INJECT_MAX_CHARS and lines:
+        kind = entry.get("type") or "plot"
+        line = f"- [{kind}] {text}"
+        if used + len(line) > WORLD_MEMORY_INJECT_MAX_CHARS and lines:
             break
         lines.append(line)
         used += len(line)
     if not lines:
         return ""
-    lines.reverse()
     body = "\n".join(lines)
     return (
-        "【既定见闻（主角已问明的背景，须与之一致，不可矛盾）】\n"
+        "【世界记忆（长期事实，来自过往剧情与问询；须与之一致）】\n"
         f"{body}\n"
-        "以上背景一经答明即为设定，后续剧情须与之吻合。\n\n"
+        "【/世界记忆】\n\n"
     )
 
 
 def _injection(state: dict, action: str | None) -> str:
-    """行动/开场前注入的约束串：当前物品档案（热+召回）+ 既定见闻。
+    """行动/开场前注入的约束串：当前物品档案（热+召回）+ 世界记忆。
 
     冷热按 turn - last_turn < HOT_TURNS 划分。有玩家输入时对冷物品做语义召回，
     命中者升回热并并入注入。把本次实际注入的物品名记入 state['_injected']，
@@ -426,14 +480,16 @@ def _injection(state: dict, action: str | None) -> str:
     recalled = _recall_cold(state, cold, action or "")
     active = hot + recalled
     state["_injected"] = [it["name"] for it in active]
-    return _inventory_dossier(active) + _lore_dossier(state["lore"])
+    query = "\n\n".join(p for p in (action or "", _recent_scene(state["transcript"])) if p)
+    memories = _recall_world_memory(state, query)
+    return _inventory_dossier(active) + _world_memory_dossier(memories)
 
 
 def messages_for_action(session_id: str, action: str) -> list[dict]:
     """构造用于响应玩家行动的消息。
 
     在玩家行动前注入"当前物品档案"（热物品 + 按本次输入语义召回的冷物品）与
-    "既定见闻"，让相关物件属性与已问明的背景即使在上下文被 MAX_TURNS 截断后也
+    "世界记忆"，让相关物件属性与已问明的背景即使在上下文被 MAX_TURNS 截断后也
     不丢失。冷物品不进 prompt，故 LLM 不会再把无关旧物抄进面板，物品栏膨胀自止。
     注入串只随本次请求发送，不写入历史（落库仍是玩家原始行动）。
     """
@@ -458,19 +514,20 @@ def _recent_scene(transcript: list[dict]) -> str:
 
 
 def messages_for_inquiry(session_id: str, question: str) -> list[dict]:
-    """构造用于"见闻"问询的独立消息数组（不复用 GM 历史）。
+    """构造用于"世界记忆"问询的独立消息数组（不复用 GM 历史）。
 
-    只给问询引擎：当前情境（最近情节正文）+ 既往见闻 + 玩家的问题，
-    让它基于"主角此刻理应知道的见识"作答，且与已发生剧情、既往见闻一致。
+    只给问询引擎：当前情境（最近情节正文）+ 相关世界记忆 + 玩家的问题，
+    让它基于"主角此刻理应知道的见识"作答，且与已发生剧情、长期记忆一致。
     """
     state = _get(session_id)
     scene = _recent_scene(state["transcript"])
-    lore = _lore_dossier(state["lore"])
+    query = "\n\n".join(p for p in (question, scene) if p)
+    memory = _world_memory_dossier(_recall_world_memory(state, query))
     parts = []
     if scene:
         parts.append(f"【当前情境（主角所处的最近情节）】\n{scene}")
-    if lore:
-        parts.append(lore.rstrip())
+    if memory:
+        parts.append(memory.rstrip())
     parts.append(f"【主角想打听的】\n{question}")
     user_content = "\n\n".join(parts)
     return [
@@ -505,6 +562,118 @@ def commit(session_id: str, user_content: str | None, assistant_content: str) ->
     _reconcile_inventory(state, assistant_content)
     store.save_state(session_id, state["messages"], state["transcript"], state["turns"])
     store.save_inventory(session_id, state["inventory"])
+    _schedule_memory_extraction(session_id, user_content, assistant_content, state["turns"])
+
+
+def _schedule_memory_extraction(
+    session_id: str,
+    user_content: str | None,
+    assistant_content: str,
+    turn: int,
+) -> None:
+    """后台提取长期记忆；没有运行中的事件循环时跳过，不影响主流程。"""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    loop.create_task(_extract_and_store_memory(session_id, user_content, assistant_content, turn))
+
+
+async def _extract_and_store_memory(
+    session_id: str,
+    user_content: str | None,
+    assistant_content: str,
+    turn: int,
+) -> None:
+    try:
+        raw = await complete_chat(
+            [
+                {"role": "system", "content": MEMORY_EXTRACT_SYSTEM_PROMPT},
+                {"role": "user", "content": _memory_extract_user_prompt(user_content, assistant_content, turn)},
+            ],
+            temperature=0.2,
+            max_tokens=800,
+        )
+        items = _parse_extracted_memories(raw, turn)
+        if not items:
+            return
+        current = store.append_world_memory(session_id, items)
+        if current is not None and session_id in _CACHE:
+            _CACHE[session_id]["world_memory"] = current
+    except Exception:  # noqa: BLE001
+        _LOG.exception("world memory extraction failed for session %s turn %s", session_id, turn)
+
+
+def _memory_extract_user_prompt(user_content: str | None, assistant_content: str, turn: int) -> str:
+    status = _STATUS_RE.search(assistant_content)
+    objects = _OBJECTS_RE.search(assistant_content)
+    body = _narration_body(assistant_content)
+    action = user_content if user_content is not None else "（开始这一世）"
+    parts = [
+        f"【回合】\n{turn}",
+        f"【玩家行动】\n{action}",
+        f"【本轮叙事正文】\n{body}",
+    ]
+    if status:
+        parts.append(f"【状态面板】\n{status.group(1).strip()}")
+    if objects:
+        parts.append(f"【关键物件面板】\n{objects.group(1).strip()}")
+    return "\n\n".join(parts)
+
+
+def _extract_json_array(raw: str) -> list | None:
+    text = (raw or "").strip()
+    if not text:
+        return None
+    fence = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
+    if fence:
+        text = fence.group(1).strip()
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        start, end = text.find("["), text.rfind("]")
+        if start == -1 or end == -1 or end <= start:
+            return None
+        try:
+            data = json.loads(text[start:end + 1])
+        except json.JSONDecodeError:
+            return None
+    return data if isinstance(data, list) else None
+
+
+def _parse_extracted_memories(raw: str, turn: int) -> list[dict]:
+    data = _extract_json_array(raw)
+    if not data:
+        return []
+    allowed = {"plot", "character", "item", "location"}
+    items: list[dict] = []
+    now = time.time()
+    for entry in data[:MEMORY_EXTRACT_MAX_ITEMS]:
+        if not isinstance(entry, dict):
+            continue
+        kind = entry.get("type")
+        text = (entry.get("text") or "").strip()
+        if kind not in allowed or not text:
+            continue
+        entities = entry.get("entities") or []
+        if not isinstance(entities, list):
+            entities = []
+        try:
+            importance = float(entry.get("importance", 0.5))
+        except (TypeError, ValueError):
+            importance = 0.5
+        importance = max(0.0, min(1.0, importance))
+        items.append({
+            "id": uuid.uuid4().hex,
+            "type": kind,
+            "text": text,
+            "entities": [str(e).strip() for e in entities if str(e).strip()][:12],
+            "turn": turn,
+            "importance": importance,
+            "source": "extractor",
+            "ts": now,
+        })
+    return items
 
 
 def _trim(state: dict) -> None:
@@ -538,33 +707,60 @@ def get_inventory(session_id: str) -> list[dict] | None:
     return view
 
 
-# ---- 见闻录（问询旁路）----
+# ---- 世界记忆（含问询旁路）----
 
-def get_lore(session_id: str) -> list[dict] | None:
+def get_world_memory(session_id: str) -> list[dict] | None:
     state = _get(session_id)
-    return None if state is None else state["lore"]
+    return None if state is None else state["world_memory"]
 
 
-def commit_lore(session_id: str, question: str, answer: str) -> None:
-    """把一次问答追加进见闻录并落盘（不碰 messages/transcript）。"""
+def commit_inquiry_memory(session_id: str, question: str, answer: str) -> None:
+    """把一次问答追加进世界记忆并落盘（不碰 messages/transcript）。"""
     state = _get(session_id)
     if state is None:
         return
-    state["lore"].append({"q": question, "a": answer, "ts": time.time()})
-    store.save_lore(session_id, state["lore"])
+    item = {
+        "id": uuid.uuid4().hex,
+        "type": "qa",
+        "text": f"问：{question}　答：{answer}",
+        "entities": [],
+        "turn": state["turns"],
+        "importance": 0.7,
+        "source": "inquiry",
+        "q": question,
+        "a": answer,
+        "ts": time.time(),
+    }
+    current = store.append_world_memory(session_id, [item])
+    state["world_memory"] = current if current is not None else state["world_memory"] + [item]
 
 
-def delete_lore(session_id: str, index: int) -> list[dict] | None:
-    """按下标删除一条见闻，落盘并返回新列表；下标越界或存档不存在返回 None。"""
+def delete_world_memory(session_id: str, index: int) -> list[dict] | None:
+    """按下标删除一条世界记忆，落盘并返回新列表；下标越界或存档不存在返回 None。"""
     state = _get(session_id)
     if state is None:
         return None
-    lore = state["lore"]
-    if not (0 <= index < len(lore)):
+    world_memory = state["world_memory"]
+    if not (0 <= index < len(world_memory)):
         return None
-    lore.pop(index)
-    store.save_lore(session_id, lore)
-    return lore
+    world_memory.pop(index)
+    store.save_world_memory(session_id, world_memory)
+    return world_memory
+
+
+def get_lore(session_id: str) -> list[dict] | None:
+    """兼容旧接口命名：返回世界记忆。"""
+    return get_world_memory(session_id)
+
+
+def commit_lore(session_id: str, question: str, answer: str) -> None:
+    """兼容旧接口命名：把问询写成 qa 类型世界记忆。"""
+    commit_inquiry_memory(session_id, question, answer)
+
+
+def delete_lore(session_id: str, index: int) -> list[dict] | None:
+    """兼容旧接口命名：删除世界记忆。"""
+    return delete_world_memory(session_id, index)
 
 
 # ---- 存档管理（转发到 store）----
