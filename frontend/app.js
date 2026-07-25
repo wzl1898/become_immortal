@@ -56,8 +56,8 @@ function setCurrent(sid, name) {
 }
 
 // ---- SSE 流式 ----
-async function streamSSE(url, onDelta) {
-  const resp = await fetch(url);
+async function streamSSE(url, onDelta, options = {}) {
+  const resp = await fetch(url, options);
   if (!resp.ok) {
     let msg = `请求失败 ${resp.status}`;
     try { msg = (await resp.json()).detail || msg; } catch (_) {}
@@ -82,6 +82,14 @@ async function streamSSE(url, onDelta) {
     }
   }
   return doneData; // done 事件的 payload（叙事流会带上刷新后的 inventory）
+}
+
+async function fetchJSON(url, options = {}) {
+  const resp = await fetch(url, options);
+  let data = {};
+  try { data = await resp.json(); } catch (_) {}
+  if (!resp.ok) throw new Error(data.detail || `请求失败 ${resp.status}`);
+  return data;
 }
 
 function parseEvent(raw) {
@@ -198,9 +206,10 @@ function renderColdItems(inventory) {
     const row = document.createElement("div");
     row.className = "obj-row cold";
     const head = it.attrs ? `${it.name}（${it.attrs}）` : it.name;
+    const place = it.whereabouts || it.kind || "";
     row.innerHTML = `<span class="obj-name"></span><span class="obj-loc"></span>`;
     row.querySelector(".obj-name").textContent = head;
-    row.querySelector(".obj-loc").textContent = it.kind || "";
+    row.querySelector(".obj-loc").textContent = place;
     details.appendChild(row);
   }
   statusBodyEl.appendChild(details);
@@ -214,7 +223,7 @@ function renderNarration(full) {
   if (hint) addBlock("hint", hint);
 }
 
-async function narrate(url) {
+async function narrate(url, options = {}) {
   const block = addBlock("narration cursor");
   let hintBlock = null;
   let full = "";
@@ -229,7 +238,7 @@ async function narrate(url) {
         hintBlock.textContent = hint;
       }
       storyEl.scrollTop = storyEl.scrollHeight;
-    });
+    }, options);
     // 流结束：用后端刷新后的结构化库补上冷物品折叠区
     if (done && done.inventory) renderColdItems(done.inventory);
   } catch (e) {
@@ -250,17 +259,17 @@ async function newGame() {
   lore = [];
   addBlock("narration", "　　天地灵气涌动，你的故事即将开始……").classList.add("cursor");
   try {
-    const resp = await fetch("/api/new", {
+    const data = await fetchJSON("/api/new", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
     });
-    const data = await resp.json();
     setCurrent(data.session_id, "无名修士");
     storyEl.innerHTML = "";
     await narrate(`/api/opening?sid=${sessionId}`);
-  } catch (_) {
-    // 错误已在 narrate 里展示
+  } catch (e) {
+    storyEl.innerHTML = "";
+    addBlock("error", `【出错】${e.message}`);
   } finally {
     setBusy(false);
   }
@@ -270,9 +279,7 @@ async function newGame() {
 async function loadGame(sid, name) {
   setBusy(true);
   try {
-    const resp = await fetch(`/api/load?sid=${sid}`);
-    if (!resp.ok) throw new Error((await resp.json()).detail || "读档失败");
-    const data = await resp.json();
+    const data = await fetchJSON(`/api/load?sid=${sid}`);
     setCurrent(sid, name);
     lore = data.lore || [];
     storyEl.innerHTML = "";
@@ -303,7 +310,11 @@ form.addEventListener("submit", async (e) => {
   addBlock("player", text);
   setBusy(true);
   try {
-    await narrate(`/api/action?sid=${sessionId}&text=${encodeURIComponent(text)}`);
+    await narrate("/api/action", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sid: sessionId, text }),
+    });
   } catch (_) {
     // 已展示
   } finally {
@@ -368,24 +379,38 @@ function renderSaveItem(s) {
 async function renameSave(s) {
   const name = prompt("给这一世取个名字：", s.name);
   if (!name || !name.trim()) return;
-  await fetch("/api/rename", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sid: s.id, name: name.trim() }),
-  });
-  if (s.id === sessionId) setCurrent(sessionId, name.trim());
-  renderSaves();
+  try {
+    await fetchJSON("/api/rename", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sid: s.id, name: name.trim() }),
+    });
+    if (s.id === sessionId) setCurrent(sessionId, name.trim());
+    renderSaves();
+  } catch (e) {
+    alert(e.message);
+  }
 }
 
 async function deleteSave(s) {
   if (!confirm(`确定删除《${s.name}》？此操作不可恢复。`)) return;
-  await fetch("/api/delete", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sid: s.id }),
-  });
-  if (s.id === sessionId) { sessionId = null; setCurrent(null, ""); }
-  renderSaves();
+  try {
+    await fetchJSON("/api/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sid: s.id }),
+    });
+    if (s.id === sessionId) {
+      sessionId = null;
+      setCurrent(null, "");
+      storyEl.innerHTML = "";
+      clearStatus();
+      lore = [];
+    }
+    renderSaves();
+  } catch (e) {
+    alert(e.message);
+  }
 }
 
 savesBtn.addEventListener("click", openDrawer);
@@ -424,13 +449,12 @@ async function deleteLoreItem(index) {
   if (loreBusy) return;
   if (!confirm("删除这条见闻？此后剧情将不再受它约束。")) return;
   try {
-    const resp = await fetch("/api/lore/delete", {
+    const data = await fetchJSON("/api/lore/delete", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sid: sessionId, index }),
     });
-    if (!resp.ok) throw new Error((await resp.json()).detail || "删除失败");
-    lore = (await resp.json()).lore || [];
+    lore = data.lore || [];
     renderLore();
   } catch (e) {
     alert(e.message);
@@ -455,10 +479,18 @@ async function askLore(q) {
   loreListEl.appendChild(li);
   li.scrollIntoView({ block: "end" });
   try {
-    await streamSSE(`/api/inquiry?sid=${sessionId}&q=${encodeURIComponent(q)}`, (text) => {
-      aEl.textContent += text;
-      li.scrollIntoView({ block: "end" });
-    });
+    await streamSSE(
+      "/api/inquiry",
+      (text) => {
+        aEl.textContent += text;
+        li.scrollIntoView({ block: "end" });
+      },
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sid: sessionId, q }),
+      },
+    );
     // 后端已落库，同步到内存并重渲染（补上删除按钮）
     lore.push({ q, a: aEl.textContent, ts: Date.now() / 1000 });
     renderLore();

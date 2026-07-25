@@ -9,11 +9,14 @@
 - AI 根据世界逻辑推进剧情，选择有真实后果。
 - 网页端流式打字机效果，边生成边显示。「新的一世」可开新局。
 - **自动存档**：每一手都写入 SQLite，重启不丢。点「存档」可查看所有历世、读档重放、改名或删除。启动时自动续上最近一局。
+- **状态与物品记忆**：AI 每回合输出身体状态与关键物件，后端维护物品影子库；近期相关物品会注入后续生成，冷物品收进折叠区，玩家提及时再召回。
+- **见闻录**：点「见闻」可打听主角此刻理应知道的背景；问明的内容会成为后续剧情约束，但不推进剧情。
 
 ## 技术栈
 
 - 后端：FastAPI + httpx，SSE 流式转发
 - 前端：原生 HTML/CSS/JS，`fetch` 读 SSE 流
+- 本地召回：fastembed + BGE-small-zh，用于冷物品语义召回；不可用时自动降级为只保留热物品
 - 模型：同时支持 **OpenAI 协议**（DeepSeek / 通义 / Kimi / 本地 vLLM / 兼容网关等）和 **Anthropic 协议**（Anthropic 官方或兼容网关），用 `LLM_PROTOCOL` 切换
 
 ## 快速开始
@@ -48,6 +51,9 @@ cd backend
 | `LLM_MODEL` | 模型名 | `deepseek-chat` / `claude-sonnet-5` |
 | `LLM_TEMPERATURE` | 采样温度，叙事建议 0.8~1.0 | `0.9` |
 | `LLM_MAX_TOKENS` | 单次回复最大 token | `2048` |
+| `EMBED_ENABLED` | 是否启用冷物品语义召回；设 `0` 可关闭 | `1` |
+| `EMBED_MODEL` | fastembed 模型名 | `BAAI/bge-small-zh-v1.5` |
+| `EMBED_CACHE_DIR` | fastembed 模型缓存目录 | `backend/data/fastembed_cache` |
 
 两种协议示例：
 
@@ -70,6 +76,7 @@ backend/
   main.py      # FastAPI 入口，SSE 接口 + 静态前端挂载
   game.py      # 会话状态管理（内存态）
   llm.py       # OpenAI 兼容的流式客户端
+  embed.py     # 本地 embedding 召回（可降级）
   prompts.py   # 修仙 Game Master 系统提示词
 frontend/
   index.html   # 页面
@@ -81,8 +88,15 @@ frontend/
 
 - 存档落在 `backend/data/saves.db`（SQLite，已在 `.gitignore` 中忽略）。
 - 每完成一手（行动 + 续写）自动写盘，进程重启不丢。
-- 每个存档分两份数据：`messages`（喂给 LLM 的上下文，按 40 轮截断省 token）与 `transcript`（展示用完整剧情，只增不删，读档重放全程）。
-- 相关接口：`GET /api/saves` 列表、`GET /api/load` 读档、`POST /api/rename` 改名、`POST /api/delete` 删除。
+- 每个存档包含：`messages`（喂给 LLM 的上下文，按 40 轮截断省 token）、`transcript`（展示用完整剧情，只增不删）、`lore`（见闻录）与 `inventory`（物品影子库）。
+- 相关接口：`GET /api/saves` 列表、`GET /api/load` 读档、`POST /api/action` 行动续写、`POST /api/inquiry` 见闻问答、`GET /api/lore` 见闻列表、`POST /api/lore/delete` 删除见闻、`POST /api/rename` 改名、`POST /api/delete` 删除。
+
+## 物品召回
+
+- 近期在正文中出现过的关键物品会保持为热物品，自动注入后续生成。
+- 超过热窗口未被正文提及的物品会变冷，只在前端「其他随身物」中折叠展示。
+- 玩家输入与冷物品语义相近时，后端用 fastembed 召回它，并重新注入本轮生成。
+- `backend/data/fastembed_cache` 被 `.gitignore` 忽略；如果模型缓存不存在或 fastembed 加载失败，服务不会崩，只会跳过语义召回。可设置 `EMBED_ENABLED=0` 显式关闭。
 
 ## 说明与后续
 

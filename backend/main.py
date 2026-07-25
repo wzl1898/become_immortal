@@ -3,11 +3,14 @@
 接口：
 - POST /api/new                 新建一局，返回 {session_id}
 - GET  /api/opening?sid=...      SSE 流式返回开场叙事
-- GET  /api/action?sid=&text=   SSE 流式返回玩家行动后的剧情
+- POST /api/action              SSE 流式返回玩家行动后的剧情
 - GET  /api/saves               列出所有存档摘要
 - GET  /api/load?sid=...         读档，返回完整剧情用于重放
 - POST /api/rename              重命名存档
 - POST /api/delete              删除存档
+- POST /api/inquiry             SSE 流式返回见闻问答
+- GET  /api/lore?sid=...        读取见闻录
+- POST /api/lore/delete         删除一条见闻
 - 静态前端挂在 /
 """
 
@@ -89,6 +92,16 @@ class SidBody(BaseModel):
     sid: str
 
 
+class ActionBody(BaseModel):
+    sid: str
+    text: str
+
+
+class InquiryBody(BaseModel):
+    sid: str
+    q: str
+
+
 @app.post("/api/new")
 async def new_game(body: NewGameBody | None = None):
     name = (body.name.strip() if body and body.name else "") or game.DEFAULT_NAME
@@ -142,8 +155,7 @@ async def opening(sid: str):
     )
 
 
-@app.get("/api/action")
-async def action(sid: str, text: str):
+def _action_response(sid: str, text: str) -> StreamingResponse:
     if not game.exists(sid):
         raise HTTPException(404, "会话不存在，请重新开始")
     text = (text or "").strip()
@@ -156,6 +168,16 @@ async def action(sid: str, text: str):
     )
 
 
+@app.post("/api/action")
+async def action(body: ActionBody):
+    return _action_response(body.sid, body.text)
+
+
+@app.get("/api/action")
+async def action_legacy(sid: str, text: str):
+    return _action_response(sid, text)
+
+
 # ---- 见闻问询（旁路：不推进剧情，只补全背景）----
 
 class LoreDeleteBody(BaseModel):
@@ -163,8 +185,7 @@ class LoreDeleteBody(BaseModel):
     index: int
 
 
-@app.get("/api/inquiry")
-async def inquiry(sid: str, q: str):
+def _inquiry_response(sid: str, q: str) -> StreamingResponse:
     if not game.exists(sid):
         raise HTTPException(404, "会话不存在，请重新开始")
     q = (q or "").strip()
@@ -175,6 +196,16 @@ async def inquiry(sid: str, q: str):
         _answer_inquiry(messages, sid, q),
         media_type="text/event-stream",
     )
+
+
+@app.post("/api/inquiry")
+async def inquiry(body: InquiryBody):
+    return _inquiry_response(body.sid, body.q)
+
+
+@app.get("/api/inquiry")
+async def inquiry_legacy(sid: str, q: str):
+    return _inquiry_response(sid, q)
 
 
 @app.get("/api/lore")

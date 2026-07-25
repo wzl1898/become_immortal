@@ -36,7 +36,7 @@ def init() -> None:
                 transcript  TEXT NOT NULL,   -- JSON: list[dict{role,text}]
                 turns       INTEGER NOT NULL DEFAULT 0,
                 lore        TEXT NOT NULL DEFAULT '[]',  -- JSON: list[dict{q,a,ts}]，见闻录
-                inventory   TEXT NOT NULL DEFAULT '[]',  -- JSON: list[dict{id,name,attrs,kind,last_turn}]，物品影子库
+                inventory   TEXT NOT NULL DEFAULT '[]',  -- JSON: list[dict{id,name,attrs,kind,whereabouts,last_turn}]，物品影子库
                 created_at  REAL NOT NULL,
                 updated_at  REAL NOT NULL
             )

@@ -185,9 +185,9 @@ def _norm_name(raw: str) -> str:
 def _parse_panel_items(status: str | None, objects: str | None) -> list[dict]:
     """从本回合面板（《状态》资源/法宝 + 《物件》块）解析出带属性的物件。
 
-    返回 [{name, attrs, kind}]：
+    返回 [{name, attrs, kind, whereabouts}]：
     - 资源行里带括号的条目 → kind="资源"
-    - 法宝行非空 → kind="法宝"
+    - 法宝行非空 → kind="法宝"，支持多个法宝用顿号/逗号分隔
     - 《物件》整行 → kind="物件"（attrs 取括号内容，name 取主名）
     寻常消耗品（无括号资源）不入库。
     """
@@ -214,15 +214,35 @@ def _parse_panel_items(status: str | None, objects: str | None) -> list[dict]:
                 for part in _split_top_level(val):
                     part = part.strip()
                     if part and ("（" in part or "(" in part):
-                        parsed.append({"name": _norm_name(part), "attrs": _attrs_of(part), "kind": "资源"})
-            else:  # 法宝：整行留存
-                parsed.append({"name": _norm_name(val), "attrs": _attrs_of(val), "kind": "法宝"})
+                        parsed.append({
+                            "name": _norm_name(part),
+                            "attrs": _attrs_of(part),
+                            "kind": "资源",
+                            "whereabouts": "随身",
+                        })
+            else:
+                for part in _split_top_level(val):
+                    part = part.strip()
+                    if part and part not in ("无", "暂无", "无。"):
+                        parsed.append({
+                            "name": _norm_name(part),
+                            "attrs": _attrs_of(part),
+                            "kind": "法宝",
+                            "whereabouts": "随身",
+                        })
 
     if objects:
         for line in objects.splitlines():
             line = line.strip()
             if line:
-                parsed.append({"name": _norm_name(line), "attrs": _attrs_of(line), "kind": "物件"})
+                chunks = re.split(r"——|—{1,2}|--", line, maxsplit=1)
+                whereabouts = chunks[1].strip() if len(chunks) > 1 else ""
+                parsed.append({
+                    "name": _norm_name(line),
+                    "attrs": _attrs_of(line),
+                    "kind": "物件",
+                    "whereabouts": whereabouts,
+                })
 
     return parsed
 
@@ -258,6 +278,7 @@ def _reconcile_inventory(state: dict, narration: str) -> None:
                 "name": name,
                 "attrs": p["attrs"],
                 "kind": p["kind"],
+                "whereabouts": p.get("whereabouts", ""),
                 "last_turn": turn,
             }
             inv.append(item)
@@ -268,6 +289,8 @@ def _reconcile_inventory(state: dict, narration: str) -> None:
                 cur["attrs"] = p["attrs"]
             if p["kind"]:
                 cur["kind"] = p["kind"]
+            if "whereabouts" in p:
+                cur["whereabouts"] = p.get("whereabouts", "")
 
     # 失去：上回合注入过、本回合面板里没有了 → LLM 已从面板移除 → 移除出库
     injected = set(state.get("_injected") or [])
@@ -307,9 +330,10 @@ def _hot_cold(inv: list[dict], turn: int) -> tuple[list[dict], list[dict]]:
 
 
 def _cand_text(it: dict) -> str:
-    """召回用的候选文本：名 + 属性。"""
+    """召回用的候选文本：名 + 属性 + 下落。"""
     attrs = it.get("attrs") or ""
-    return f"{it.get('name', '')}　{attrs}".strip()
+    whereabouts = it.get("whereabouts") or ""
+    return f"{it.get('name', '')}　{attrs}　{whereabouts}".strip()
 
 
 def _recall_cold(state: dict, cold: list[dict], action: str) -> list[dict]:
@@ -329,12 +353,18 @@ def _recall_cold(state: dict, cold: list[dict], action: str) -> list[dict]:
 
 
 def _item_line(it: dict) -> str:
-    """把一件物品拼成档案行：名称（属性）〔类别〕。"""
+    """把一件物品拼成档案行：名称（属性） 类别/下落。"""
     name = it.get("name", "")
     attrs = it.get("attrs") or ""
     kind = it.get("kind") or ""
+    whereabouts = it.get("whereabouts") or ""
     head = f"{name}（{attrs}）" if attrs else name
-    return f"- {head}　类别：{kind}" if kind else f"- {head}"
+    meta = []
+    if kind:
+        meta.append(f"类别：{kind}")
+    if whereabouts:
+        meta.append(f"下落：{whereabouts}")
+    return f"- {head}　{'　'.join(meta)}" if meta else f"- {head}"
 
 
 def _inventory_dossier(active: list[dict]) -> str:
@@ -502,6 +532,7 @@ def get_inventory(session_id: str) -> list[dict] | None:
             "name": it.get("name", ""),
             "attrs": it.get("attrs", ""),
             "kind": it.get("kind", ""),
+            "whereabouts": it.get("whereabouts", ""),
             "hot": turn - int(it.get("last_turn", 0)) < HOT_TURNS,
         })
     return view
