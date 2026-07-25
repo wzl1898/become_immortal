@@ -70,6 +70,11 @@ def _get(session_id: str) -> dict | None:
     data = store.load(session_id)
     if data is None:
         return None
+    # 老存档的 assistant 历史里堆着带灵光提示的旧回合；喂给模型前就地剥掉
+    # （仅内存，不回写库——库里 messages/transcript 保持原样）。幂等安全。
+    for m in data["messages"]:
+        if m.get("role") == "assistant":
+            m["content"] = _strip_hint(m["content"])
     _CACHE[session_id] = {
         "messages": data["messages"],
         "transcript": data["transcript"],
@@ -109,6 +114,22 @@ def _narration_body(text: str) -> str:
     text = _OBJECTS_RE.sub("", text)
     text = _HINT_RE.sub("", text)
     return text.strip()
+
+
+def _strip_hint(text: str) -> str:
+    """剥掉末尾的〔灵光一现…〕提示块，保留正文与《状态》《物件》。
+
+    专供喂给 LLM 的历史：灵光提示是给玩家的备选方向，不是已发生的剧情。
+    若原样留在 assistant 历史里，模型会把它当作"自己说过的事实"回引——
+    尤其玩家给模糊指令时，会就近把没被选中的选项/人物缝进正文当真事（幻觉）。
+    只剥末尾那一处〔…〕（系统契约保证提示是最后一行且整段唯一），
+    以防误删正文里偶发的全角括号内容。幂等：无提示时原样返回。
+    """
+    matches = list(_HINT_RE.finditer(text))
+    if not matches:
+        return text
+    last = matches[-1]
+    return (text[: last.start()] + text[last.end() :]).rstrip()
 
 
 def _latest_block(transcript: list[dict], pattern: "re.Pattern") -> str | None:
@@ -443,7 +464,9 @@ def commit(session_id: str, user_content: str | None, assistant_content: str) ->
     else:
         messages.append({"role": "user", "content": user_content})
         transcript.append({"role": "player", "text": user_content})
-    messages.append({"role": "assistant", "content": assistant_content})
+    # 喂给 LLM 的历史剥掉灵光提示（不让备选动作被误当既成剧情回引）；
+    # transcript 与下方 _reconcile 仍用完整原文（前端要显示提示、解析要读面板）。
+    messages.append({"role": "assistant", "content": _strip_hint(assistant_content)})
     transcript.append({"role": "narration", "text": assistant_content})
 
     state["turns"] += 1
