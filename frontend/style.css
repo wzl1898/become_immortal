@@ -88,6 +88,9 @@ html, body {
   top: 76px;
   left: calc(50% - 390px - 236px);
   width: 220px;
+  max-height: calc(100vh - 96px);
+  display: flex;
+  flex-direction: column;
   background: var(--panel);
   border: 1px solid #2a2f38;
   border-radius: 10px;
@@ -96,6 +99,7 @@ html, body {
   line-height: 1.7;
 }
 .status-title {
+  flex: none;
   margin: 0 0 10px;
   font-size: 15px;
   letter-spacing: 0.3em;
@@ -104,7 +108,13 @@ html, body {
   border-bottom: 1px solid #23272f;
   padding-bottom: 8px;
 }
-.status-body { display: flex; flex-direction: column; gap: 7px; }
+.status-body {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  overflow-y: auto;
+  min-height: 0;
+}
 .status-row { display: flex; gap: 8px; }
 .status-row .k { flex: none; width: 2.6em; color: var(--muted); }
 .status-row .v { flex: 1; color: var(--ink); }
@@ -130,6 +140,7 @@ html, body {
     position: static;
     width: auto;
     left: auto;
+    max-height: none;
     margin: 12px 20px 0;
   }
   .status-body { flex-direction: row; flex-wrap: wrap; gap: 6px 16px; }
