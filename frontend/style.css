@@ -218,3 +218,42 @@ html, body {
 .save-item .btns button:hover { color: var(--ink); }
 .save-empty { color: var(--muted); text-align: center; padding: 20px 0; }
 .save-empty.hidden { display: none; }
+
+/* 见闻抽屉 */
+.lore-tip { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.lore-list { list-style: none; margin: 0; padding: 0; flex: 1;
+  display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
+.lore-item {
+  border: 1px solid #2a2f38; border-radius: 8px; padding: 12px 14px;
+  background: #12151b; position: relative;
+}
+.lore-item .q { color: var(--ink); font-size: 14px; line-height: 1.6; }
+.lore-item .q::before { content: "问 "; color: var(--player); font-weight: 700; }
+.lore-item .a {
+  margin-top: 8px; color: var(--accent-soft); opacity: 0.9;
+  font-size: 14px; line-height: 1.7; white-space: pre-wrap;
+}
+.lore-item .a::before { content: "答 "; color: var(--accent); font-weight: 700; opacity: 1; }
+.lore-item .a.error { color: var(--danger); }
+.lore-item .del {
+  margin-top: 10px; font-family: inherit; font-size: 12px; padding: 3px 10px;
+  border-radius: 6px; cursor: pointer; border: 1px solid #333842;
+  background: transparent; color: var(--muted);
+}
+.lore-item .del:hover { color: var(--danger); border-color: var(--danger); }
+.lore-empty { color: var(--muted); text-align: center; padding: 16px 0; }
+.lore-empty.hidden { display: none; }
+
+.lore-form { display: flex; gap: 8px; }
+.lore-form input {
+  flex: 1; background: var(--bg); border: 1px solid #2a2f38; color: var(--ink);
+  padding: 10px 12px; border-radius: 8px; font-family: inherit; font-size: 15px;
+}
+.lore-form input:focus { outline: none; border-color: var(--accent); }
+.lore-form input:disabled { opacity: 0.5; }
+.lore-form button {
+  background: var(--accent); border: none; color: #1a1206; font-weight: 700;
+  padding: 0 18px; border-radius: 8px; cursor: pointer; font-family: inherit; font-size: 15px;
+}
+.lore-form button:disabled { opacity: 0.4; cursor: default; }
+.lore-form button:not(:disabled):hover { background: var(--accent-soft); }

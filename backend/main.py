@@ -45,8 +45,8 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-async def _narrate(messages: list[dict], sid: str, user_content: str | None):
-    """公共的流式叙事生成器：边流边发，结束后落库。"""
+async def _stream(messages: list[dict], on_done):
+    """公共的流式生成器：边流边发 delta，结束后调 on_done(full_text) 落库。"""
     full = []
     try:
         async for piece in stream_chat(messages):
@@ -55,9 +55,18 @@ async def _narrate(messages: list[dict], sid: str, user_content: str | None):
     except Exception as e:  # noqa: BLE001
         yield _sse("error", {"message": str(e)})
         return
-    text = "".join(full)
-    game.commit(sid, user_content, text)
+    on_done("".join(full))
     yield _sse("done", {})
+
+
+def _narrate(messages: list[dict], sid: str, user_content: str | None):
+    """叙事流：结束后把这一轮写入会话历史 + transcript。"""
+    return _stream(messages, lambda text: game.commit(sid, user_content, text))
+
+
+def _answer_inquiry(messages: list[dict], sid: str, question: str):
+    """见闻问询流：结束后只把问答追加进见闻录，不推进剧情。"""
+    return _stream(messages, lambda text: game.commit_lore(sid, question, text))
 
 
 class NewGameBody(BaseModel):
@@ -90,7 +99,7 @@ async def load(sid: str):
     transcript = game.get_transcript(sid)
     if transcript is None:
         raise HTTPException(404, "存档不存在")
-    return {"session_id": sid, "transcript": transcript}
+    return {"session_id": sid, "transcript": transcript, "lore": game.get_lore(sid) or []}
 
 
 @app.post("/api/rename")
@@ -133,6 +142,43 @@ async def action(sid: str, text: str):
         _narrate(messages, sid, text),
         media_type="text/event-stream",
     )
+
+
+# ---- 见闻问询（旁路：不推进剧情，只补全背景）----
+
+class LoreDeleteBody(BaseModel):
+    sid: str
+    index: int
+
+
+@app.get("/api/inquiry")
+async def inquiry(sid: str, q: str):
+    if not game.exists(sid):
+        raise HTTPException(404, "会话不存在，请重新开始")
+    q = (q or "").strip()
+    if not q:
+        raise HTTPException(400, "问题不能为空")
+    messages = game.messages_for_inquiry(sid, q)
+    return StreamingResponse(
+        _answer_inquiry(messages, sid, q),
+        media_type="text/event-stream",
+    )
+
+
+@app.get("/api/lore")
+async def lore(sid: str):
+    items = game.get_lore(sid)
+    if items is None:
+        raise HTTPException(404, "存档不存在")
+    return {"lore": items}
+
+
+@app.post("/api/lore/delete")
+async def lore_delete(body: LoreDeleteBody):
+    items = game.delete_lore(body.sid, body.index)
+    if items is None:
+        raise HTTPException(404, "见闻不存在")
+    return {"ok": True, "lore": items}
 
 
 # ---- 开发用前端热更新（LIVE_RELOAD=1 时启用）----

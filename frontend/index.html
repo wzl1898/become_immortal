@@ -12,6 +12,7 @@
       <h1>问道</h1>
       <div class="actions">
         <span id="save-name" class="save-name" title="当前存档"></span>
+        <button id="lore-btn" class="ghost" title="打听背景见闻">见闻</button>
         <button id="saves-btn" class="ghost" title="存档 / 读档">存档</button>
         <button id="restart" class="ghost" title="另起新的一世">新的一世</button>
       </div>
@@ -33,6 +34,23 @@
         </div>
         <ul id="save-list" class="save-list"></ul>
         <p id="save-empty" class="save-empty hidden">还没有存档，去开启第一世吧。</p>
+      </div>
+      <div class="drawer-mask"></div>
+    </div>
+
+    <div id="lore-drawer" class="drawer hidden">
+      <div class="drawer-panel">
+        <div class="drawer-head">
+          <h2>见闻录</h2>
+          <button id="lore-close" class="ghost">关闭</button>
+        </div>
+        <p class="lore-tip">打听主角此刻理应知道的背景。问明的见闻会成为设定，之后的剧情不会与之矛盾。</p>
+        <ul id="lore-list" class="lore-list"></ul>
+        <p id="lore-empty" class="lore-empty hidden">还没问过什么。有拿不准的背景，尽管来问。</p>
+        <form id="lore-form" class="lore-form" autocomplete="off">
+          <input id="lore-input" type="text" placeholder="想打听什么？（如：落后于人会有什么后果）" />
+          <button id="lore-send" type="submit">问</button>
+        </form>
       </div>
       <div class="drawer-mask"></div>
     </div>

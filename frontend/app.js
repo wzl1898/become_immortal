@@ -12,6 +12,14 @@ const saveListEl = document.getElementById("save-list");
 const saveEmptyEl = document.getElementById("save-empty");
 const statusPanel = document.getElementById("status-panel");
 const statusBodyEl = document.getElementById("status-body");
+const loreBtn = document.getElementById("lore-btn");
+const loreDrawer = document.getElementById("lore-drawer");
+const loreClose = document.getElementById("lore-close");
+const loreListEl = document.getElementById("lore-list");
+const loreEmptyEl = document.getElementById("lore-empty");
+const loreForm = document.getElementById("lore-form");
+const loreInput = document.getElementById("lore-input");
+const loreSend = document.getElementById("lore-send");
 
 function clearStatus() {
   statusBodyEl.innerHTML = "";
@@ -21,6 +29,8 @@ function clearStatus() {
 let sessionId = null;
 let currentName = "";
 let busy = false;
+let lore = []; // 见闻录，[{q, a, ts}]
+let loreBusy = false; // 问询独立忙态，不锁主行动
 
 function addBlock(kind, text = "") {
   const el = document.createElement("p");
@@ -203,6 +213,7 @@ async function newGame() {
   setBusy(true);
   storyEl.innerHTML = "";
   clearStatus();
+  lore = [];
   addBlock("narration", "　　天地灵气涌动，你的故事即将开始……").classList.add("cursor");
   try {
     const resp = await fetch("/api/new", {
@@ -229,6 +240,7 @@ async function loadGame(sid, name) {
     if (!resp.ok) throw new Error((await resp.json()).detail || "读档失败");
     const data = await resp.json();
     setCurrent(sid, name);
+    lore = data.lore || [];
     storyEl.innerHTML = "";
     clearStatus();
     for (const blk of data.transcript) {
@@ -343,6 +355,97 @@ async function deleteSave(s) {
 savesBtn.addEventListener("click", openDrawer);
 drawerClose.addEventListener("click", closeDrawer);
 drawer.querySelector(".drawer-mask").addEventListener("click", closeDrawer);
+
+// ---- 见闻抽屉（问询旁路）----
+function openLoreDrawer() {
+  if (!sessionId) return;
+  loreDrawer.classList.remove("hidden");
+  renderLore();
+  loreInput.focus();
+}
+function closeLoreDrawer() { loreDrawer.classList.add("hidden"); }
+
+function renderLore() {
+  loreListEl.innerHTML = "";
+  loreEmptyEl.classList.toggle("hidden", lore.length > 0);
+  lore.forEach((item, i) => loreListEl.appendChild(renderLoreItem(item, i)));
+}
+
+function renderLoreItem(item, index) {
+  const li = document.createElement("li");
+  li.className = "lore-item";
+  li.innerHTML = `
+    <div class="q"></div>
+    <div class="a"></div>
+    <button class="del" title="删除这条见闻">删除</button>`;
+  li.querySelector(".q").textContent = item.q;
+  li.querySelector(".a").textContent = item.a;
+  li.querySelector(".del").addEventListener("click", () => deleteLoreItem(index));
+  return li;
+}
+
+async function deleteLoreItem(index) {
+  if (loreBusy) return;
+  if (!confirm("删除这条见闻？此后剧情将不再受它约束。")) return;
+  try {
+    const resp = await fetch("/api/lore/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sid: sessionId, index }),
+    });
+    if (!resp.ok) throw new Error((await resp.json()).detail || "删除失败");
+    lore = (await resp.json()).lore || [];
+    renderLore();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+function setLoreBusy(state) {
+  loreBusy = state;
+  loreInput.disabled = state;
+  loreSend.disabled = state;
+}
+
+async function askLore(q) {
+  setLoreBusy(true);
+  loreEmptyEl.classList.add("hidden");
+  // 先落一个"问 + 答（流式）"的临时条目
+  const li = document.createElement("li");
+  li.className = "lore-item";
+  li.innerHTML = `<div class="q"></div><div class="a cursor"></div>`;
+  li.querySelector(".q").textContent = q;
+  const aEl = li.querySelector(".a");
+  loreListEl.appendChild(li);
+  li.scrollIntoView({ block: "end" });
+  try {
+    await streamSSE(`/api/inquiry?sid=${sessionId}&q=${encodeURIComponent(q)}`, (text) => {
+      aEl.textContent += text;
+      li.scrollIntoView({ block: "end" });
+    });
+    // 后端已落库，同步到内存并重渲染（补上删除按钮）
+    lore.push({ q, a: aEl.textContent, ts: Date.now() / 1000 });
+    renderLore();
+  } catch (e) {
+    aEl.classList.remove("cursor");
+    aEl.textContent = `【出错】${e.message}`;
+    aEl.classList.add("error");
+  } finally {
+    setLoreBusy(false);
+    loreInput.focus();
+  }
+}
+
+loreBtn.addEventListener("click", openLoreDrawer);
+loreClose.addEventListener("click", closeLoreDrawer);
+loreDrawer.querySelector(".drawer-mask").addEventListener("click", closeLoreDrawer);
+loreForm.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const q = loreInput.value.trim();
+  if (!q || loreBusy || !sessionId) return;
+  loreInput.value = "";
+  askLore(q);
+});
 
 // ---- 启动：有存档则续上最近一局，否则开新局 ----
 async function boot() {
