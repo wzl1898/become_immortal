@@ -20,6 +20,12 @@ const loreEmptyEl = document.getElementById("lore-empty");
 const loreForm = document.getElementById("lore-form");
 const loreInput = document.getElementById("lore-input");
 const loreSend = document.getElementById("lore-send");
+const directorBtn = document.getElementById("director-btn");
+const directorDrawer = document.getElementById("director-drawer");
+const directorClose = document.getElementById("director-close");
+const directorRefresh = document.getElementById("director-refresh");
+const directorBodyEl = document.getElementById("director-body");
+const directorEmptyEl = document.getElementById("director-empty");
 
 function clearStatus() {
   statusBodyEl.innerHTML = "";
@@ -534,6 +540,139 @@ loreForm.addEventListener("submit", (e) => {
   loreInput.value = "";
   askLore(q);
 });
+
+// ---- 导演抽屉（幕后剧情调度，只读展示）----
+async function fetchDirector() {
+  return await fetchJSON(`/api/director?sid=${sessionId}`);
+}
+
+async function openDirectorDrawer() {
+  if (!sessionId) return;
+  directorDrawer.classList.remove("hidden");
+  await refreshDirector();
+}
+function closeDirectorDrawer() { directorDrawer.classList.add("hidden"); }
+
+async function refreshDirector() {
+  if (!sessionId) return;
+  try {
+    const data = await fetchDirector();
+    renderDirector(data.director_state || {}, data.turns || 0);
+  } catch (e) {
+    directorBodyEl.innerHTML = "";
+    directorEmptyEl.textContent = `读取失败：${e.message}`;
+    directorEmptyEl.classList.remove("hidden");
+  }
+}
+
+function meterRow(label, value, cls) {
+  const pct = Math.round(Math.max(0, Math.min(1, Number(value) || 0)) * 100);
+  const row = document.createElement("div");
+  row.className = "dir-meter";
+  row.innerHTML =
+    `<span class="m-label"></span>` +
+    `<span class="m-track"><span class="m-fill ${cls}"></span></span>` +
+    `<span class="m-num">${pct}%</span>`;
+  row.querySelector(".m-label").textContent = label;
+  row.querySelector(".m-fill").style.width = `${pct}%`;
+  return row;
+}
+
+function field(label, value, valClass) {
+  const wrap = document.createElement("div");
+  wrap.className = "dir-field";
+  wrap.innerHTML = `<span class="label"></span><span class="val ${valClass || ""}"></span>`;
+  wrap.querySelector(".label").textContent = label;
+  wrap.querySelector(".val").textContent = value || "—";
+  return wrap;
+}
+
+function renderDirector(state, turns) {
+  directorBodyEl.innerHTML = "";
+  const hasContent = state && (state.phase || state.payoff || state.last_fired);
+  directorEmptyEl.classList.toggle("hidden", !!hasContent);
+  if (!hasContent) return;
+
+  const phase = state.phase || "active";
+
+  // 阶段徽标
+  const phaseWrap = document.createElement("div");
+  phaseWrap.className = "dir-phase";
+  const badge = document.createElement("span");
+  badge.className = `dir-badge ${phase}`;
+  badge.textContent = phase === "cooldown" ? "留白期" : "运作中";
+  phaseWrap.appendChild(badge);
+  const pnote = document.createElement("span");
+  pnote.className = "dir-phase-note";
+  pnote.textContent = phase === "cooldown"
+    ? "爽点刚退场，暂不上膛，顺着你的路走几轮再孕育下一个"
+    : "正在养一个当前爽点";
+  phaseWrap.appendChild(pnote);
+  directorBodyEl.appendChild(phaseWrap);
+
+  // 当前爽点卡片
+  const payoff = state.payoff;
+  if (payoff && payoff.desc) {
+    const card = document.createElement("div");
+    card.className = "dir-payoff" + (payoff.armed ? " armed" : "");
+
+    const tag = document.createElement("span");
+    tag.className = "dir-armed-tag" + (payoff.armed ? "" : " off");
+    tag.textContent = payoff.armed ? "● 已上膛（可同轮兑现）" : "○ 铺垫中（未上膛）";
+    card.appendChild(tag);
+
+    card.appendChild(field("爽点", payoff.desc, "desc"));
+    card.appendChild(field("触发条件", payoff.trigger, "trigger"));
+    card.appendChild(field("本轮指导", payoff.guidance));
+    card.appendChild(meterRow("成熟度", payoff.maturity, "maturity"));
+    card.appendChild(meterRow("接近度", payoff.proximity, "proximity"));
+
+    // 元信息
+    const meta = document.createElement("div");
+    meta.className = "dir-meta";
+    const bits = [];
+    if (payoff.start_turn != null) bits.push(`<span class="item">孕育于第 <b>${payoff.start_turn}</b> 回合</span>`);
+    const drift = Number(state.drift_turns) || 0;
+    bits.push(`<span class="item${drift > 0 ? " warn" : ""}">连续偏离 <b>${drift}</b> 轮</span>`);
+    meta.innerHTML = bits.join("");
+    card.appendChild(meta);
+    directorBodyEl.appendChild(card);
+  } else if (phase === "cooldown") {
+    const cd = document.createElement("div");
+    cd.className = "dir-meta";
+    const until = Number(state.cooldown_until) || 0;
+    const left = Math.max(0, until - (Number(turns) || 0));
+    cd.innerHTML = `<span class="item">留白剩余约 <b>${left}</b> 回合（第 ${until} 回合后孕育新爽点）</span>`;
+    directorBodyEl.appendChild(cd);
+  }
+
+  // 上一个退场的爽点
+  const last = state.last_fired;
+  if (last && last.desc) {
+    const el = document.createElement("div");
+    el.className = "dir-last";
+    const outcome = last.outcome === "fired" ? "已兑现" : "已废弃";
+    el.innerHTML =
+      `<span class="dir-section-head">上一个爽点</span>` +
+      `<div style="margin-top:8px"><span class="tag ${last.outcome}">${outcome}</span>` +
+      `（第 ${last.turn} 回合）：<span class="desc-txt"></span></div>`;
+    el.querySelector(".desc-txt").textContent = last.desc;
+    directorBodyEl.appendChild(el);
+  }
+
+  // 备忘
+  if (state.note) {
+    const note = document.createElement("div");
+    note.className = "dir-note";
+    note.textContent = state.note;
+    directorBodyEl.appendChild(note);
+  }
+}
+
+directorBtn.addEventListener("click", openDirectorDrawer);
+directorClose.addEventListener("click", closeDirectorDrawer);
+directorRefresh.addEventListener("click", refreshDirector);
+directorDrawer.querySelector(".drawer-mask").addEventListener("click", closeDirectorDrawer);
 
 // ---- 启动：有存档则续上最近一局，否则开新局 ----
 async function boot() {

@@ -290,3 +290,74 @@ html, body {
 }
 .lore-form button:disabled { opacity: 0.4; cursor: default; }
 .lore-form button:not(:disabled):hover { background: var(--accent-soft); }
+
+/* 导演抽屉 */
+.drawer-head-btns { display: flex; gap: 8px; }
+.director-tip { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.director-body { display: flex; flex-direction: column; gap: 14px; overflow-y: auto; }
+.director-empty { color: var(--muted); text-align: center; padding: 20px 0; }
+.director-empty.hidden { display: none; }
+
+/* 阶段徽标 */
+.dir-phase { display: flex; align-items: center; gap: 8px; }
+.dir-badge {
+  display: inline-block; padding: 3px 12px; border-radius: 999px;
+  font-size: 13px; letter-spacing: 0.1em; border: 1px solid;
+}
+.dir-badge.active { color: var(--accent-soft); border-color: var(--accent); background: rgba(180,138,60,0.12); }
+.dir-badge.cooldown { color: var(--player); border-color: var(--player); background: rgba(110,168,196,0.12); }
+.dir-phase-note { color: var(--muted); font-size: 12px; }
+
+/* 爽点卡片 */
+.dir-payoff {
+  border: 1px solid #2a2f38; border-radius: 8px; padding: 14px;
+  background: #12151b; display: flex; flex-direction: column; gap: 10px;
+}
+.dir-payoff.armed { border-color: var(--danger); box-shadow: 0 0 0 1px rgba(196,110,110,0.25); }
+.dir-field { display: flex; flex-direction: column; gap: 3px; }
+.dir-field .label {
+  color: var(--muted); font-size: 11px; letter-spacing: 0.15em;
+}
+.dir-field .val { color: var(--ink); font-size: 14px; line-height: 1.6; }
+.dir-field .val.desc { color: var(--accent-soft); font-weight: 600; }
+.dir-field .val.trigger { color: var(--danger); }
+
+.dir-armed-tag {
+  align-self: flex-start; font-size: 12px; padding: 2px 10px; border-radius: 6px;
+  background: var(--danger); color: #1a0606; font-weight: 700; letter-spacing: 0.1em;
+}
+.dir-armed-tag.off { background: transparent; border: 1px solid #333842; color: var(--muted); font-weight: 400; }
+
+/* 进度条：成熟度 / 接近度 */
+.dir-meter { display: flex; align-items: center; gap: 8px; }
+.dir-meter .m-label { flex: none; width: 3em; color: var(--muted); font-size: 12px; }
+.dir-meter .m-track {
+  flex: 1; height: 6px; border-radius: 3px; background: #23272f; overflow: hidden;
+}
+.dir-meter .m-fill { height: 100%; border-radius: 3px; }
+.dir-meter .m-fill.maturity { background: var(--accent); }
+.dir-meter .m-fill.proximity { background: var(--player); }
+.dir-meter .m-num { flex: none; width: 2.6em; text-align: right; color: var(--muted); font-size: 12px; }
+
+/* 元信息行（回合 / 偏离计数 / 冷却剩余） */
+.dir-meta { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+.dir-meta .item { color: var(--muted); font-size: 12px; }
+.dir-meta .item b { color: var(--ink); font-weight: 600; }
+.dir-meta .item.warn b { color: var(--danger); }
+
+/* 上一个退场的爽点 */
+.dir-last {
+  border: 1px dashed #2a2f38; border-radius: 8px; padding: 10px 12px;
+  color: var(--muted); font-size: 13px; line-height: 1.6;
+}
+.dir-last .tag { font-weight: 700; }
+.dir-last .tag.fired { color: var(--accent-soft); }
+.dir-last .tag.abandoned { color: var(--danger); }
+
+.dir-note { color: var(--muted); font-size: 12px; line-height: 1.6; font-style: italic; }
+.dir-note::before { content: "备忘："; opacity: 0.7; font-style: normal; }
+
+.dir-section-head {
+  color: var(--accent-soft); font-size: 12px; letter-spacing: 0.15em;
+  border-bottom: 1px solid #23272f; padding-bottom: 6px;
+}

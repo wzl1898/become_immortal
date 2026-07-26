@@ -957,6 +957,12 @@ def get_director_state(session_id: str) -> dict | None:
     return None if state is None else (state.get("director_state") or {})
 
 
+def get_turns(session_id: str) -> int | None:
+    """返回当前回合数；存档不存在返回 None。"""
+    state = _get(session_id)
+    return None if state is None else state["turns"]
+
+
 def commit_inquiry_memory(session_id: str, question: str, answer: str) -> None:
     """把一次问答追加进世界记忆并落盘（不碰 messages/transcript）。"""
     state = _get(session_id)

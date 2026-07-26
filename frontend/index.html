@@ -12,6 +12,7 @@
       <h1>问道</h1>
       <div class="actions">
         <span id="save-name" class="save-name" title="当前存档"></span>
+        <button id="director-btn" class="ghost" title="查看导演模块状态（幕后剧情调度）">导演</button>
         <button id="lore-btn" class="ghost" title="查看与打听世界记忆">记忆</button>
         <button id="saves-btn" class="ghost" title="存档 / 读档">存档</button>
         <button id="restart" class="ghost" title="另起新的一世">新的一世</button>
@@ -51,6 +52,22 @@
           <input id="lore-input" type="text" placeholder="想打听什么？（如：落后于人会有什么后果）" />
           <button id="lore-send" type="submit">问</button>
         </form>
+      </div>
+      <div class="drawer-mask"></div>
+    </div>
+
+    <div id="director-drawer" class="drawer hidden">
+      <div class="drawer-panel">
+        <div class="drawer-head">
+          <h2>导演</h2>
+          <div class="drawer-head-btns">
+            <button id="director-refresh" class="ghost" title="导演在后台异步更新，点此刷新">刷新</button>
+            <button id="director-close" class="ghost">关闭</button>
+          </div>
+        </div>
+        <p class="director-tip">导演是幕后「看不见的手」：养一个当前爽点，每轮给叙事引擎指路，但上膛不开枪——兑现与否由你的行动决定。它在每手结束后异步更新，稍等片刻点「刷新」看最新状态。</p>
+        <div id="director-body" class="director-body"></div>
+        <p id="director-empty" class="director-empty hidden">导演尚未落子。</p>
       </div>
       <div class="drawer-mask"></div>
     </div>

@@ -218,6 +218,15 @@ async def world_memory(sid: str):
     return {"world_memory": items, "lore": items}
 
 
+@app.get("/api/director")
+async def director(sid: str):
+    """读取导演模块状态（异步更新，前端按需/刷新拉取）。"""
+    state = game.get_director_state(sid)
+    if state is None:
+        raise HTTPException(404, "存档不存在")
+    return {"director_state": state, "turns": game.get_turns(sid) or 0}
+
+
 @app.post("/api/world-memory/delete")
 async def world_memory_delete(body: WorldMemoryDeleteBody):
     items = game.delete_world_memory(body.sid, body.index)
