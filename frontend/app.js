@@ -633,6 +633,19 @@ function renderDirector(state, turns) {
   phaseWrap.appendChild(pnote);
   directorBodyEl.appendChild(phaseWrap);
 
+  // 场景追踪（黏太久会触发切场指导）
+  if (state.scene || state.scene_turns != null) {
+    const sceneTurns = Number(state.scene_turns) || 0;
+    const stale = sceneTurns >= 3;
+    const sc = document.createElement("div");
+    sc.className = "dir-meta";
+    const label = state.scene ? `当前场景：<b>${state.scene}</b>` : "当前场景：<b>（未标注）</b>";
+    sc.innerHTML =
+      `<span class="item">${label}</span>` +
+      `<span class="item${stale ? " warn" : ""}">已停留 <b>${sceneTurns}</b> 轮${stale ? "（已催切场）" : ""}</span>`;
+    directorBodyEl.appendChild(sc);
+  }
+
   // 当前爽点卡片
   const payoff = state.payoff;
   if (payoff && payoff.desc) {
@@ -655,6 +668,8 @@ function renderDirector(state, turns) {
     meta.className = "dir-meta";
     const bits = [];
     if (payoff.start_turn != null) bits.push(`<span class="item">孕育于第 <b>${payoff.start_turn}</b> 回合</span>`);
+    const converge = Number(payoff.converge_turns) || 0;
+    bits.push(`<span class="item${converge > 0 ? " warn" : ""}">连续配合 <b>${converge}</b> 轮${converge >= 2 ? "（已催上膛）" : ""}</span>`);
     const drift = Number(state.drift_turns) || 0;
     bits.push(`<span class="item${drift > 0 ? " warn" : ""}">连续偏离 <b>${drift}</b> 轮</span>`);
     meta.innerHTML = bits.join("");

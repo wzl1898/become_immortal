@@ -61,6 +61,14 @@ DIRECTOR_DRIFT_K = 3
 DIRECTOR_COOLDOWN_TURNS = 3
 # 注入给 GM 的导演块字数上限，防喧宾夺主。
 DIRECTOR_INJECT_MAX_CHARS = 500
+# 玩家连续配合（proximity 高）多少轮就强制上膛、当轮/次轮兑现（别晾着空转）。
+DIRECTOR_CONVERGE_TURNS = 2
+# 爽点养满多少轮仍未兑现就强制上膛催收（兜底，防不配合时无限拖）。
+DIRECTOR_MAX_INCUBATE = 5
+# 同一场景/处境黏多少轮就注入「收束切场」指导（独立于爽点，留白期也推）。
+DIRECTOR_SCENE_STALE_TURNS = 3
+# proximity ≥ 此值算「本轮玩家在配合、朝爽点走」。
+DIRECTOR_PROXIMITY_HI = 0.6
 
 
 def init() -> None:
@@ -790,20 +798,37 @@ def _parse_extracted_memories(raw: str, turn: int) -> list[dict]:
 
 # ---- 导演模块：注入渲染 / 异步维护 / Python 兜底 ----
 
+def _scene_push_line() -> str:
+    """场景黏太久时给 GM 的切场指导行（收束当前处境、跳时/换地、并合冗余节拍）。"""
+    return (
+        "- 场景推进：此处已停留数轮，宜收束当前处境——"
+        "跳过冗余铺垫，把多个细碎探索并成一个节拍，推进到下一场景或时间点。"
+    )
+
+
 def _director_injection(state: dict) -> str:
-    """把导演状态渲染成给 GM 的注入块。留白期或无爽点返回 ""（不注入）。
+    """把导演状态渲染成给 GM 的注入块。无爽点方向且场景未黏时返回 ""（不注入）。
 
     守住"上膛不开枪"：块内只给背景压力与机会（剧情指导），并声明玩家行动仍决定走向；
-    armed 时附上触发条件与兑现方向，供 GM 在玩家跨线的同一轮当场兑现。
+    armed 时附上触发条件与兑现方向，供 GM 在玩家跨线的同一轮当场兑现；
+    场景黏太久则追加切场指导（独立于爽点，留白期也注入）。
     """
-    if not state or state.get("phase") == "cooldown":
+    if not state:
         return ""
+    stale = int(state.get("scene_turns") or 0) >= DIRECTOR_SCENE_STALE_TURNS
+    cooldown = state.get("phase") == "cooldown"
     payoff = state.get("payoff")
-    if not isinstance(payoff, dict):
+    guidance = (payoff.get("guidance") or "").strip() if isinstance(payoff, dict) else ""
+
+    # 留白期不注入爽点方向；但若场景黏住，仍要注入切场指导（切场独立于爽点）
+    if cooldown or not guidance:
+        if stale:
+            return (
+                "【导演·剧情走向（仅背景压力与机会，非必演剧本；玩家行动仍决定走向）】\n"
+                f"{_scene_push_line()}\n【/导演】\n\n"
+            )
         return ""
-    guidance = (payoff.get("guidance") or "").strip()
-    if not guidance:
-        return ""
+
     lines = [
         "【导演·剧情走向（仅背景压力与机会，非必演剧本；玩家行动仍决定走向）】",
         f"- 本轮推进方向：{guidance}",
@@ -814,6 +839,8 @@ def _director_injection(state: dict) -> str:
         if trigger:
             lines.append(f"- 若玩家本轮做到「{trigger}」，即当场顺势兑现：{desc}")
         lines.append("- 玩家若未触及上述条件，则勿强行兑现，只按其真实行动合理推进。")
+    if stale:
+        lines.append(_scene_push_line())
     body = "\n".join(lines)
     if len(body) > DIRECTOR_INJECT_MAX_CHARS:
         body = body[:DIRECTOR_INJECT_MAX_CHARS].rstrip()
@@ -873,9 +900,13 @@ def _director_user_prompt(user_content: str | None, assistant_content: str, turn
     status = _STATUS_RE.search(assistant_content)
     action = user_content if user_content is not None else "（开始这一世）"
     phase = prev.get("phase") or "active"
+    scene = (prev.get("scene") or "（未标注）").strip()
+    scene_turns = int(prev.get("scene_turns") or 0)
     parts = [
         f"【回合】\n{turn}",
         f"【当前阶段】\n{phase}（cooldown=留白期，不上膛只顺势观察；active=正常养爽点）",
+        f"【当前场景】\n{scene}　已停留 {scene_turns} 轮"
+        f"（≥{DIRECTOR_SCENE_STALE_TURNS} 轮宜收束切场；本轮若已换地/跳时，请回报新 scene 并置 scene_change=true）",
         f"【玩家行动】\n{action}",
         f"【本轮叙事正文】\n{body}",
     ]
@@ -896,6 +927,9 @@ def _apply_director_result(prev: dict, result: dict, turn: int) -> tuple[dict, d
     drift_turns = int(prev.get("drift_turns") or 0)
     buried: dict | None = None
 
+    # 场景追踪（独立于爽点，各分支通用）：场景没变则黏着计数 +1，变了则归零
+    scene, scene_turns = _track_scene(prev, result)
+
     # 留白期：到点转回 active，其余保持无爽点
     if phase == "cooldown":
         cooldown_until = int(prev.get("cooldown_until") or 0)
@@ -904,6 +938,8 @@ def _apply_director_result(prev: dict, result: dict, turn: int) -> tuple[dict, d
             "phase": "cooldown" if turn < cooldown_until else "active",
             "cooldown_until": cooldown_until,
             "drift_turns": 0,
+            "scene": scene,
+            "scene_turns": scene_turns,
             "last_fired": prev.get("last_fired"),
             "note": (result.get("note") or "").strip(),
         }
@@ -942,6 +978,8 @@ def _apply_director_result(prev: dict, result: dict, turn: int) -> tuple[dict, d
             "phase": "cooldown",
             "cooldown_until": turn + DIRECTOR_COOLDOWN_TURNS,
             "drift_turns": 0,
+            "scene": scene,
+            "scene_turns": scene_turns,
             "last_fired": {"desc": desc, "outcome": outcome, "turn": turn},
             "note": (result.get("note") or "").strip(),
         }
@@ -949,15 +987,48 @@ def _apply_director_result(prev: dict, result: dict, turn: int) -> tuple[dict, d
 
     # 正常维护当前爽点
     payoff_out = _sanitize_payoff(payoff_in, prev.get("payoff"), turn)
+    if payoff_out is not None:
+        # 提速硬闸：玩家连续配合（proximity 高）满 CONVERGE 轮，或养满 MAX_INCUBATE 轮，
+        # 强制上膛——不靠 LLM 自觉，别把配合的玩家晾着空转。
+        if payoff_out["proximity"] >= DIRECTOR_PROXIMITY_HI:
+            payoff_out["converge_turns"] = payoff_out["converge_turns"] + 1
+        else:
+            payoff_out["converge_turns"] = 0
+        incubated = turn - int(payoff_out["start_turn"])
+        if (
+            payoff_out["converge_turns"] >= DIRECTOR_CONVERGE_TURNS
+            or incubated >= DIRECTOR_MAX_INCUBATE
+        ):
+            payoff_out["armed"] = True
     new_state = {
         "payoff": payoff_out,
         "phase": "active",
         "cooldown_until": int(prev.get("cooldown_until") or 0),
         "drift_turns": drift_turns,
+        "scene": scene,
+        "scene_turns": scene_turns,
         "last_fired": prev.get("last_fired"),
         "note": (result.get("note") or "").strip(),
     }
     return new_state, None
+
+
+def _track_scene(prev: dict, result: dict) -> tuple[str, int]:
+    """维护「当前场景标签 + 已黏轮数」。
+
+    导演每轮回报一句 scene 标签；与上轮相同则黏着计数 +1，不同（切场了）则归零。
+    result 未给 scene 时沿用旧标签并继续计数（视作仍在原场景），避免漏报导致计数被清。
+    """
+    prev_scene = (prev.get("scene") or "").strip()
+    prev_turns = int(prev.get("scene_turns") or 0)
+    new_scene = (result.get("scene") or "").strip()
+    changed = bool(result.get("scene_change"))
+    if not new_scene:
+        # 导演没报场景：默认仍在原地，继续累计
+        return prev_scene, prev_turns + 1
+    if changed or (prev_scene and new_scene != prev_scene):
+        return new_scene, 0
+    return new_scene, prev_turns + 1
 
 
 def _sanitize_payoff(payoff_in: dict | None, prev_payoff, turn: int) -> dict | None:
@@ -975,8 +1046,11 @@ def _sanitize_payoff(payoff_in: dict | None, prev_payoff, turn: int) -> dict | N
             return 0.0
 
     start_turn = turn
-    if isinstance(prev_payoff, dict) and prev_payoff.get("desc") == desc:
+    same = isinstance(prev_payoff, dict) and prev_payoff.get("desc") == desc
+    if same:
         start_turn = int(prev_payoff.get("start_turn") or turn)
+    # converge_turns 由 _apply_director_result 依 proximity 逐轮夹逼；此处只沿用/清零
+    converge_turns = int(prev_payoff.get("converge_turns") or 0) if same else 0
     return {
         "desc": desc,
         "trigger": (payoff_in.get("trigger") or "").strip(),
@@ -985,6 +1059,7 @@ def _sanitize_payoff(payoff_in: dict | None, prev_payoff, turn: int) -> dict | N
         "maturity": _clip(payoff_in.get("maturity")),
         "proximity": _clip(payoff_in.get("proximity")),
         "start_turn": start_turn,
+        "converge_turns": converge_turns,
     }
 
 
