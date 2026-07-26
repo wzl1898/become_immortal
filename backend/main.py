@@ -8,6 +8,7 @@
 - GET  /api/load?sid=...         读档，返回完整剧情用于重放
 - POST /api/rename              重命名存档
 - POST /api/delete              删除存档
+- GET  /api/character-state?sid=... 读取主角状态
 - POST /api/inquiry             SSE 流式返回世界记忆问答
 - GET  /api/world-memory?sid=... 读取世界记忆
 - POST /api/world-memory/delete 删除一条世界记忆
@@ -70,7 +71,10 @@ def _narrate(messages: list[dict], sid: str, user_content: str | None):
     """叙事流：结束后把这一轮写入会话历史 + transcript，done 带刷新后的物品库。"""
     def _done(text: str) -> dict:
         game.commit(sid, user_content, text)
-        return {"inventory": game.get_inventory(sid) or []}
+        return {
+            "character_state": game.get_character_state(sid) or {},
+            "inventory": game.get_inventory(sid) or [],
+        }
     return _stream(messages, _done)
 
 
@@ -122,6 +126,7 @@ async def load(sid: str):
     return {
         "session_id": sid,
         "transcript": transcript,
+        "character_state": game.get_character_state(sid) or {},
         "world_memory": game.get_world_memory(sid) or [],
         "lore": game.get_world_memory(sid) or [],
         "inventory": game.get_inventory(sid) or [],
@@ -178,6 +183,14 @@ async def action(body: ActionBody):
 @app.get("/api/action")
 async def action_legacy(sid: str, text: str):
     return _action_response(sid, text)
+
+
+@app.get("/api/character-state")
+async def character_state(sid: str):
+    state = game.get_character_state(sid)
+    if state is None:
+        raise HTTPException(404, "存档不存在")
+    return {"character_state": state}
 
 
 # ---- 世界记忆问询（旁路：不推进剧情，只补全背景）----

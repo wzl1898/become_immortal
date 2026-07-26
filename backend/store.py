@@ -3,6 +3,7 @@
 一个存档(save) = 一整局游戏，包含：
 - messages   : 喂给 LLM 的消息数组（会按轮数截断，省 token）
 - transcript : 展示用的完整剧情，只增不删（读档时重放全程）
+- character_state : 主角当前状态快照（从最新《状态》面板解析）
 - world_memory : 长期世界记忆（剧情事实、问询、人物、地点、物品等）
 
 单机单进程使用，每次操作开独立连接，简单可靠。
@@ -10,6 +11,7 @@
 
 import json
 import os
+import re
 import sqlite3
 import time
 import uuid
@@ -37,6 +39,7 @@ def init() -> None:
                 transcript  TEXT NOT NULL,   -- JSON: list[dict{role,text}]
                 turns       INTEGER NOT NULL DEFAULT 0,
                 lore        TEXT NOT NULL DEFAULT '[]',  -- JSON: list[dict{q,a,ts}]，见闻录
+                character_state TEXT NOT NULL DEFAULT '{}', -- JSON: dict，主角当前状态
                 world_memory TEXT NOT NULL DEFAULT '[]', -- JSON: list[dict]，长期世界记忆
                 inventory   TEXT NOT NULL DEFAULT '[]',  -- JSON: list[dict{id,name,attrs,kind,whereabouts,last_turn}]，物品影子库
                 director_state TEXT NOT NULL DEFAULT '{}', -- JSON: dict，导演模块状态（当前爽点/留白期等）
@@ -51,11 +54,81 @@ def init() -> None:
             conn.execute("ALTER TABLE saves ADD COLUMN lore TEXT NOT NULL DEFAULT '[]'")
         if "inventory" not in cols:
             conn.execute("ALTER TABLE saves ADD COLUMN inventory TEXT NOT NULL DEFAULT '[]'")
+        if "character_state" not in cols:
+            conn.execute("ALTER TABLE saves ADD COLUMN character_state TEXT NOT NULL DEFAULT '{}'")
         if "world_memory" not in cols:
             conn.execute("ALTER TABLE saves ADD COLUMN world_memory TEXT NOT NULL DEFAULT '[]'")
         if "director_state" not in cols:
             conn.execute("ALTER TABLE saves ADD COLUMN director_state TEXT NOT NULL DEFAULT '{}'")
         _migrate_lore_to_world_memory(conn)
+        _migrate_character_state(conn)
+
+
+_STATUS_RE = re.compile(r"《状态》(.*?)《/状态》", re.S)
+_STATE_FIELDS = {
+    "境界": "realm",
+    "气血": "health",
+    "灵力": "spiritual_power",
+    "修为": "cultivation",
+    "状态": "condition",
+    "资源": "resources",
+    "法宝": "artifacts",
+}
+
+
+def _parse_character_state(status_text: str, turn: int, updated_at: float) -> dict:
+    state = {}
+    for line in status_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        m = re.match(r"^(.+?)[：:]\s*(.*)$", line)
+        if not m:
+            continue
+        key = _STATE_FIELDS.get(m.group(1).strip())
+        if key:
+            state[key] = m.group(2).strip()
+    if not state:
+        return {}
+    state["turn"] = turn
+    state["updated_at"] = updated_at
+    return state
+
+
+def _latest_character_state(transcript: list[dict], turns: int, updated_at: float) -> dict:
+    for blk in reversed(transcript):
+        if blk.get("role") != "narration":
+            continue
+        match = _STATUS_RE.search(blk.get("text", ""))
+        if match:
+            return _parse_character_state(match.group(1), turns, updated_at)
+    return {}
+
+
+def _migrate_character_state(conn: sqlite3.Connection) -> None:
+    """从旧 transcript 的最后一个状态面板回填主角状态；已有值不覆盖。"""
+    rows = conn.execute(
+        "SELECT id, transcript, turns, updated_at, character_state FROM saves "
+        "WHERE transcript IS NOT NULL AND transcript != '[]'"
+    ).fetchall()
+    for row in rows:
+        try:
+            existing = json.loads(row["character_state"] or "{}")
+            transcript = json.loads(row["transcript"] or "[]")
+        except json.JSONDecodeError:
+            continue
+        if existing:
+            continue
+        character_state = _latest_character_state(
+            transcript,
+            int(row["turns"] or 0),
+            float(row["updated_at"] or time.time()),
+        )
+        if character_state:
+            conn.execute(
+                "UPDATE saves SET character_state=? WHERE id=?",
+                (json.dumps(character_state, ensure_ascii=False), row["id"]),
+            )
 
 
 def _migrate_lore_to_world_memory(conn: sqlite3.Connection) -> None:
@@ -146,6 +219,15 @@ def save_world_memory(sid: str, world_memory: list[dict]) -> None:
         )
 
 
+def save_character_state(sid: str, character_state: dict) -> None:
+    """只更新主角当前状态快照。"""
+    with _conn() as conn:
+        conn.execute(
+            "UPDATE saves SET character_state=?, updated_at=? WHERE id=?",
+            (json.dumps(character_state, ensure_ascii=False), time.time(), sid),
+        )
+
+
 def append_world_memory(sid: str, items: list[dict]) -> list[dict] | None:
     """追加世界记忆并返回新列表；存档不存在返回 None。"""
     if not items:
@@ -197,6 +279,7 @@ def load(sid: str) -> dict | None:
         "transcript": json.loads(row["transcript"]),
         "turns": row["turns"],
         "lore": json.loads(row["lore"] or "[]"),
+        "character_state": json.loads(row["character_state"] or "{}"),
         "world_memory": json.loads(row["world_memory"] or "[]"),
         "inventory": json.loads(row["inventory"] or "[]"),
         "director_state": json.loads(row["director_state"] or "{}"),

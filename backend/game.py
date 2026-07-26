@@ -6,6 +6,7 @@
 每个存档维护三份核心数据：
 - messages   : 喂给 LLM 的消息（system + user/assistant，按 MAX_TURNS 截断）
 - transcript : 展示用剧情块列表 [{role: narration|player, text}]，只增不删
+- character_state : 主角当前状态快照，按最新《状态》面板覆盖
 - world_memory : 长期世界记忆，独立于短期上下文窗口，按需召回注入
 """
 
@@ -27,7 +28,7 @@ from prompts import (
     SYSTEM_PROMPT,
 )
 
-# save_id -> {"messages": list[dict], "transcript": list[dict], "turns": int, "world_memory": list[dict]}
+# save_id -> {"messages": list[dict], "transcript": list[dict], "turns": int, "character_state": dict, "world_memory": list[dict]}
 _CACHE: dict[str, dict] = {}
 _LOG = logging.getLogger(__name__)
 
@@ -74,6 +75,7 @@ def create_session(name: str = DEFAULT_NAME) -> str:
         "messages": messages,
         "transcript": [],
         "turns": 0,
+        "character_state": {},
         "world_memory": [],
         "inventory": [],
         "director_state": {},
@@ -102,6 +104,7 @@ def _get(session_id: str) -> dict | None:
         "messages": data["messages"],
         "transcript": data["transcript"],
         "turns": data["turns"],
+        "character_state": data.get("character_state", {}),
         "world_memory": data.get("world_memory", []),
         "inventory": data.get("inventory", []),
         "director_state": data.get("director_state", {}) or {},
@@ -184,6 +187,68 @@ def _split_top_level(val: str) -> list[str]:
     if buf:
         parts.append("".join(buf))
     return parts
+
+
+_STATE_FIELDS = {
+    "境界": "realm",
+    "气血": "health",
+    "灵力": "spiritual_power",
+    "修为": "cultivation",
+    "状态": "condition",
+    "资源": "resources",
+    "法宝": "artifacts",
+}
+
+_STATE_LABELS = (
+    ("realm", "境界"),
+    ("health", "气血"),
+    ("spiritual_power", "灵力"),
+    ("cultivation", "修为"),
+    ("condition", "状态"),
+    ("resources", "资源"),
+    ("artifacts", "法宝"),
+)
+
+
+def _parse_character_state(status_text: str | None, turn: int) -> dict:
+    """从《状态》面板解析主角当前状态快照。解析失败返回空 dict。"""
+    if not status_text:
+        return {}
+    character_state: dict = {}
+    for line in status_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        m = re.match(r"^(.+?)[：:]\s*(.*)$", line)
+        if not m:
+            continue
+        key = _STATE_FIELDS.get(m.group(1).strip())
+        if key:
+            character_state[key] = m.group(2).strip()
+    if not character_state:
+        return {}
+    character_state["turn"] = turn
+    character_state["updated_at"] = time.time()
+    return character_state
+
+
+def _character_state_dossier(character_state: dict) -> str:
+    """把最新版主角状态拼成独立约束串。空则返回 ""。"""
+    if not character_state:
+        return ""
+    lines = []
+    for key, label in _STATE_LABELS:
+        val = (character_state.get(key) or "").strip()
+        if val:
+            lines.append(f"{label}：{val}")
+    if not lines:
+        return ""
+    body = "\n".join(lines)
+    return (
+        "【当前主角状态（最新版，以此为准）】\n"
+        f"{body}\n"
+        "【/当前主角状态】\n\n"
+    )
 
 
 # ---- 物品影子库：解析、冷热划分、召回、注入 ----
@@ -479,7 +544,7 @@ def _world_memory_dossier(items: list[dict]) -> str:
 
 
 def _injection(state: dict, action: str | None) -> str:
-    """行动/开场前注入的约束串：当前物品档案（热+召回）+ 世界记忆。
+    """行动/开场前注入的约束串：当前主角状态 + 当前物品档案（热+召回）+ 世界记忆。
 
     冷热按 turn - last_turn < HOT_TURNS 划分。有玩家输入时对冷物品做语义召回，
     命中者升回热并并入注入。把本次实际注入的物品名记入 state['_injected']，
@@ -494,7 +559,8 @@ def _injection(state: dict, action: str | None) -> str:
     query = "\n\n".join(p for p in (action or "", _recent_scene(state["transcript"])) if p)
     memories = _recall_world_memory(state, query)
     return (
-        _inventory_dossier(active)
+        _character_state_dossier(state.get("character_state") or {})
+        + _inventory_dossier(active)
         + _world_memory_dossier(memories)
         + _director_injection(state.get("director_state") or {})
     )
@@ -503,9 +569,9 @@ def _injection(state: dict, action: str | None) -> str:
 def messages_for_action(session_id: str, action: str) -> list[dict]:
     """构造用于响应玩家行动的消息。
 
-    在玩家行动前注入"当前物品档案"（热物品 + 按本次输入语义召回的冷物品）与
-    "世界记忆"，让相关物件属性与已问明的背景即使在上下文被 MAX_TURNS 截断后也
-    不丢失。冷物品不进 prompt，故 LLM 不会再把无关旧物抄进面板，物品栏膨胀自止。
+    在玩家行动前注入"当前主角状态"、"当前物品档案"（热物品 + 按本次输入语义召回的冷物品）
+    与"世界记忆"，让状态、物件属性与已问明的背景即使在上下文被 MAX_TURNS 截断后
+    也不丢失。冷物品不进 prompt，故 LLM 不会再把无关旧物抄进面板，物品栏膨胀自止。
     注入串只随本次请求发送，不写入历史（落库仍是玩家原始行动）。
     """
     state = _get(session_id)
@@ -573,9 +639,18 @@ def commit(session_id: str, user_content: str | None, assistant_content: str) ->
 
     state["turns"] += 1
     _trim(state)
+    status_match = _STATUS_RE.search(assistant_content)
+    character_state = _parse_character_state(
+        status_match.group(1) if status_match else None,
+        state["turns"],
+    )
+    if character_state:
+        state["character_state"] = character_state
     # 解析本回合面板回影子库（新物入库、失去物移除、正文命中刷 last_turn）
     _reconcile_inventory(state, assistant_content)
     store.save_state(session_id, state["messages"], state["transcript"], state["turns"])
+    if character_state:
+        store.save_character_state(session_id, character_state)
     store.save_inventory(session_id, state["inventory"])
     _schedule_memory_extraction(session_id, user_content, assistant_content, state["turns"])
     _schedule_director(session_id, user_content, assistant_content, state["turns"])
@@ -922,6 +997,12 @@ def _trim(state: dict) -> None:
 
 
 # ---- 物品影子库（供前端读档/流结束后渲染冷热分组）----
+
+def get_character_state(session_id: str) -> dict | None:
+    """返回主角当前状态快照；存档不存在返回 None。"""
+    state = _get(session_id)
+    return None if state is None else state.get("character_state", {})
+
 
 def get_inventory(session_id: str) -> list[dict] | None:
     """返回物品库视图，每件带 hot 标记（供前端分组：热=关注区，冷=折叠区）。
