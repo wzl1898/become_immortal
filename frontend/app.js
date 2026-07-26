@@ -161,6 +161,28 @@ function renderStatus(status, objects) {
   statusPanel.classList.remove("empty");
 }
 
+function statusTextFromCharacterState(state) {
+  if (!state || !Object.keys(state).length) return "";
+  const fields = [
+    ["realm", "境界"],
+    ["health", "气血"],
+    ["spiritual_power", "灵力"],
+    ["cultivation", "修为"],
+    ["condition", "状态"],
+    ["resources", "资源"],
+    ["artifacts", "法宝"],
+  ];
+  return fields
+    .map(([key, label]) => state[key] ? `${label}：${state[key]}` : "")
+    .filter(Boolean)
+    .join("\n");
+}
+
+function renderCharacterState(state) {
+  const status = statusTextFromCharacterState(state);
+  if (status) renderStatus(status, "");
+}
+
 // 关键物件块：主角未拥有但有剧情分量之物，每行"名称（属性）——归属"
 function renderObjects(objects) {
   const lines = (objects || "").split("\n").map((l) => l.trim()).filter(Boolean);
@@ -284,6 +306,7 @@ async function loadGame(sid, name) {
     worldMemory = data.world_memory || data.lore || [];
     storyEl.innerHTML = "";
     clearStatus();
+    renderCharacterState(data.character_state);
     for (const blk of data.transcript) {
       if (blk.role === "player") addBlock("player", blk.text);
       else renderNarration(blk.text);
