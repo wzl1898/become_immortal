@@ -20,6 +20,7 @@ import embed
 import store
 from llm import complete_chat
 from prompts import (
+    DIRECTOR_SYSTEM_PROMPT,
     INQUIRY_SYSTEM_PROMPT,
     MEMORY_EXTRACT_SYSTEM_PROMPT,
     OPENING_PROMPT,
@@ -52,6 +53,14 @@ RECALL_THRESHOLD = 0.35
 
 DEFAULT_NAME = "无名修士"
 
+# ---- 导演模块（前瞻性调度：养一个爽点，指路不写戏，上膛不开枪）----
+# 连续偏离多少轮就弃掉当前爽点、改跟玩家的路（实测微调）。
+DIRECTOR_DRIFT_K = 3
+# 爽点退场（兑现或废弃）后留白多少轮再孕育下一个。
+DIRECTOR_COOLDOWN_TURNS = 3
+# 注入给 GM 的导演块字数上限，防喧宾夺主。
+DIRECTOR_INJECT_MAX_CHARS = 500
+
 
 def init() -> None:
     store.init()
@@ -67,6 +76,7 @@ def create_session(name: str = DEFAULT_NAME) -> str:
         "turns": 0,
         "world_memory": [],
         "inventory": [],
+        "director_state": {},
         "_injected": [],  # 上一回合注入过（热+召回）的物品归一化名，供 _reconcile 判失去
     }
     return sid
@@ -94,6 +104,7 @@ def _get(session_id: str) -> dict | None:
         "turns": data["turns"],
         "world_memory": data.get("world_memory", []),
         "inventory": data.get("inventory", []),
+        "director_state": data.get("director_state", {}) or {},
         "_injected": [],
     }
     return _CACHE[session_id]
@@ -482,7 +493,11 @@ def _injection(state: dict, action: str | None) -> str:
     state["_injected"] = [it["name"] for it in active]
     query = "\n\n".join(p for p in (action or "", _recent_scene(state["transcript"])) if p)
     memories = _recall_world_memory(state, query)
-    return _inventory_dossier(active) + _world_memory_dossier(memories)
+    return (
+        _inventory_dossier(active)
+        + _world_memory_dossier(memories)
+        + _director_injection(state.get("director_state") or {})
+    )
 
 
 def messages_for_action(session_id: str, action: str) -> list[dict]:
@@ -563,6 +578,7 @@ def commit(session_id: str, user_content: str | None, assistant_content: str) ->
     store.save_state(session_id, state["messages"], state["transcript"], state["turns"])
     store.save_inventory(session_id, state["inventory"])
     _schedule_memory_extraction(session_id, user_content, assistant_content, state["turns"])
+    _schedule_director(session_id, user_content, assistant_content, state["turns"])
 
 
 def _schedule_memory_extraction(
@@ -641,6 +657,27 @@ def _extract_json_array(raw: str) -> list | None:
     return data if isinstance(data, list) else None
 
 
+def _extract_json_object(raw: str) -> dict | None:
+    """从模型输出里抠出一个 JSON 对象；抠不出返回 None。仿 _extract_json_array。"""
+    text = (raw or "").strip()
+    if not text:
+        return None
+    fence = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
+    if fence:
+        text = fence.group(1).strip()
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        start, end = text.find("{"), text.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return None
+        try:
+            data = json.loads(text[start:end + 1])
+        except json.JSONDecodeError:
+            return None
+    return data if isinstance(data, dict) else None
+
+
 def _parse_extracted_memories(raw: str, turn: int) -> list[dict]:
     data = _extract_json_array(raw)
     if not data:
@@ -674,6 +711,206 @@ def _parse_extracted_memories(raw: str, turn: int) -> list[dict]:
             "ts": now,
         })
     return items
+
+
+# ---- 导演模块：注入渲染 / 异步维护 / Python 兜底 ----
+
+def _director_injection(state: dict) -> str:
+    """把导演状态渲染成给 GM 的注入块。留白期或无爽点返回 ""（不注入）。
+
+    守住"上膛不开枪"：块内只给背景压力与机会（剧情指导），并声明玩家行动仍决定走向；
+    armed 时附上触发条件与兑现方向，供 GM 在玩家跨线的同一轮当场兑现。
+    """
+    if not state or state.get("phase") == "cooldown":
+        return ""
+    payoff = state.get("payoff")
+    if not isinstance(payoff, dict):
+        return ""
+    guidance = (payoff.get("guidance") or "").strip()
+    if not guidance:
+        return ""
+    lines = [
+        "【导演·剧情走向（仅背景压力与机会，非必演剧本；玩家行动仍决定走向）】",
+        f"- 本轮推进方向：{guidance}",
+    ]
+    if payoff.get("armed"):
+        trigger = (payoff.get("trigger") or "").strip()
+        desc = (payoff.get("desc") or "").strip()
+        if trigger:
+            lines.append(f"- 若玩家本轮做到「{trigger}」，即当场顺势兑现：{desc}")
+        lines.append("- 玩家若未触及上述条件，则勿强行兑现，只按其真实行动合理推进。")
+    body = "\n".join(lines)
+    if len(body) > DIRECTOR_INJECT_MAX_CHARS:
+        body = body[:DIRECTOR_INJECT_MAX_CHARS].rstrip()
+    return f"{body}\n【/导演】\n\n"
+
+
+def _schedule_director(
+    session_id: str,
+    user_content: str | None,
+    assistant_content: str,
+    turn: int,
+) -> None:
+    """后台跑导演思维链；无运行中的事件循环时跳过，不影响主流程（降级）。"""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    loop.create_task(_run_director(session_id, user_content, assistant_content, turn))
+
+
+async def _run_director(
+    session_id: str,
+    user_content: str | None,
+    assistant_content: str,
+    turn: int,
+) -> None:
+    """调导演 LLM 更新爽点状态；解析失败/异常则保留旧状态（降级不注入错值）。"""
+    state = _CACHE.get(session_id)
+    if state is None:
+        return
+    prev = state.get("director_state") or {}
+    try:
+        raw = await complete_chat(
+            [
+                {"role": "system", "content": DIRECTOR_SYSTEM_PROMPT},
+                {"role": "user", "content": _director_user_prompt(user_content, assistant_content, turn, prev)},
+            ],
+            temperature=0.4,
+            max_tokens=700,
+        )
+        result = _extract_json_object(raw)
+        if result is None:
+            return
+        new_state, buried = _apply_director_result(prev, result, turn)
+        state["director_state"] = new_state
+        store.save_director_state(session_id, new_state)
+        if buried:
+            current = store.append_world_memory(session_id, [buried])
+            if current is not None:
+                state["world_memory"] = current
+    except Exception:  # noqa: BLE001
+        _LOG.exception("director failed for session %s turn %s", session_id, turn)
+
+
+def _director_user_prompt(user_content: str | None, assistant_content: str, turn: int, prev: dict) -> str:
+    body = _narration_body(assistant_content)
+    status = _STATUS_RE.search(assistant_content)
+    action = user_content if user_content is not None else "（开始这一世）"
+    phase = prev.get("phase") or "active"
+    parts = [
+        f"【回合】\n{turn}",
+        f"【当前阶段】\n{phase}（cooldown=留白期，不上膛只顺势观察；active=正常养爽点）",
+        f"【玩家行动】\n{action}",
+        f"【本轮叙事正文】\n{body}",
+    ]
+    if status:
+        parts.append(f"【状态面板】\n{status.group(1).strip()}")
+    parts.append(f"【上一轮导演状态】\n{json.dumps(prev, ensure_ascii=False)}")
+    return "\n\n".join(parts)
+
+
+def _apply_director_result(prev: dict, result: dict, turn: int) -> tuple[dict, dict | None]:
+    """把导演 LLM 的判断并进状态，并做 Python 侧兜底夹逼（drift/cooldown/字段校验）。
+
+    返回 (新状态, 可选的暗线世界记忆项)。留白/偏离/停滞主要由 LLM 在提示词约束下更新，
+    这里只兜底：连续偏离达 K 强制留白、留白到点转回 active、abandon/fired 一律进留白。
+    """
+    prev = prev if isinstance(prev, dict) else {}
+    phase = prev.get("phase") or "active"
+    drift_turns = int(prev.get("drift_turns") or 0)
+    buried: dict | None = None
+
+    # 留白期：到点转回 active，其余保持无爽点
+    if phase == "cooldown":
+        cooldown_until = int(prev.get("cooldown_until") or 0)
+        new_state = {
+            "payoff": None,
+            "phase": "cooldown" if turn < cooldown_until else "active",
+            "cooldown_until": cooldown_until,
+            "drift_turns": 0,
+            "last_fired": prev.get("last_fired"),
+            "note": (result.get("note") or "").strip(),
+        }
+        return new_state, None
+
+    payoff_in = result.get("payoff") if isinstance(result.get("payoff"), dict) else None
+    fired = bool(result.get("fired"))
+    abandon = bool(result.get("abandon"))
+    drift = bool(result.get("drift"))
+
+    # 连续偏离累计；达阈值强制废弃
+    drift_turns = drift_turns + 1 if drift else 0
+    if drift_turns >= DIRECTOR_DRIFT_K:
+        abandon = True
+
+    # 退场（兑现或废弃）→ 埋暗线（仅废弃时）+ 进入留白
+    if fired or abandon:
+        outcome = "fired" if fired else "abandoned"
+        src = payoff_in if isinstance(payoff_in, dict) else prev.get("payoff")
+        desc = (src or {}).get("desc", "") if isinstance(src, dict) else ""
+        if abandon and not fired:
+            thread = (result.get("buried_thread") or "").strip()
+            if thread:
+                buried = {
+                    "id": uuid.uuid4().hex,
+                    "type": "plot",
+                    "text": thread,
+                    "entities": [],
+                    "turn": turn,
+                    "importance": 0.4,
+                    "source": "director",
+                    "ts": time.time(),
+                }
+        new_state = {
+            "payoff": None,
+            "phase": "cooldown",
+            "cooldown_until": turn + DIRECTOR_COOLDOWN_TURNS,
+            "drift_turns": 0,
+            "last_fired": {"desc": desc, "outcome": outcome, "turn": turn},
+            "note": (result.get("note") or "").strip(),
+        }
+        return new_state, buried
+
+    # 正常维护当前爽点
+    payoff_out = _sanitize_payoff(payoff_in, prev.get("payoff"), turn)
+    new_state = {
+        "payoff": payoff_out,
+        "phase": "active",
+        "cooldown_until": int(prev.get("cooldown_until") or 0),
+        "drift_turns": drift_turns,
+        "last_fired": prev.get("last_fired"),
+        "note": (result.get("note") or "").strip(),
+    }
+    return new_state, None
+
+
+def _sanitize_payoff(payoff_in: dict | None, prev_payoff, turn: int) -> dict | None:
+    """校验/夹逼爽点字段；desc 缺失视为无爽点。"""
+    if not isinstance(payoff_in, dict):
+        return None
+    desc = (payoff_in.get("desc") or "").strip()
+    if not desc:
+        return None
+
+    def _clip(v):
+        try:
+            return max(0.0, min(1.0, float(v)))
+        except (TypeError, ValueError):
+            return 0.0
+
+    start_turn = turn
+    if isinstance(prev_payoff, dict) and prev_payoff.get("desc") == desc:
+        start_turn = int(prev_payoff.get("start_turn") or turn)
+    return {
+        "desc": desc,
+        "trigger": (payoff_in.get("trigger") or "").strip(),
+        "guidance": (payoff_in.get("guidance") or "").strip(),
+        "armed": bool(payoff_in.get("armed")),
+        "maturity": _clip(payoff_in.get("maturity")),
+        "proximity": _clip(payoff_in.get("proximity")),
+        "start_turn": start_turn,
+    }
 
 
 def _trim(state: dict) -> None:
@@ -712,6 +949,12 @@ def get_inventory(session_id: str) -> list[dict] | None:
 def get_world_memory(session_id: str) -> list[dict] | None:
     state = _get(session_id)
     return None if state is None else state["world_memory"]
+
+
+def get_director_state(session_id: str) -> dict | None:
+    """返回导演状态（供前端调试/展示）；存档不存在返回 None。"""
+    state = _get(session_id)
+    return None if state is None else (state.get("director_state") or {})
 
 
 def commit_inquiry_memory(session_id: str, question: str, answer: str) -> None:

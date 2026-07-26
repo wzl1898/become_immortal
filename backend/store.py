@@ -39,6 +39,7 @@ def init() -> None:
                 lore        TEXT NOT NULL DEFAULT '[]',  -- JSON: list[dict{q,a,ts}]，见闻录
                 world_memory TEXT NOT NULL DEFAULT '[]', -- JSON: list[dict]，长期世界记忆
                 inventory   TEXT NOT NULL DEFAULT '[]',  -- JSON: list[dict{id,name,attrs,kind,whereabouts,last_turn}]，物品影子库
+                director_state TEXT NOT NULL DEFAULT '{}', -- JSON: dict，导演模块状态（当前爽点/留白期等）
                 created_at  REAL NOT NULL,
                 updated_at  REAL NOT NULL
             )
@@ -52,6 +53,8 @@ def init() -> None:
             conn.execute("ALTER TABLE saves ADD COLUMN inventory TEXT NOT NULL DEFAULT '[]'")
         if "world_memory" not in cols:
             conn.execute("ALTER TABLE saves ADD COLUMN world_memory TEXT NOT NULL DEFAULT '[]'")
+        if "director_state" not in cols:
+            conn.execute("ALTER TABLE saves ADD COLUMN director_state TEXT NOT NULL DEFAULT '{}'")
         _migrate_lore_to_world_memory(conn)
 
 
@@ -172,6 +175,15 @@ def save_inventory(sid: str, inventory: list[dict]) -> None:
         )
 
 
+def save_director_state(sid: str, state: dict) -> None:
+    """只更新导演模块状态。"""
+    with _conn() as conn:
+        conn.execute(
+            "UPDATE saves SET director_state=?, updated_at=? WHERE id=?",
+            (json.dumps(state, ensure_ascii=False), time.time(), sid),
+        )
+
+
 def load(sid: str) -> dict | None:
     """读取单个存档的完整数据；不存在返回 None。"""
     with _conn() as conn:
@@ -187,6 +199,7 @@ def load(sid: str) -> dict | None:
         "lore": json.loads(row["lore"] or "[]"),
         "world_memory": json.loads(row["world_memory"] or "[]"),
         "inventory": json.loads(row["inventory"] or "[]"),
+        "director_state": json.loads(row["director_state"] or "{}"),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }

@@ -125,6 +125,7 @@ async def load(sid: str):
         "world_memory": game.get_world_memory(sid) or [],
         "lore": game.get_world_memory(sid) or [],
         "inventory": game.get_inventory(sid) or [],
+        "director_state": game.get_director_state(sid) or {},
     }
 
 
