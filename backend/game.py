@@ -40,6 +40,8 @@ WORLD_MEMORY_RECALL_TOP_K = 8
 WORLD_MEMORY_RECALL_THRESHOLD = 0.32
 WORLD_MEMORY_INJECT_MAX_CHARS = 2200
 MEMORY_EXTRACT_MAX_ITEMS = 5
+# 提取前召回多少条已有记忆喂给提取器判增量（避免复述型重复入库）
+MEMORY_EXTRACT_RECALL_K = 8
 
 # 喂给问询的"当前情境"取最近多少条 narration 的正文
 INQUIRY_SCENE_TURNS = 3
@@ -685,10 +687,11 @@ async def _extract_and_store_memory(
     turn: int,
 ) -> None:
     try:
+        known = _recall_for_extraction(session_id, user_content, assistant_content)
         raw = await complete_chat(
             [
                 {"role": "system", "content": MEMORY_EXTRACT_SYSTEM_PROMPT},
-                {"role": "user", "content": _memory_extract_user_prompt(user_content, assistant_content, turn)},
+                {"role": "user", "content": _memory_extract_user_prompt(user_content, assistant_content, turn, known)},
             ],
             temperature=0.2,
             max_tokens=800,
@@ -703,7 +706,37 @@ async def _extract_and_store_memory(
         _LOG.exception("world memory extraction failed for session %s turn %s", session_id, turn)
 
 
-def _memory_extract_user_prompt(user_content: str | None, assistant_content: str, turn: int) -> str:
+def _recall_for_extraction(
+    session_id: str, user_content: str | None, assistant_content: str
+) -> list[dict]:
+    """提取前召回与本轮最相关的已有记忆，供提取器判增量、避免复述重记。
+
+    降级：embedding 不可用 / 无旧记忆 / 任何异常 → 返回 []，提取退回原始行为。
+    """
+    try:
+        state = _CACHE.get(session_id)
+        if not state:
+            return []
+        world_memory = state.get("world_memory") or []
+        if not world_memory:
+            return []
+        query = f"{user_content or ''}\n{_narration_body(assistant_content)}".strip()
+        candidates = [_memory_candidate(m) for m in world_memory]
+        idxs = embed.recall(query, candidates, top_k=MEMORY_EXTRACT_RECALL_K, threshold=0.0)
+        if not idxs:
+            return []
+        return [world_memory[i] for i in idxs]
+    except Exception:  # noqa: BLE001
+        _LOG.exception("recall for extraction failed for session %s", session_id)
+        return []
+
+
+def _memory_extract_user_prompt(
+    user_content: str | None,
+    assistant_content: str,
+    turn: int,
+    known_memories: list[dict] | None = None,
+) -> str:
     status = _STATUS_RE.search(assistant_content)
     objects = _OBJECTS_RE.search(assistant_content)
     body = _narration_body(assistant_content)
@@ -717,6 +750,18 @@ def _memory_extract_user_prompt(user_content: str | None, assistant_content: str
         parts.append(f"【状态面板】\n{status.group(1).strip()}")
     if objects:
         parts.append(f"【关键物件面板】\n{objects.group(1).strip()}")
+    if known_memories:
+        lines = []
+        for mem in known_memories:
+            text = _memory_text(mem)
+            if not text:
+                continue
+            kind = mem.get("type") or "plot"
+            lines.append(f"- [{kind}] {text}")
+        if lines:
+            parts.append(
+                "【已记录的相关记忆（这些事实已在库中，不要重复提取）】\n" + "\n".join(lines)
+            )
     return "\n\n".join(parts)
 
 
