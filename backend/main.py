@@ -131,6 +131,7 @@ async def load(sid: str):
         "lore": game.get_world_memory(sid) or [],
         "inventory": game.get_inventory(sid) or [],
         "director_state": game.get_director_state(sid) or {},
+        "world_state": game.get_world_state(sid) or {},
     }
 
 
@@ -238,6 +239,15 @@ async def director(sid: str):
     if state is None:
         raise HTTPException(404, "存档不存在")
     return {"director_state": state, "turns": game.get_turns(sid) or 0}
+
+
+@app.get("/api/world-state")
+async def world_state(sid: str):
+    """读取主角当前位置与知识视野（不展示行动菜单）。"""
+    state = game.get_world_state(sid)
+    if state is None:
+        raise HTTPException(404, "存档不存在")
+    return {"world_state": state}
 
 
 @app.post("/api/world-memory/delete")

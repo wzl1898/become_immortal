@@ -17,6 +17,7 @@ import re
 import time
 import uuid
 
+import constraints
 import embed
 import store
 from llm import complete_chat
@@ -136,7 +137,8 @@ def messages_for_opening(session_id: str) -> list[dict]:
     """
     state = _get(session_id)
     inject = _injection(state, None)
-    content = f"{inject}{OPENING_PROMPT}" if inject else OPENING_PROMPT
+    world_constraints = constraints.opening_constraints(session_id)
+    content = f"{world_constraints}{inject}{OPENING_PROMPT}"
     return state["messages"] + [{"role": "user", "content": content}]
 
 
@@ -585,8 +587,9 @@ def messages_for_action(session_id: str, action: str) -> list[dict]:
     注入串只随本次请求发送，不写入历史（落库仍是玩家原始行动）。
     """
     state = _get(session_id)
+    world_constraints = constraints.action_constraints(session_id, action)
     inject = _injection(state, action)
-    content = f"{inject}{action}" if inject else action
+    content = f"{world_constraints}{inject}{action}"
     return state["messages"] + [{"role": "user", "content": content}]
 
 
@@ -1156,6 +1159,13 @@ def get_director_state(session_id: str) -> dict | None:
     """返回导演状态（供前端调试/展示）；存档不存在返回 None。"""
     state = _get(session_id)
     return None if state is None else (state.get("director_state") or {})
+
+
+def get_world_state(session_id: str) -> dict | None:
+    """返回主角的地理位置和知识视野；存档不存在返回 None。"""
+    if not exists(session_id):
+        return None
+    return constraints.get_world_state(session_id)
 
 
 def get_turns(session_id: str) -> int | None:

@@ -60,6 +60,7 @@ def init() -> None:
             conn.execute("ALTER TABLE saves ADD COLUMN world_memory TEXT NOT NULL DEFAULT '[]'")
         if "director_state" not in cols:
             conn.execute("ALTER TABLE saves ADD COLUMN director_state TEXT NOT NULL DEFAULT '{}'")
+        _init_world_tables(conn)
         _migrate_lore_to_world_memory(conn)
         _migrate_character_state(conn)
 
@@ -183,7 +184,485 @@ def create(name: str, messages: list[dict]) -> str:
             "VALUES (?, ?, ?, ?, 0, '[]', '[]', ?, ?)",
             (sid, name, json.dumps(messages, ensure_ascii=False), "[]", now, now),
         )
+        _ensure_default_save_world_state(conn, sid)
     return sid
+
+
+# ---- 固定世界库 + 存档世界状态 ----
+
+WORLD_VERSION = 1
+WORLD_NAME = "玄苍大陆"
+
+_REGIONS = [
+    ("qingwu_county", "青梧郡", "凡人与低阶修士边界", "灵气稀薄，村镇、山野、低阶坊市与小宗门交错。"),
+    ("chiyuan_ridge", "赤渊岭", "矿脉、火脉与散修争夺", "赤铁矿场、地火裂隙和散修黑市密布。"),
+    ("hanshui_marsh", "寒水泽", "水域、妖族与魂道遗迹", "湖泽岛屿连绵，水府、沉船和阴魂传闻极多。"),
+    ("central_lingdu", "中州灵都", "宗门、世家与仙城秩序", "大宗门、仙族、万宝楼与散修登记体系的中心。"),
+    ("wanzang_waste", "万葬荒原", "古战场与禁地", "古战场阴气沉积，剑冢、碑林与古宗废墟散落其间。"),
+    ("tianduan_mountains", "天断山脉", "大陆边界与后期险地", "雷泽、妖岭与空间裂隙横亘在大陆边缘。"),
+]
+
+_LOCATIONS = [
+    ("baishi_village", "qingwu_county", "白石村", "village", None, "偏僻凡人村落，主角开局之地。"),
+    ("baishi_back_mountain", "qingwu_county", "白石村后山", "wild", "baishi_village", "草木繁密，夜里偶有微光。"),
+    ("baishi_ruined_temple", "qingwu_county", "村外破庙", "site", "baishi_village", "荒废多年，香火断绝。"),
+    ("qingxi_town", "qingwu_county", "青溪镇", "town", None, "白石村外最近的大镇，有药铺、武馆和散修传闻。"),
+    ("qingmu_market", "qingwu_county", "青木集", "market", None, "半公开的低阶散修交易地。"),
+    ("black_wind_mountain", "qingwu_county", "黑风山", "wild", None, "山势阴沉，外围有猎道，深处有妖兽。"),
+    ("black_wind_outer", "qingwu_county", "黑风山外围", "wild", "black_wind_mountain", "乱石坡与密林交错，常有采药人失踪。"),
+    ("xuanxiao_outer_gate", "qingwu_county", "玄霄宗外山门", "sect", None, "青梧郡一带有名的修仙宗门入口。"),
+    ("qinglian_valley", "qingwu_county", "青莲谷", "secret_entrance", None, "谷中常年雾锁，少有人能深入。"),
+    ("red_iron_mine", "chiyuan_ridge", "赤铁矿场", "mine", None, "赤渊岭最大的赤铁矿脉。"),
+    ("lieyang_market", "chiyuan_ridge", "烈阳坊市", "market", None, "散修与矿修交易之地。"),
+    ("bloodsha_cave_ruin", "chiyuan_ridge", "血煞洞遗址", "ruin", None, "旧魔修洞府残址。"),
+    ("earthfire_cavern", "chiyuan_ridge", "地火窟", "site", None, "天然地火汇聚之处。"),
+    ("hanshui_market", "hanshui_marsh", "寒水坊", "market", None, "寒水泽水路坊市。"),
+    ("mist_conch_island", "hanshui_marsh", "雾螺岛", "island", None, "散修聚居岛。"),
+    ("sunken_star_lake", "hanshui_marsh", "沉星湖", "lake", None, "湖底传有古沉船与水府残址。"),
+    ("white_bone_ferry", "hanshui_marsh", "白骨渡", "ferry", None, "阴气重的古渡口。"),
+    ("lingdu_city", "central_lingdu", "灵都仙城", "city", None, "玄苍大陆中部最大仙城。"),
+    ("tianheng_sect", "central_lingdu", "天衡宗", "sect", None, "中州正道大宗。"),
+    ("taixuan_academy", "central_lingdu", "太玄书院", "academy", None, "以功法、阵符和典籍闻名。"),
+    ("wanbao_tower", "central_lingdu", "万宝楼总阁", "market", None, "拍卖、交易和情报势力总阁。"),
+    ("wanzang_camp", "wanzang_waste", "万葬原外围营地", "camp", None, "进入万葬荒原前的修士落脚处。"),
+    ("broken_sword_mound", "wanzang_waste", "断剑冢", "ruin", None, "古战场中的剑修遗迹。"),
+    ("soul_stele_forest", "wanzang_waste", "镇魂碑林", "ruin", None, "碑林封着残魂与旧战记忆。"),
+    ("nameless_old_sect", "wanzang_waste", "无名古宗废墟", "ruin", None, "失落古宗门遗址。"),
+    ("tianduan_pass", "tianduan_mountains", "天断关", "pass", None, "通往天断山脉的要塞。"),
+    ("thunder_marsh_peak", "tianduan_mountains", "雷泽峰", "peak", None, "雷气常年不散。"),
+    ("sky_demon_ridge", "tianduan_mountains", "天妖岭", "wild", None, "高阶妖族活动区域。"),
+    ("rift_gorge", "tianduan_mountains", "裂天峡", "rift", None, "传有空间裂隙。"),
+]
+
+_ROUTES = [
+    ("baishi_to_qingxi", "baishi_village", "qingxi_town", "白石村至青溪镇土路", "low", "low", "村口土路通往青溪镇。"),
+    ("baishi_to_back_mountain", "baishi_village", "baishi_back_mountain", "白石村后山小径", "low", "low", "村后柴道入山。"),
+    ("baishi_to_ruined_temple", "baishi_village", "baishi_ruined_temple", "村外破庙岔路", "low", "low", "村西荒草路通向破庙。"),
+    ("qingxi_to_qingmu", "qingxi_town", "qingmu_market", "青溪镇至青木集商道", "low", "medium", "跟着商队最稳。"),
+    ("qingxi_to_black_wind", "qingxi_town", "black_wind_outer", "青溪镇至黑风山外围猎道", "medium", "medium", "猎户和采药人偶尔走此道。"),
+    ("black_wind_outer_to_mountain", "black_wind_outer", "black_wind_mountain", "黑风山入山路", "medium", "high", "越往深处越容易迷路。"),
+    ("qingmu_to_xuanxiao", "qingmu_market", "xuanxiao_outer_gate", "青木集至玄霄宗外山门", "medium", "medium", "散修地图上常见的山门方向。"),
+    ("qingmu_to_qinglian", "qingmu_market", "qinglian_valley", "青木集至青莲谷旧路", "medium", "medium", "旧路常年雾锁。"),
+    ("qingmu_to_lieyang", "qingmu_market", "lieyang_market", "青木集至烈阳坊市远商道", "high", "medium", "跨郡商道，需地图或商队。"),
+    ("lieyang_to_bloodsha", "lieyang_market", "bloodsha_cave_ruin", "烈阳坊市至血煞洞遗址", "high", "high", "散修间流传的险路。"),
+    ("lieyang_to_earthfire", "lieyang_market", "earthfire_cavern", "烈阳坊市至地火窟", "medium", "medium", "炼器师常走。"),
+    ("lingdu_to_wanbao", "lingdu_city", "wanbao_tower", "灵都内城至万宝楼", "low", "low", "仙城内路线。"),
+    ("lingdu_to_tianheng", "lingdu_city", "tianheng_sect", "灵都至天衡宗山门", "medium", "low", "中州正道山道。"),
+    ("lingdu_to_taixuan", "lingdu_city", "taixuan_academy", "灵都至太玄书院", "low", "low", "官道清晰。"),
+    ("wanzang_to_sword", "wanzang_camp", "broken_sword_mound", "万葬营地至断剑冢", "high", "high", "古战场外围险路。"),
+    ("tianduan_to_thunder", "tianduan_pass", "thunder_marsh_peak", "天断关至雷泽峰", "high", "high", "山路险峻，雷雨频繁。"),
+]
+
+_FACTIONS = [
+    ("xuanxiao_sect", "玄霄宗", "sect", "qingwu_county", "青梧郡修仙宗门，收徒严格。"),
+    ("wanbao_tower", "万宝楼", "merchant", "central_lingdu", "经营拍卖、交易与情报。"),
+    ("tianheng_sect", "天衡宗", "sect", "central_lingdu", "中州正道大宗。"),
+    ("taixuan_academy", "太玄书院", "academy", "central_lingdu", "典籍、阵符与功法传承势力。"),
+    ("danxia_valley", "丹霞谷", "alchemy", "central_lingdu", "丹道势力。"),
+    ("shen_clan", "沈氏仙族", "clan", "central_lingdu", "中州修仙世家。"),
+    ("red_crow_fort", "赤鸦寨", "loose", "chiyuan_ridge", "赤渊岭半匪半修士势力。"),
+]
+
+_ARTS = [
+    ("yin_qi_jue", "引气诀", "黄阶下品", "吐纳", "neutral", "炼气三层", "凡人入门吐纳法，流传很广。", "common", "qingxi_town", "散修流通"),
+    ("small_zhoutian", "小周天吐纳法", "黄阶中品", "吐纳", "neutral", "炼气六层", "散修常见功法。", "common", "qingmu_market", "散修流通"),
+    ("qingxin_naling", "清心纳灵功", "黄阶上品", "吐纳", "neutral", "炼气九层", "稳妥但进境偏慢。", "common", "xuanxiao_sect", "宗门外门"),
+    ("qingmu_yangqi", "青木养气诀", "黄阶上品", "五行", "wood", "炼气九层", "木行入门正法。", "common", "qingmu_market", "坊市流通"),
+    ("hanyuan_water", "寒渊凝水诀", "玄阶下品", "五行", "water", "筑基初期", "水行功法。", "hidden", "hanshui_market", "寒水坊"),
+    ("lieyang_fire", "烈阳吐火经", "玄阶下品", "五行", "fire", "筑基中期", "火行功法。", "hidden", "lieyang_market", "烈阳坊市"),
+    ("small_wuxing_guiyuan", "小五行归元功", "玄阶中品", "五行", "five_elements", "筑基圆满", "五行均衡，资源消耗较大。", "restricted", "xuanxiao_sect", "玄霄宗"),
+    ("qingfeng_sword", "青锋剑诀", "黄阶上品", "剑修", "metal", "炼气九层", "低阶剑诀。", "common", "qingmu_market", "散修流通"),
+    ("xuanxiao_sword", "玄霄剑经", "玄阶上品", "剑修", "metal", "金丹初期", "玄霄宗剑修传承。", "restricted", "xuanxiao_sect", "玄霄宗"),
+    ("iron_bone", "铁骨功", "黄阶中品", "炼体", "earth", "炼气期", "低阶炼体法。", "common", "qingxi_town", "武馆流通"),
+    ("grasswood_alchemy", "草木丹经", "黄阶上品", "丹道", "wood", "炼气期", "炼丹入门典籍。", "common", "qingmu_market", "坊市流通"),
+    ("basic_talisman", "基础符箓录", "黄阶中品", "符箓", "neutral", "炼气期", "基础符箓典籍。", "common", "qingmu_market", "坊市流通"),
+    ("redsha_blood", "赤煞炼血经", "玄阶下品", "魔道", "blood", "筑基后期", "血道速成法。", "forbidden", "bloodsha_cave_ruin", "血煞洞遗址"),
+    ("yin_soul_nian", "阴魂寄念术", "玄阶上品", "魂道", "soul", "金丹初期", "魂道秘术。", "hidden", "white_bone_ferry", "白骨渡"),
+    ("qinglian_upper", "青莲化生诀·上篇", "地阶残篇", "古法", "wood", "筑基圆满", "青莲古法残篇。", "lost", "qinglian_valley", "青莲秘境"),
+    ("taixu_fragment", "太虚观想录·残页", "天阶残篇", "古法", "soul", "未知", "观想古法残页。", "lost", "nameless_old_sect", "无名古宗废墟"),
+]
+
+_OPPORTUNITIES = [
+    ("baishi_spirit_spring", "白石后山灵泉", "baishi_back_mountain", "resource", "后山夜里偶有青光。", "low", "unknown"),
+    ("ruined_temple_bones", "破庙道人遗骨", "baishi_ruined_temple", "art", "破庙石像后有旧物痕迹。", "low", "unknown"),
+    ("black_wind_cave", "黑风山筑基洞府", "black_wind_mountain", "cave", "黑风山深处有旧阵封痕。", "medium", "unknown"),
+    ("qingwu_fair", "青梧小会", "qingmu_market", "market", "低阶散修定期聚集交易。", "low", "unknown"),
+    ("qinglian_secret", "青莲秘境", "qinglian_valley", "realm", "青莲谷雾锁，传有周期性开启。", "high", "unknown"),
+    ("bloodsha_manual_cache", "血煞洞传承暗格", "bloodsha_cave_ruin", "art", "遗址中残留血纹石室。", "high", "unknown"),
+    ("sunken_star_water_mansion", "沉星湖水府", "sunken_star_lake", "realm", "湖底有旧水府传闻。", "high", "unknown"),
+    ("broken_sword_inheritance", "断剑冢剑意传承", "broken_sword_mound", "inheritance", "断剑冢内剑气不散。", "high", "unknown"),
+]
+
+_REALMS = [
+    ("qinglian_realm", "青莲秘境", "qinglian_valley", "周期型秘境", "十年一开", "炼气后期至筑基初期"),
+    ("black_wind_foundation_cave", "黑风山筑基洞府", "black_wind_mountain", "洞府", "封印松动后可入", "炼气后期至筑基期"),
+    ("sunken_star_mansion", "沉星湖水府", "sunken_star_lake", "水府", "需水路线索", "筑基至金丹"),
+    ("nameless_old_sect_realm", "无名古宗废墟", "nameless_old_sect", "古宗遗迹", "灾变/残图", "金丹以上"),
+]
+
+_DEFAULT_KNOWLEDGE = [
+    ("location", "baishi_village", "confirmed", "high", "亲身所在", "已确认白石村。"),
+    ("location", "baishi_back_mountain", "confirmed", "high", "村中生活", "知道后山小径。"),
+    ("location", "baishi_ruined_temple", "confirmed", "medium", "村中传闻", "知道村外有座破庙。"),
+    ("location", "qingxi_town", "confirmed", "high", "村民往来", "知道青溪镇大致方向。"),
+    ("route", "baishi_to_qingxi", "confirmed", "high", "村民往来", "村口土路可到青溪镇。"),
+    ("route", "baishi_to_back_mountain", "confirmed", "high", "村中生活", "柴道入后山。"),
+    ("route", "baishi_to_ruined_temple", "confirmed", "medium", "村中生活", "荒草岔路通破庙。"),
+    ("location", "black_wind_mountain", "rumored", "medium", "村民传闻", "听过黑风山之名，但不知深处路径。"),
+    ("location", "xuanxiao_outer_gate", "rumored", "low", "仙师传闻", "听过玄霄宗招收弟子的传闻。"),
+    ("location", "qingmu_market", "rumored", "low", "散修传闻", "听过青木集有修士交易。"),
+    ("faction", "xuanxiao_sect", "rumored", "low", "仙师传闻", "听过玄霄宗。"),
+    ("art", "yin_qi_jue", "rumored", "low", "凡间传闻", "听过入门吐纳法。"),
+]
+
+
+def _init_world_tables(conn: sqlite3.Connection) -> None:
+    """固定世界表与每档世界状态表。world_* 是事实，save_* 是玩家视野/状态。"""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS world_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS world_regions (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            role TEXT NOT NULL,
+            summary TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS world_locations (
+            id TEXT PRIMARY KEY,
+            region_id TEXT NOT NULL,
+            name TEXT NOT NULL UNIQUE,
+            kind TEXT NOT NULL,
+            parent_id TEXT,
+            summary TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS world_routes (
+            id TEXT PRIMARY KEY,
+            from_location_id TEXT NOT NULL,
+            to_location_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            difficulty TEXT NOT NULL,
+            risk TEXT NOT NULL,
+            summary TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS world_factions (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            kind TEXT NOT NULL,
+            region_id TEXT NOT NULL,
+            summary TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS world_arts (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            rank TEXT NOT NULL,
+            category TEXT NOT NULL,
+            primary_element TEXT NOT NULL,
+            realm_cap TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            visibility TEXT NOT NULL,
+            source_location_id TEXT,
+            source_label TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS world_opportunities (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            location_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            clue TEXT NOT NULL,
+            danger TEXT NOT NULL,
+            default_state TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS world_realms (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            entrance_location_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            opening_rule TEXT NOT NULL,
+            entry_limit TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS save_player_location (
+            save_id TEXT PRIMARY KEY,
+            region_id TEXT NOT NULL,
+            location_id TEXT NOT NULL,
+            site_name TEXT NOT NULL DEFAULT '',
+            location_state TEXT NOT NULL DEFAULT '安全',
+            intended_destination_id TEXT,
+            lost_risk TEXT NOT NULL DEFAULT '无',
+            updated_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS save_player_knowledge (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            save_id TEXT NOT NULL,
+            knowledge_type TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            reliability TEXT NOT NULL DEFAULT 'medium',
+            source TEXT NOT NULL DEFAULT '',
+            detail_level TEXT NOT NULL DEFAULT '',
+            notes TEXT NOT NULL DEFAULT '',
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            UNIQUE(save_id, knowledge_type, target_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS save_opportunity_states (
+            save_id TEXT NOT NULL,
+            opportunity_id TEXT NOT NULL,
+            state TEXT NOT NULL,
+            notes TEXT NOT NULL DEFAULT '',
+            updated_at REAL NOT NULL,
+            PRIMARY KEY(save_id, opportunity_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS save_realm_states (
+            save_id TEXT NOT NULL,
+            realm_id TEXT NOT NULL,
+            state TEXT NOT NULL,
+            notes TEXT NOT NULL DEFAULT '',
+            updated_at REAL NOT NULL,
+            PRIMARY KEY(save_id, realm_id)
+        )
+        """
+    )
+    _seed_world(conn)
+
+
+def _seed_world(conn: sqlite3.Connection) -> None:
+    conn.executemany(
+        "INSERT OR IGNORE INTO world_regions (id, name, role, summary) VALUES (?, ?, ?, ?)",
+        _REGIONS,
+    )
+    conn.executemany(
+        "INSERT OR IGNORE INTO world_locations (id, region_id, name, kind, parent_id, summary) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        _LOCATIONS,
+    )
+    conn.executemany(
+        "INSERT OR IGNORE INTO world_routes (id, from_location_id, to_location_id, name, difficulty, risk, summary) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        _ROUTES,
+    )
+    conn.executemany(
+        "INSERT OR IGNORE INTO world_factions (id, name, kind, region_id, summary) VALUES (?, ?, ?, ?, ?)",
+        _FACTIONS,
+    )
+    conn.executemany(
+        "INSERT OR IGNORE INTO world_arts "
+        "(id, name, rank, category, primary_element, realm_cap, summary, visibility, source_location_id, source_label) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        _ARTS,
+    )
+    conn.executemany(
+        "INSERT OR IGNORE INTO world_opportunities "
+        "(id, name, location_id, kind, clue, danger, default_state) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        _OPPORTUNITIES,
+    )
+    conn.executemany(
+        "INSERT OR IGNORE INTO world_realms "
+        "(id, name, entrance_location_id, kind, opening_rule, entry_limit) VALUES (?, ?, ?, ?, ?, ?)",
+        _REALMS,
+    )
+    conn.execute("INSERT OR REPLACE INTO world_meta (key, value) VALUES ('world_name', ?)", (WORLD_NAME,))
+    conn.execute("INSERT OR REPLACE INTO world_meta (key, value) VALUES ('world_version', ?)", (str(WORLD_VERSION),))
+
+
+def _ensure_default_save_world_state(conn: sqlite3.Connection, sid: str) -> None:
+    now = time.time()
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO save_player_location
+        (save_id, region_id, location_id, site_name, location_state, intended_destination_id, lost_risk, updated_at)
+        VALUES (?, 'qingwu_county', 'baishi_village', '村西老槐树', '安全', NULL, '无', ?)
+        """,
+        (sid, now),
+    )
+    for kind, target_id, status, reliability, source, notes in _DEFAULT_KNOWLEDGE:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO save_player_knowledge
+            (save_id, knowledge_type, target_id, status, reliability, source, detail_level, notes, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?)
+            """,
+            (sid, kind, target_id, status, reliability, source, notes, now, now),
+        )
+    for oid, *_ in _OPPORTUNITIES:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO save_opportunity_states
+            (save_id, opportunity_id, state, notes, updated_at)
+            VALUES (?, ?, 'unknown', '', ?)
+            """,
+            (sid, oid, now),
+        )
+    for rid, *_ in _REALMS:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO save_realm_states
+            (save_id, realm_id, state, notes, updated_at)
+            VALUES (?, ?, 'unknown', '', ?)
+            """,
+            (sid, rid, now),
+        )
+
+
+def ensure_save_world_state(sid: str) -> None:
+    """给老存档补默认位置/知识；新存档 create 时已做。"""
+    with _conn() as conn:
+        _ensure_default_save_world_state(conn, sid)
+
+
+def world_snapshot(sid: str) -> dict | None:
+    """读取当前存档的固定世界视野与真实位置。"""
+    with _conn() as conn:
+        _ensure_default_save_world_state(conn, sid)
+        loc = conn.execute(
+            """
+            SELECT spl.*, wr.name AS region_name, wl.name AS location_name, wl.kind AS location_kind,
+                   wl.summary AS location_summary
+            FROM save_player_location spl
+            JOIN world_regions wr ON wr.id = spl.region_id
+            JOIN world_locations wl ON wl.id = spl.location_id
+            WHERE spl.save_id=?
+            """,
+            (sid,),
+        ).fetchone()
+        if loc is None:
+            return None
+        knowledge = conn.execute(
+            "SELECT * FROM save_player_knowledge WHERE save_id=? ORDER BY knowledge_type, status, id",
+            (sid,),
+        ).fetchall()
+        regions = conn.execute("SELECT * FROM world_regions ORDER BY rowid").fetchall()
+        locations = conn.execute("SELECT * FROM world_locations ORDER BY rowid").fetchall()
+        routes = conn.execute("SELECT * FROM world_routes ORDER BY rowid").fetchall()
+        factions = conn.execute("SELECT * FROM world_factions ORDER BY rowid").fetchall()
+        arts = conn.execute("SELECT * FROM world_arts ORDER BY rowid").fetchall()
+        opportunities = conn.execute("SELECT * FROM world_opportunities ORDER BY rowid").fetchall()
+        realms = conn.execute("SELECT * FROM world_realms ORDER BY rowid").fetchall()
+    return {
+        "location": dict(loc),
+        "knowledge": [dict(row) for row in knowledge],
+        "regions": [dict(row) for row in regions],
+        "locations": [dict(row) for row in locations],
+        "routes": [dict(row) for row in routes],
+        "factions": [dict(row) for row in factions],
+        "arts": [dict(row) for row in arts],
+        "opportunities": [dict(row) for row in opportunities],
+        "realms": [dict(row) for row in realms],
+    }
+
+
+def update_player_location(
+    sid: str,
+    *,
+    region_id: str,
+    location_id: str,
+    site_name: str = "",
+    location_state: str = "安全",
+    intended_destination_id: str | None = None,
+    lost_risk: str = "无",
+) -> None:
+    with _conn() as conn:
+        conn.execute(
+            """
+            UPDATE save_player_location
+            SET region_id=?, location_id=?, site_name=?, location_state=?,
+                intended_destination_id=?, lost_risk=?, updated_at=?
+            WHERE save_id=?
+            """,
+            (region_id, location_id, site_name, location_state, intended_destination_id, lost_risk, time.time(), sid),
+        )
+
+
+def set_intended_destination(sid: str, target_id: str | None) -> None:
+    with _conn() as conn:
+        conn.execute(
+            "UPDATE save_player_location SET intended_destination_id=?, updated_at=? WHERE save_id=?",
+            (target_id, time.time(), sid),
+        )
+
+
+def upsert_knowledge(
+    sid: str,
+    knowledge_type: str,
+    target_id: str,
+    status: str,
+    *,
+    reliability: str = "medium",
+    source: str = "",
+    notes: str = "",
+) -> None:
+    now = time.time()
+    rank = {"unknown": 0, "rumored": 1, "known": 2, "confirmed": 3}
+    with _conn() as conn:
+        row = conn.execute(
+            """
+            SELECT status FROM save_player_knowledge
+            WHERE save_id=? AND knowledge_type=? AND target_id=?
+            """,
+            (sid, knowledge_type, target_id),
+        ).fetchone()
+        if row is not None and rank.get(row["status"], 0) >= rank.get(status, 0):
+            return
+        conn.execute(
+            """
+            INSERT INTO save_player_knowledge
+            (save_id, knowledge_type, target_id, status, reliability, source, detail_level, notes, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?)
+            ON CONFLICT(save_id, knowledge_type, target_id) DO UPDATE SET
+                status=excluded.status,
+                reliability=excluded.reliability,
+                source=excluded.source,
+                notes=excluded.notes,
+                updated_at=excluded.updated_at
+            """,
+            (sid, knowledge_type, target_id, status, reliability, source, notes, now, now),
+        )
 
 
 def save_state(sid: str, messages: list[dict], transcript: list[dict], turns: int) -> None:
