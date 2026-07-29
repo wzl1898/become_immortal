@@ -81,6 +81,27 @@ def action_constraints(session_id: str, action: str) -> str:
     )
 
 
+def inquiry_constraints(session_id: str) -> str:
+    """给世界记忆问询旁路的主角知识边界。"""
+    snap = store.world_snapshot(session_id)
+    if not snap:
+        return ""
+    return _render_constraint_block(
+        title="世界约束 Agent（问询知识边界）",
+        lines=[
+            "这是主角当前知识视野，回答问询时必须以它为准；若它与旧世界记忆冲突，以本边界为准。",
+            "status=confirmed 表示主角确认知道；status=rumored 表示主角只听闻过名字或模糊传闻，不等于掌握细节。",
+            _location_line(snap),
+            _knowledge_detail_line(snap, "location", "地点知识", limit=14),
+            _knowledge_detail_line(snap, "route", "路线知识", limit=12),
+            _knowledge_detail_line(snap, "faction", "势力知识", limit=10),
+            _knowledge_detail_line(snap, "art", "功法知识", limit=10),
+            _knowledge_detail_line(snap, "opportunity", "机缘线索", limit=10),
+            "回答分寸：若主角仅 rumored 某功法，只能说听过名字/大概用途/来源传闻，不能说已经会修，也不能说完全不知道。",
+        ],
+    )
+
+
 def get_world_state(session_id: str) -> dict | None:
     """供 API/调试读取的玩家世界视野。"""
     snap = store.world_snapshot(session_id)
@@ -306,6 +327,18 @@ def _names_for_knowledge(snap: dict, knowledge: dict, kind: str, status: str | N
 def _knowledge_line(snap: dict, kind: str, status: str, label: str, *, limit: int) -> str:
     names = _names_for_knowledge(snap, _knowledge_map(snap), kind, status)
     return f"{label}：{_join_or_none(names[:limit])}"
+
+
+def _knowledge_detail_line(snap: dict, kind: str, label: str, *, limit: int) -> str:
+    names = _names_by_table(snap)
+    rows = [row for row in snap["knowledge"] if row["knowledge_type"] == kind]
+    chunks = []
+    for row in rows[:limit]:
+        name = names.get(row["target_id"], row["target_id"])
+        detail = row.get("notes") or row.get("source") or ""
+        suffix = f"，{detail}" if detail else ""
+        chunks.append(f"{name}（{row['status']}，可靠度 {row['reliability']}{suffix}）")
+    return f"{label}：{_join_or_none(chunks)}"
 
 
 def _location_line(snap: dict) -> str:

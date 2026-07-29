@@ -616,8 +616,11 @@ def messages_for_inquiry(session_id: str, question: str) -> list[dict]:
     state = _get(session_id)
     scene = _recent_scene(state["transcript"])
     query = "\n\n".join(p for p in (question, scene) if p)
+    knowledge = constraints.inquiry_constraints(session_id)
     memory = _world_memory_dossier(_recall_world_memory(state, query))
     parts = []
+    if knowledge:
+        parts.append(knowledge.rstrip())
     if scene:
         parts.append(f"【当前情境（主角所处的最近情节）】\n{scene}")
     if memory:
