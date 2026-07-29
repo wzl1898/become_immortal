@@ -26,6 +26,12 @@ const directorClose = document.getElementById("director-close");
 const directorRefresh = document.getElementById("director-refresh");
 const directorBodyEl = document.getElementById("director-body");
 const directorEmptyEl = document.getElementById("director-empty");
+const constraintBtn = document.getElementById("constraint-btn");
+const constraintDrawer = document.getElementById("constraint-drawer");
+const constraintClose = document.getElementById("constraint-close");
+const constraintRefresh = document.getElementById("constraint-refresh");
+const constraintBodyEl = document.getElementById("constraint-body");
+const constraintEmptyEl = document.getElementById("constraint-empty");
 
 function clearStatus() {
   statusBodyEl.innerHTML = "";
@@ -36,6 +42,7 @@ let sessionId = null;
 let currentName = "";
 let busy = false;
 let worldMemory = []; // 世界记忆，含 qa 与自动提取的长期事实
+let worldState = null; // 世界约束 Agent 的实时状态：位置 + 主角知识视野
 let loreBusy = false; // 问询独立忙态，不锁主行动
 
 function addBlock(kind, text = "") {
@@ -269,6 +276,7 @@ async function narrate(url, options = {}) {
     }, options);
     // 流结束：用后端刷新后的结构化库补上冷物品折叠区
     if (done && done.inventory) renderColdItems(done.inventory);
+    if (done && done.world_state) renderConstraint(done.world_state);
   } catch (e) {
     block.remove();
     if (hintBlock) hintBlock.remove();
@@ -285,6 +293,7 @@ async function newGame() {
   storyEl.innerHTML = "";
   clearStatus();
   worldMemory = [];
+  renderConstraint(null);
   addBlock("narration", "　　天地灵气涌动，你的故事即将开始……").classList.add("cursor");
   try {
     const data = await fetchJSON("/api/new", {
@@ -310,6 +319,7 @@ async function loadGame(sid, name) {
     const data = await fetchJSON(`/api/load?sid=${sid}`);
     setCurrent(sid, name);
     worldMemory = data.world_memory || data.lore || [];
+    renderConstraint(data.world_state || null);
     storyEl.innerHTML = "";
     clearStatus();
     renderCharacterState(data.character_state);
@@ -435,6 +445,7 @@ async function deleteSave(s) {
       storyEl.innerHTML = "";
       clearStatus();
       worldMemory = [];
+      renderConstraint(null);
     }
     renderSaves();
   } catch (e) {
@@ -711,6 +722,107 @@ directorBtn.addEventListener("click", openDirectorDrawer);
 directorClose.addEventListener("click", closeDirectorDrawer);
 directorRefresh.addEventListener("click", refreshDirector);
 directorDrawer.querySelector(".drawer-mask").addEventListener("click", closeDirectorDrawer);
+
+// ---- 世界约束 Agent 抽屉（位置 + 知识视野，只读展示）----
+async function fetchConstraintState() {
+  const data = await fetchJSON(`/api/world-state?sid=${sessionId}`);
+  return data.world_state || null;
+}
+
+async function openConstraintDrawer() {
+  if (!sessionId) return;
+  constraintDrawer.classList.remove("hidden");
+  if (!worldState) await refreshConstraint();
+  else renderConstraint(worldState);
+}
+function closeConstraintDrawer() { constraintDrawer.classList.add("hidden"); }
+
+async function refreshConstraint() {
+  if (!sessionId) return;
+  try {
+    const state = await fetchConstraintState();
+    renderConstraint(state);
+  } catch (e) {
+    constraintBodyEl.innerHTML = "";
+    constraintEmptyEl.textContent = `读取失败：${e.message}`;
+    constraintEmptyEl.classList.remove("hidden");
+  }
+}
+
+function renderConstraint(state) {
+  worldState = state || null;
+  constraintBodyEl.innerHTML = "";
+  const hasContent = !!(worldState && worldState.location);
+  constraintEmptyEl.classList.toggle("hidden", hasContent);
+  if (!hasContent) return;
+
+  const loc = worldState.location || {};
+  constraintBodyEl.appendChild(constraintSection("真实位置", [
+    ["大区域", loc.region_name],
+    ["地点", loc.location_name],
+    ["子地点", loc.site_name],
+    ["场景状态", loc.location_state],
+    ["迷路风险", loc.lost_risk],
+    ["行动意图", loc.intended_destination_name],
+  ]));
+
+  const knowledge = worldState.knowledge || {};
+  constraintBodyEl.appendChild(chipSection("已确认地点", knowledge.confirmed_locations));
+  constraintBodyEl.appendChild(chipSection("听闻地点", knowledge.rumored_locations));
+  constraintBodyEl.appendChild(chipSection("已确认路线", knowledge.confirmed_routes));
+  constraintBodyEl.appendChild(chipSection("已知势力", knowledge.known_factions));
+  constraintBodyEl.appendChild(chipSection("已知功法", knowledge.known_arts));
+  constraintBodyEl.appendChild(chipSection("机缘线索", knowledge.known_opportunities));
+}
+
+function constraintSection(title, rows) {
+  const section = document.createElement("section");
+  section.className = "constraint-section";
+  const h = document.createElement("h3");
+  h.textContent = title;
+  section.appendChild(h);
+  for (const [label, value] of rows) {
+    if (!value) continue;
+    const row = document.createElement("div");
+    row.className = "constraint-row";
+    row.innerHTML = `<span class="c-label"></span><span class="c-value"></span>`;
+    row.querySelector(".c-label").textContent = label;
+    row.querySelector(".c-value").textContent = value;
+    section.appendChild(row);
+  }
+  return section;
+}
+
+function chipSection(title, items) {
+  const section = document.createElement("section");
+  section.className = "constraint-section";
+  const h = document.createElement("h3");
+  h.textContent = `${title}${items && items.length ? ` (${items.length})` : ""}`;
+  section.appendChild(h);
+  const wrap = document.createElement("div");
+  wrap.className = "constraint-chips";
+  const list = (items || []).filter(Boolean);
+  if (list.length) {
+    for (const item of list) {
+      const chip = document.createElement("span");
+      chip.className = "constraint-chip";
+      chip.textContent = item;
+      wrap.appendChild(chip);
+    }
+  } else {
+    const empty = document.createElement("span");
+    empty.className = "constraint-none";
+    empty.textContent = "无";
+    wrap.appendChild(empty);
+  }
+  section.appendChild(wrap);
+  return section;
+}
+
+constraintBtn.addEventListener("click", openConstraintDrawer);
+constraintClose.addEventListener("click", closeConstraintDrawer);
+constraintRefresh.addEventListener("click", refreshConstraint);
+constraintDrawer.querySelector(".drawer-mask").addEventListener("click", closeConstraintDrawer);
 
 // ---- 启动：有存档则续上最近一局，否则开新局 ----
 async function boot() {

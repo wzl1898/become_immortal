@@ -74,6 +74,7 @@ def _narrate(messages: list[dict], sid: str, user_content: str | None):
         return {
             "character_state": game.get_character_state(sid) or {},
             "inventory": game.get_inventory(sid) or [],
+            "world_state": game.get_world_state(sid) or {},
         }
     return _stream(messages, _done)
 

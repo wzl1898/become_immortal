@@ -361,3 +361,40 @@ html, body {
   color: var(--accent-soft); font-size: 12px; letter-spacing: 0.15em;
   border-bottom: 1px solid #23272f; padding-bottom: 6px;
 }
+
+/* 世界约束 Agent */
+.constraint-tip {
+  margin: 0; color: var(--muted); font-size: 13px; line-height: 1.6;
+}
+.constraint-body {
+  display: flex; flex-direction: column; gap: 12px; overflow-y: auto;
+}
+.constraint-empty {
+  color: var(--muted); text-align: center; padding: 20px 0;
+}
+.constraint-empty.hidden { display: none; }
+.constraint-section {
+  border: 1px solid #2a2f38; border-radius: 8px; padding: 12px 14px;
+  background: #12151b;
+}
+.constraint-section h3 {
+  margin: 0 0 10px; color: var(--accent-soft); font-size: 13px;
+  letter-spacing: 0.14em; font-weight: 600;
+}
+.constraint-row {
+  display: grid; grid-template-columns: 4.6em 1fr; gap: 10px;
+  font-size: 13px; line-height: 1.6; padding: 3px 0;
+}
+.constraint-row .c-label { color: var(--muted); }
+.constraint-row .c-value { color: var(--ink); overflow-wrap: anywhere; }
+.constraint-chips {
+  display: flex; flex-wrap: wrap; gap: 7px;
+}
+.constraint-chip {
+  max-width: 100%; border: 1px solid #333842; border-radius: 6px;
+  padding: 3px 8px; color: var(--ink); background: rgba(255,255,255,0.025);
+  font-size: 12px; line-height: 1.5; overflow-wrap: anywhere;
+}
+.constraint-none {
+  color: var(--muted); font-size: 13px;
+}

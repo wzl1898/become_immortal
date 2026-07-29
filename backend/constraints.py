@@ -87,6 +87,8 @@ def get_world_state(session_id: str) -> dict | None:
     if not snap:
         return None
     knowledge = _knowledge_map(snap)
+    names = _names_by_table(snap)
+    intended_id = snap["location"]["intended_destination_id"]
     return {
         "location": {
             "region_id": snap["location"]["region_id"],
@@ -95,7 +97,8 @@ def get_world_state(session_id: str) -> dict | None:
             "location_name": snap["location"]["location_name"],
             "site_name": snap["location"]["site_name"],
             "location_state": snap["location"]["location_state"],
-            "intended_destination_id": snap["location"]["intended_destination_id"],
+            "intended_destination_id": intended_id,
+            "intended_destination_name": names.get(intended_id, "") if intended_id else "",
             "lost_risk": snap["location"]["lost_risk"],
         },
         "knowledge": {
