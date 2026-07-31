@@ -69,7 +69,7 @@ function setCurrent(sid, name) {
 }
 
 // ---- SSE 流式 ----
-async function streamSSE(url, onDelta, options = {}) {
+async function streamSSE(url, onDelta, options = {}, onStage = null) {
   const resp = await fetch(url, options);
   if (!resp.ok) {
     let msg = `请求失败 ${resp.status}`;
@@ -90,6 +90,7 @@ async function streamSSE(url, onDelta, options = {}) {
       const evt = parseEvent(raw);
       if (!evt) continue;
       if (evt.event === "delta") onDelta(evt.data.text);
+      else if (evt.event === "stage" && onStage) onStage(evt.data);
       else if (evt.event === "done") doneData = evt.data;
       else if (evt.event === "error") throw new Error(evt.data.message);
     }
@@ -273,10 +274,13 @@ async function narrate(url, options = {}) {
         hintBlock.textContent = hint;
       }
       storyEl.scrollTop = storyEl.scrollHeight;
-    }, options);
+    }, options, (stage) => {
+      if (!full) block.textContent = `〔${stage.label || "正在准备"}〕`;
+    });
     // 流结束：用后端刷新后的结构化库补上冷物品折叠区
     if (done && done.inventory) renderColdItems(done.inventory);
     if (done && done.world_state) renderConstraint(done.world_state);
+    if (done && done.director_state) renderDirector(done.director_state, done.character_state?.turn || 0);
   } catch (e) {
     block.remove();
     if (hintBlock) hintBlock.remove();
@@ -621,11 +625,102 @@ function field(label, value, valClass) {
   return wrap;
 }
 
+function renderDynamicDirector(state) {
+  const event = state.event || null;
+  const plan = state.current_plan || null;
+  const intent = state.intent || null;
+
+  const phaseWrap = document.createElement("div");
+  phaseWrap.className = "dir-phase";
+  const badge = document.createElement("span");
+  const status = event?.status || "idle";
+  badge.className = `dir-badge ${status === "active" ? "active" : "cooldown"}`;
+  badge.textContent = status === "active" ? "事件进行中" : status === "resolved" ? "事件已结算" : status === "abandoned" ? "事件已离开" : "自由场景";
+  phaseWrap.appendChild(badge);
+  const note = document.createElement("span");
+  note.className = "dir-phase-note";
+  note.textContent = event?.core || "当前没有正式事件";
+  phaseWrap.appendChild(note);
+  directorBodyEl.appendChild(phaseWrap);
+
+  if (event) {
+    const meta = document.createElement("div");
+    meta.className = "dir-meta";
+    const turns = Number(event.turns) || 0;
+    const maxTurns = Number(event.max_turns) || 5;
+    meta.innerHTML =
+      `<span class="item${turns >= maxTurns ? " warn" : ""}">事件轮数 <b>${turns}/${maxTurns}</b></span>` +
+      `<span class="item">开始于第 <b>${Number(event.start_turn) || 0}</b> 回合</span>`;
+    directorBodyEl.appendChild(meta);
+  }
+
+  if (intent) {
+    const intentMeta = document.createElement("div");
+    intentMeta.className = "dir-meta";
+    const attempts = Number(intent.attempts) || 1;
+    const key = document.createElement("span");
+    key.className = "item";
+    key.append("当前意图：");
+    const strong = document.createElement("b");
+    strong.textContent = intent.key || "未归类";
+    key.appendChild(strong);
+    const count = document.createElement("span");
+    count.className = `item${attempts >= 2 ? " warn" : ""}`;
+    count.innerHTML = `连续尝试 <b>${attempts}</b> 次${attempts >= 2 ? "（本轮强制结算）" : ""}`;
+    intentMeta.append(key, count);
+    directorBodyEl.appendChild(intentMeta);
+  }
+
+  if (plan) {
+    const card = document.createElement("div");
+    card.className = "dir-payoff" + (plan.turn_mode === "resolve" ? " armed" : "");
+    const tag = document.createElement("span");
+    tag.className = "dir-armed-tag" + (plan.turn_mode === "resolve" ? "" : " off");
+    tag.textContent = `${plan.turn_mode || "progress"} · ${plan.event_action || "none"}`;
+    card.appendChild(tag);
+    card.appendChild(field("本轮目标", plan.current_goal));
+    if (plan.event_action !== "none" && plan.payoff) {
+      card.appendChild(field("动态爽点", `[${plan.payoff.type || "—"}] ${plan.payoff.outcome || "—"}`, "desc"));
+      card.appendChild(field("兑现证明", plan.payoff.proof));
+    }
+    if (Array.isArray(plan.beats) && plan.beats.length) {
+      card.appendChild(field("剧情骨架", plan.beats.join(" → ")));
+    }
+    if (Array.isArray(plan.forced_reasons) && plan.forced_reasons.length) {
+      card.appendChild(field("后端强制", plan.forced_reasons.join("；"), "trigger"));
+    }
+    if (Array.isArray(plan.selected_facts) && plan.selected_facts.length) {
+      card.appendChild(field("固定世界引用", plan.selected_facts.map((row) => row.id).join("、")));
+    }
+    if (Array.isArray(plan.must_not) && plan.must_not.length) {
+      card.appendChild(field("禁止事项", plan.must_not.join("；")));
+    }
+    directorBodyEl.appendChild(card);
+  }
+
+  if (state.last_audit) {
+    const audit = document.createElement("div");
+    audit.className = "dir-last";
+    const ok = !!state.last_audit.fulfilled;
+    audit.appendChild(field("执行审计", ok ? "已落实导演骨架" : "未完整落实，需要修复", ok ? "desc" : "trigger"));
+    if (state.last_audit.evidence) audit.appendChild(field("正文证据", state.last_audit.evidence));
+    if (Array.isArray(state.last_audit.violations) && state.last_audit.violations.length) {
+      audit.appendChild(field("违规", state.last_audit.violations.join("；"), "trigger"));
+    }
+    directorBodyEl.appendChild(audit);
+  }
+}
+
 function renderDirector(state, turns) {
   directorBodyEl.innerHTML = "";
-  const hasContent = state && (state.phase || state.payoff || state.last_fired);
+  const hasContent = state && (state.current_plan || state.event || state.phase || state.payoff || state.last_fired);
   directorEmptyEl.classList.toggle("hidden", !!hasContent);
   if (!hasContent) return;
+
+  if (state.current_plan || Object.prototype.hasOwnProperty.call(state, "event")) {
+    renderDynamicDirector(state);
+    return;
+  }
 
   const phase = state.phase || "active";
 

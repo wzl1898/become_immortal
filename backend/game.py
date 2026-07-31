@@ -22,6 +22,8 @@ import embed
 import store
 from llm import complete_chat
 from prompts import (
+    DIRECTOR_AUDIT_SYSTEM_PROMPT,
+    DIRECTOR_PLANNER_SYSTEM_PROMPT,
     DIRECTOR_SYSTEM_PROMPT,
     INQUIRY_SYSTEM_PROMPT,
     MEMORY_EXTRACT_SYSTEM_PROMPT,
@@ -57,7 +59,20 @@ RECALL_THRESHOLD = 0.35
 
 DEFAULT_NAME = "无名修士"
 
-# ---- 导演模块（前瞻性调度：养一个爽点，指路不写戏，上膛不开枪）----
+# ---- 导演模块（实时事件骨架）----
+# 正式事件最多占用多少次玩家行动。
+DIRECTOR_EVENT_MAX_TURNS = 5
+# 同一语义意图第二次必须结算。
+DIRECTOR_INTENT_MAX_ATTEMPTS = 2
+# 同一场景黏多少轮就要求导演切换节拍或场景。
+DIRECTOR_SCENE_STALE_TURNS = 3
+DIRECTOR_PLAN_MAX_CHARS = 1800
+DIRECTOR_PAYOFF_TYPES = {"gain", "combat", "mystery", "reversal", "escape"}
+DIRECTOR_EVENT_ACTIONS = {"start", "continue", "resolve", "abandon", "none"}
+DIRECTOR_TURN_MODES = {"setup", "progress", "escalate", "resolve", "transition"}
+DIRECTOR_PLANNER_TIMEOUT_SECONDS = 20
+
+# ---- 旧导演状态机常量（只用于读取历史状态，新的预规划链路不再维护）----
 # 连续偏离多少轮就弃掉当前爽点、改跟玩家的路（实测微调）。
 DIRECTOR_DRIFT_K = 3
 # 爽点退场（兑现或废弃）后留白多少轮再孕育下一个。
@@ -68,8 +83,6 @@ DIRECTOR_INJECT_MAX_CHARS = 500
 DIRECTOR_CONVERGE_TURNS = 2
 # 爽点养满多少轮仍未兑现就强制上膛催收（兜底，防不配合时无限拖）。
 DIRECTOR_MAX_INCUBATE = 5
-# 同一场景/处境黏多少轮就注入「收束切场」指导（独立于爽点，留白期也推）。
-DIRECTOR_SCENE_STALE_TURNS = 3
 # proximity ≥ 此值算「本轮玩家在配合、朝爽点走」。
 DIRECTOR_PROXIMITY_HI = 0.6
 
@@ -574,23 +587,30 @@ def _injection(state: dict, action: str | None) -> str:
         _character_state_dossier(state.get("character_state") or {})
         + _inventory_dossier(active)
         + _world_memory_dossier(memories)
-        + _director_injection(state.get("director_state") or {})
     )
 
 
-def messages_for_action(session_id: str, action: str) -> list[dict]:
-    """构造用于响应玩家行动的消息。
+async def prepare_action(session_id: str, action: str) -> list[dict]:
+    """Plan the current turn, then build messages for the narrative agent.
 
-    在玩家行动前注入"当前主角状态"、"当前物品档案"（热物品 + 按本次输入语义召回的冷物品）
-    与"世界记忆"，让状态、物件属性与已问明的背景即使在上下文被 MAX_TURNS 截断后
-    也不丢失。冷物品不进 prompt，故 LLM 不会再把无关旧物抄进面板，物品栏膨胀自止。
-    注入串只随本次请求发送，不写入历史（落库仍是玩家原始行动）。
+    The director runs synchronously before prose generation. Its validated
+    skeleton is a separate system message, never part of player-authored
+    history. Only selected objective facts are exposed to the GM.
     """
     state = _get(session_id)
     world_constraints = constraints.action_constraints(session_id, action)
+    world_context = constraints.director_context(session_id, action)
+    director_state = await _plan_director_turn(state, action, world_context)
+    state["director_state"] = director_state
+    store.save_director_state(session_id, director_state)
     inject = _injection(state, action)
     content = f"{world_constraints}{inject}{action}"
-    return state["messages"] + [{"role": "user", "content": content}]
+    messages = list(state["messages"])
+    director_message = _render_director_plan(director_state, world_context)
+    if director_message:
+        messages.insert(1, {"role": "system", "content": director_message})
+    messages.append({"role": "user", "content": content})
+    return messages
 
 
 def _recent_scene(transcript: list[dict]) -> str:
@@ -664,12 +684,14 @@ def commit(session_id: str, user_content: str | None, assistant_content: str) ->
         state["character_state"] = character_state
     # 解析本回合面板回影子库（新物入库、失去物移除、正文命中刷 last_turn）
     _reconcile_inventory(state, assistant_content)
+    _finalize_director_state(state, assistant_content)
     store.save_state(session_id, state["messages"], state["transcript"], state["turns"])
     if character_state:
         store.save_character_state(session_id, character_state)
     store.save_inventory(session_id, state["inventory"])
+    store.save_director_state(session_id, state.get("director_state") or {})
     _schedule_memory_extraction(session_id, user_content, assistant_content, state["turns"])
-    _schedule_director(session_id, user_content, assistant_content, state["turns"])
+    _schedule_director_audit(session_id, user_content, assistant_content, state["turns"])
 
 
 def _schedule_memory_extraction(
@@ -847,7 +869,415 @@ def _parse_extracted_memories(raw: str, turn: int) -> list[dict]:
     return items
 
 
-# ---- 导演模块：注入渲染 / 异步维护 / Python 兜底 ----
+# ---- 实时导演：同步规划 / 结构校验 / 异步审计 ----
+
+def _dynamic_director_state(raw: dict | None) -> dict:
+    """Normalize old director saves into the dynamic event shape."""
+    raw = raw if isinstance(raw, dict) else {}
+    if "current_plan" in raw or "event" in raw:
+        return raw
+    return {
+        "event": None,
+        "intent": None,
+        "current_plan": None,
+        "last_payoff": None,
+        "last_audit": None,
+        "needs_repair": False,
+        "scene": raw.get("scene", ""),
+        "scene_turns": int(raw.get("scene_turns") or 0),
+        "note": "已从旧导演状态迁移；下一轮按玩家当前行动重新规划。" if raw else "",
+    }
+
+
+async def _plan_director_turn(state: dict, action: str, world_context: dict) -> dict:
+    prev = _dynamic_director_state(state.get("director_state"))
+    prompt = _director_planning_prompt(state, action, world_context, prev)
+    result = None
+    try:
+        raw = await asyncio.wait_for(
+            complete_chat(
+                [
+                    {"role": "system", "content": DIRECTOR_PLANNER_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.25,
+                max_tokens=1000,
+            ),
+            timeout=DIRECTOR_PLANNER_TIMEOUT_SECONDS,
+        )
+        result = _extract_json_object(raw)
+    except asyncio.TimeoutError:
+        _LOG.warning("director planning timed out after %ss; using fallback", DIRECTOR_PLANNER_TIMEOUT_SECONDS)
+    except Exception:  # noqa: BLE001
+        _LOG.exception("director planning failed")
+    if result is None:
+        result = _fallback_director_plan(prev, action)
+    return _apply_director_plan(prev, result, action, world_context, state["turns"] + 1)
+
+
+def _director_planning_prompt(state: dict, action: str, world_context: dict, prev: dict) -> str:
+    scene = _recent_scene(state.get("transcript") or [])
+    character = state.get("character_state") or {}
+    return "\n\n".join([
+        f"【即将生成的回合】\n{state['turns'] + 1}",
+        f"【玩家本轮行动】\n{action}",
+        f"【最近剧情】\n{scene or '（暂无）'}",
+        f"【当前主角状态】\n{json.dumps(character, ensure_ascii=False)}",
+        f"【上一轮导演状态】\n{json.dumps(prev, ensure_ascii=False)}",
+        f"【世界约束切片】\n{json.dumps(world_context, ensure_ascii=False)}",
+    ])
+
+
+def _fallback_director_plan(prev: dict, action: str) -> dict:
+    """Deterministic plan used when the planner is unavailable."""
+    active = (
+        isinstance(prev.get("event"), dict)
+        and prev["event"].get("status") in {"active", "resolving", "abandoning"}
+    )
+    avoid = any(word in action for word in ("避", "躲", "逃", "撤", "绕开", "不打"))
+    fight = any(word in action for word in ("打", "战", "杀", "攻", "反击", "迎敌"))
+    investigate = any(word in action for word in ("看", "查", "问", "探", "研究", "观察"))
+    if not active and not (avoid or fight or investigate):
+        return {
+            "event_action": "none",
+            "event_core": "",
+            "current_goal": "贴合玩家行动给出明确结果",
+            "turn_mode": "progress",
+            "intent": {"key": action[:80], "same_as_previous": False},
+            "payoff": {"type": "reversal", "outcome": "", "proof": "", "source_ids": []},
+            "beats": ["直接回应玩家行动，不增加无结果的铺垫"],
+            "must_not": ["生成固定世界库之外的重大设定"],
+        }
+    payoff_type = "escape" if avoid else "combat" if fight else "mystery"
+    outcome = {
+        "escape": "彻底摆脱当前直接威胁并确认安全",
+        "combat": "完成有攻防、有代价和明确战果的冲突",
+        "mystery": "对玩家正在追查的问题给出有效进展",
+    }[payoff_type]
+    return {
+        "event_action": "continue" if active else "start",
+        "event_core": (prev.get("event") or {}).get("core") or "解决玩家当前主动介入的冲突或疑问",
+        "current_goal": outcome,
+        "turn_mode": "progress",
+        "intent": {"key": action[:80], "same_as_previous": False},
+        "payoff": {"type": payoff_type, "outcome": outcome, "proof": outcome, "source_ids": []},
+        "beats": ["让玩家行动产生有效变化", "给出可以验证的结果或代价"],
+        "must_not": ["只增加模糊感受或新悬念"],
+    }
+
+
+def _clean_text(value, limit: int = 240) -> str:
+    return str(value or "").strip()[:limit]
+
+
+def _clean_string_list(value, *, limit: int = 6, item_limit: int = 180) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [_clean_text(item, item_limit) for item in value[:limit] if _clean_text(item, item_limit)]
+
+
+def _sanitize_director_plan(result: dict, world_context: dict) -> dict:
+    allowed = set(world_context.get("allowed_reference_ids") or [])
+    arts_allowed = {row["id"] for row in world_context.get("arts", [])}
+    opps_allowed = {row["id"] for row in world_context.get("opportunities", [])}
+
+    def refs(value, subset: set[str] | None = None) -> list[str]:
+        valid = allowed if subset is None else subset
+        return [str(item) for item in value if str(item) in valid] if isinstance(value, list) else []
+
+    payoff_in = result.get("payoff") if isinstance(result.get("payoff"), dict) else {}
+    payoff_type = payoff_in.get("type") if payoff_in.get("type") in DIRECTOR_PAYOFF_TYPES else "reversal"
+    source_ids = refs(payoff_in.get("source_ids") or [])
+    arts = refs(result.get("arts_to_grant") or [], arts_allowed)
+    opportunities = refs(result.get("opportunities_to_trigger") or [], opps_allowed)
+    source_ids = list(dict.fromkeys(source_ids + arts + opportunities))
+    outcome = _clean_text(payoff_in.get("outcome"), 320)
+    proof = _clean_text(payoff_in.get("proof"), 320)
+    if payoff_type == "gain" and not source_ids:
+        payoff_type = "reversal"
+        outcome = "通过本轮行动取得明确、可验证的主动权"
+        proof = "正文明确写出主角处境由被动转为主动"
+
+    state_changes = result.get("state_changes") if isinstance(result.get("state_changes"), dict) else {}
+    allowed_state_keys = {"health", "spiritual_power", "condition"}
+    if source_ids:
+        allowed_state_keys.update({"realm", "cultivation", "resources", "artifacts"})
+    state_changes = {
+        key: _clean_text(value, 180)
+        for key, value in state_changes.items()
+        if key in allowed_state_keys and _clean_text(value, 180)
+    }
+    action = result.get("event_action")
+    mode = result.get("turn_mode")
+    intent = result.get("intent") if isinstance(result.get("intent"), dict) else {}
+    return {
+        "event_action": action if action in DIRECTOR_EVENT_ACTIONS else "none",
+        "event_core": _clean_text(result.get("event_core"), 240),
+        "current_goal": _clean_text(result.get("current_goal"), 280),
+        "turn_mode": mode if mode in DIRECTOR_TURN_MODES else "progress",
+        "intent": {
+            "key": _clean_text(intent.get("key"), 120),
+            "same_as_previous": bool(intent.get("same_as_previous")),
+        },
+        "payoff": {
+            "type": payoff_type,
+            "outcome": outcome,
+            "proof": proof,
+            "source_ids": source_ids,
+        },
+        "facts_to_reveal": refs(result.get("facts_to_reveal") or []),
+        "arts_to_grant": arts,
+        "opportunities_to_trigger": opportunities,
+        "beats": _clean_string_list(result.get("beats"), limit=3, item_limit=120),
+        "state_changes": state_changes,
+        "must_not": _clean_string_list(result.get("must_not"), limit=6),
+        "scene": _clean_text(result.get("scene"), 100),
+        "scene_change": bool(result.get("scene_change")),
+        "note": _clean_text(result.get("note"), 300),
+    }
+
+
+def _same_intent(prev_intent: dict | None, plan_intent: dict) -> bool:
+    if not isinstance(prev_intent, dict):
+        return False
+    old = "".join((prev_intent.get("key") or "").split())
+    new = "".join((plan_intent.get("key") or "").split())
+    return bool(plan_intent.get("same_as_previous") or (old and new and old == new))
+
+
+def _player_demands_terminal_escape(action: str, payoff_type: str) -> bool:
+    if payoff_type != "escape":
+        return False
+    terminal_phrases = (
+        "撤回", "退回", "逃离", "脱身", "摆脱", "离开这里", "回村",
+        "返回村", "不与", "不交战", "避开战斗", "避战",
+    )
+    return any(phrase in action for phrase in terminal_phrases)
+
+
+def _apply_director_plan(
+    prev: dict,
+    result: dict,
+    action: str,
+    world_context: dict,
+    turn: int,
+) -> dict:
+    plan = _sanitize_director_plan(result, world_context)
+    prev_event = prev.get("event") if isinstance(prev.get("event"), dict) else None
+    active = bool(
+        prev_event and prev_event.get("status") in {"active", "resolving", "abandoning"}
+    )
+    event_action = plan["event_action"]
+    if active and event_action in {"none", "start"}:
+        event_action = "continue"
+
+    if not active and event_action == "none":
+        event = prev_event if prev_event and prev_event.get("status") != "active" else None
+        event_turns = 0
+    else:
+        event_turns = int(prev_event.get("turns") or 0) + 1 if active else 1
+        core = prev_event.get("core") if active else plan["event_core"]
+        core = core or "解决玩家当前介入的核心矛盾"
+        event_id = prev_event.get("id") if active else uuid.uuid4().hex
+        event = {
+            "id": event_id,
+            "core": core,
+            "status": "active",
+            "start_turn": int(prev_event.get("start_turn") or turn) if active else turn,
+            "turns": event_turns,
+            "max_turns": DIRECTOR_EVENT_MAX_TURNS,
+        }
+
+    same_intent = active and _same_intent(prev.get("intent"), plan["intent"])
+    attempts = int((prev.get("intent") or {}).get("attempts") or 0) + 1 if same_intent else 1
+    intent = {
+        "key": plan["intent"]["key"] or action[:120],
+        "attempts": attempts,
+        "same_as_previous": same_intent,
+    }
+
+    forced_reasons = []
+    if event and event_turns >= DIRECTOR_EVENT_MAX_TURNS:
+        event_action = "resolve"
+        plan["turn_mode"] = "resolve"
+        forced_reasons.append("事件达到第 5 轮硬上限，本轮必须结算")
+    if event and attempts >= DIRECTOR_INTENT_MAX_ATTEMPTS:
+        event_action = "resolve"
+        plan["turn_mode"] = "resolve"
+        forced_reasons.append("同一意图已连续尝试 2 次，本轮必须结算")
+    if event and _player_demands_terminal_escape(action, plan["payoff"]["type"]):
+        event_action = "resolve"
+        plan["turn_mode"] = "resolve"
+        forced_reasons.append("玩家明确选择脱离冲突，安全爽点必须在本轮完整兑现")
+    if event_action in {"resolve", "abandon"}:
+        plan["turn_mode"] = "resolve" if event_action == "resolve" else "transition"
+        event["status"] = "resolving" if event_action == "resolve" else "abandoning"
+    plan["event_action"] = event_action
+    plan["plan_id"] = uuid.uuid4().hex
+    plan["planned_turn"] = turn
+    plan["forced_reasons"] = forced_reasons
+    plan["selected_facts"] = constraints.selected_director_facts(
+        world_context,
+        plan["facts_to_reveal"] + plan["payoff"]["source_ids"],
+    )
+
+    prev_scene = _clean_text(prev.get("scene"), 100)
+    scene = plan["scene"] or prev_scene
+    if not scene:
+        scene_turns = 0
+    elif plan["scene_change"] or (prev_scene and scene != prev_scene):
+        scene_turns = 1
+    else:
+        scene_turns = int(prev.get("scene_turns") or 0) + 1
+    if scene_turns >= DIRECTOR_SCENE_STALE_TURNS:
+        plan["must_not"].append("继续停留在同一处境逐个细演；本轮应合并节拍或切换场景")
+
+    return {
+        "event": event,
+        "intent": intent,
+        "current_plan": plan,
+        "last_payoff": prev.get("last_payoff"),
+        "last_audit": prev.get("last_audit"),
+        "needs_repair": False,
+        "scene": scene,
+        "scene_turns": scene_turns,
+        "note": plan["note"],
+    }
+
+
+def _render_director_plan(state: dict, world_context: dict) -> str:
+    plan = state.get("current_plan") if isinstance(state, dict) else None
+    if not isinstance(plan, dict):
+        return ""
+    event = state.get("event") or {}
+    lines = [
+        "【本轮导演骨架（高优先级；你负责丰满，不得改变结果）】",
+        f"事件：{event.get('core') or '无正式事件'}",
+        f"事件进度：{event.get('turns', 0)}/{event.get('max_turns', DIRECTOR_EVENT_MAX_TURNS)}",
+        f"玩家意图：{(state.get('intent') or {}).get('key') or '未归类'}（第 {(state.get('intent') or {}).get('attempts', 1)} 次）",
+        f"本轮模式：{plan.get('turn_mode')}；事件动作：{plan.get('event_action')}",
+        f"当前目标：{plan.get('current_goal') or '直接回应玩家行动'}",
+    ]
+    if plan.get("event_action") != "none":
+        payoff = plan.get("payoff") or {}
+        lines.extend([
+            f"动态爽点：[{payoff.get('type')}] {payoff.get('outcome')}",
+            f"兑现证明：{payoff.get('proof')}",
+        ])
+    if plan.get("forced_reasons"):
+        lines.append("后端强制：" + "；".join(plan["forced_reasons"]))
+    if plan.get("beats"):
+        lines.append("必须按顺序落实：" + " → ".join(plan["beats"]))
+    if plan.get("state_changes"):
+        lines.append("必须落实状态变化：" + json.dumps(plan["state_changes"], ensure_ascii=False))
+    if plan.get("turn_mode") == "resolve":
+        lines.append("结算硬约束：本轮正文必须给出完整结果，禁止用新悬念、模糊感受或‘仍待查明’替代。")
+    if plan.get("selected_facts"):
+        lines.append("本轮获准使用的固定事实：")
+        lines.extend(f"- [{row['id']}] {row['text']}" for row in plan["selected_facts"])
+    prohibited = list(plan.get("must_not") or []) + list(world_context.get("forbidden_reveals") or [])
+    if prohibited:
+        lines.append("禁止：" + "；".join(prohibited))
+    body = "\n".join(lines)
+    if len(body) > DIRECTOR_PLAN_MAX_CHARS:
+        body = body[:DIRECTOR_PLAN_MAX_CHARS].rstrip() + "\n（其余低优先级细节已截断）"
+    return f"{body}\n【/本轮导演骨架】"
+
+
+def _finalize_director_state(state: dict, assistant_content: str) -> None:
+    director = _dynamic_director_state(state.get("director_state"))
+    plan = director.get("current_plan") if isinstance(director.get("current_plan"), dict) else None
+    event = director.get("event") if isinstance(director.get("event"), dict) else None
+    if not plan or not event:
+        state["director_state"] = director
+        return
+    action = plan.get("event_action")
+    if action == "resolve":
+        event["status"] = "resolved"
+        event["ended_turn"] = state["turns"]
+        director["last_payoff"] = {
+            **(plan.get("payoff") or {}),
+            "event_id": event["id"],
+            "event_core": event["core"],
+            "turn": state["turns"],
+            "status": "pending_audit",
+        }
+    elif action == "abandon":
+        event["status"] = "abandoned"
+        event["ended_turn"] = state["turns"]
+    director["event"] = event
+    state["director_state"] = director
+
+
+def _schedule_director_audit(
+    session_id: str,
+    user_content: str | None,
+    assistant_content: str,
+    turn: int,
+) -> None:
+    if user_content is None:
+        return
+    state = _CACHE.get(session_id)
+    plan = (state or {}).get("director_state", {}).get("current_plan")
+    if not isinstance(plan, dict):
+        return
+    snapshot = json.loads(json.dumps(plan, ensure_ascii=False))
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    loop.create_task(_run_director_audit(session_id, user_content, assistant_content, turn, snapshot))
+
+
+async def _run_director_audit(
+    session_id: str,
+    user_content: str,
+    assistant_content: str,
+    turn: int,
+    plan: dict,
+) -> None:
+    try:
+        raw = await complete_chat(
+            [
+                {"role": "system", "content": DIRECTOR_AUDIT_SYSTEM_PROMPT},
+                {"role": "user", "content": "\n\n".join([
+                    f"【回合】\n{turn}",
+                    f"【玩家行动】\n{user_content}",
+                    f"【导演骨架】\n{json.dumps(plan, ensure_ascii=False)}",
+                    f"【剧情正文】\n{assistant_content}",
+                ])},
+            ],
+            temperature=0.1,
+            max_tokens=500,
+        )
+        result = _extract_json_object(raw) or {}
+        audit = {
+            "plan_id": plan.get("plan_id"),
+            "turn": turn,
+            "fulfilled": bool(result.get("fulfilled")),
+            "payoff_delivered": bool(result.get("payoff_delivered")),
+            "evidence": _clean_text(result.get("evidence"), 360),
+            "violations": _clean_string_list(result.get("violations"), limit=8),
+            "note": _clean_text(result.get("note"), 360),
+        }
+        state = _CACHE.get(session_id)
+        if not state:
+            return
+        director = _dynamic_director_state(state.get("director_state"))
+        current = director.get("current_plan") or {}
+        if current.get("plan_id") != plan.get("plan_id"):
+            return
+        director["last_audit"] = audit
+        director["needs_repair"] = not audit["fulfilled"]
+        if isinstance(director.get("last_payoff"), dict) and director["last_payoff"].get("turn") == turn:
+            director["last_payoff"]["status"] = "fulfilled" if audit["payoff_delivered"] else "failed"
+        state["director_state"] = director
+        store.save_director_state(session_id, director)
+    except Exception:  # noqa: BLE001
+        _LOG.exception("director audit failed for session %s turn %s", session_id, turn)
+
+
+# ---- 旧导演模块：只保留代码兼容，新的生成链路不再调用 ----
 
 def _scene_push_line() -> str:
     """场景黏太久时给 GM 的切场指导行（收束当前处境、跳时/换地、并合冗余节拍）。"""

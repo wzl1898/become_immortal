@@ -75,6 +75,7 @@ def _narrate(messages: list[dict], sid: str, user_content: str | None):
             "character_state": game.get_character_state(sid) or {},
             "inventory": game.get_inventory(sid) or [],
             "world_state": game.get_world_state(sid) or {},
+            "director_state": game.get_director_state(sid) or {},
         }
     return _stream(messages, _done)
 
@@ -164,15 +165,28 @@ async def opening(sid: str):
     )
 
 
+async def _action_stream(sid: str, text: str):
+    """Emit planning stages, then stream prose generated from the validated skeleton."""
+    yield _sse("stage", {"key": "constraints", "label": "正在读取世界约束"})
+    yield _sse("stage", {"key": "director", "label": "导演正在重新规划事件与爽点"})
+    try:
+        messages = await game.prepare_action(sid, text)
+    except Exception as e:  # noqa: BLE001
+        yield _sse("error", {"message": str(e)})
+        return
+    yield _sse("stage", {"key": "narrative", "label": "导演骨架已校验，正在生成剧情"})
+    async for chunk in _narrate(messages, sid, text):
+        yield chunk
+
+
 def _action_response(sid: str, text: str) -> StreamingResponse:
     if not game.exists(sid):
         raise HTTPException(404, "会话不存在，请重新开始")
     text = (text or "").strip()
     if not text:
         raise HTTPException(400, "行动不能为空")
-    messages = game.messages_for_action(sid, text)
     return StreamingResponse(
-        _narrate(messages, sid, text),
+        _action_stream(sid, text),
         media_type="text/event-stream",
     )
 
@@ -235,7 +249,7 @@ async def world_memory(sid: str):
 
 @app.get("/api/director")
 async def director(sid: str):
-    """读取导演模块状态（异步更新，前端按需/刷新拉取）。"""
+    """读取实时事件骨架与异步执行审计状态。"""
     state = game.get_director_state(sid)
     if state is None:
         raise HTTPException(404, "存档不存在")

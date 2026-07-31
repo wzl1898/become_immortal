@@ -1,0 +1,141 @@
+import asyncio
+import unittest
+from unittest.mock import patch
+
+import game
+
+
+def _context():
+    return {
+        "allowed_reference_ids": [
+            "opportunity:ruined_temple_bones",
+            "ruined_temple_bones",
+            "yin_qi_jue",
+        ],
+        "facts": [{
+            "id": "opportunity:ruined_temple_bones",
+            "kind": "opportunity",
+            "text": "破庙石像后有旧物痕迹。",
+        }],
+        "arts": [{"id": "yin_qi_jue", "name": "引气诀", "summary": "凡人入门吐纳法。"}],
+        "opportunities": [{
+            "id": "ruined_temple_bones",
+            "name": "破庙道人遗骨",
+            "clue": "破庙石像后有旧物痕迹。",
+        }],
+        "forbidden_reveals": [],
+    }
+
+
+def _plan(*, action="start", mode="progress", intent="应对山匪", same=False, payoff="combat"):
+    return {
+        "event_action": action,
+        "event_core": "解决山匪造成的直接威胁",
+        "current_goal": "击败山匪",
+        "turn_mode": mode,
+        "intent": {"key": intent, "same_as_previous": same},
+        "payoff": {
+            "type": payoff,
+            "outcome": "完成冲突并取得明确结果",
+            "proof": "正文给出明确战果",
+            "source_ids": [],
+        },
+        "facts_to_reveal": [],
+        "beats": ["敌人逼近", "主角行动产生结果"],
+        "must_not": [],
+        "scene": "山路遭遇",
+    }
+
+
+class DirectorPlanTests(unittest.TestCase):
+    def test_player_avoidance_replans_payoff_without_resetting_event(self):
+        first = game._apply_director_plan({}, _plan(), "迎战", _context(), 1)
+        second_raw = _plan(action="continue", intent="避开山匪", payoff="escape")
+        second_raw["current_goal"] = "摆脱追踪并取得安全"
+        second_raw["payoff"]["outcome"] = "彻底摆脱山匪"
+        second_raw["payoff"]["proof"] = "追兵失去踪迹，主角确认安全"
+        second = game._apply_director_plan(first, second_raw, "钻入山林避战", _context(), 2)
+
+        self.assertEqual(second["event"]["id"], first["event"]["id"])
+        self.assertEqual(second["event"]["core"], first["event"]["core"])
+        self.assertEqual(second["event"]["turns"], 2)
+        self.assertEqual(second["current_plan"]["payoff"]["type"], "escape")
+        self.assertEqual(second["current_plan"]["current_goal"], "摆脱追踪并取得安全")
+        self.assertEqual(second["current_plan"]["event_action"], "resolve")
+        self.assertTrue(any("脱离冲突" in reason for reason in second["current_plan"]["forced_reasons"]))
+
+    def test_second_semantically_same_intent_forces_resolution(self):
+        first = game._apply_director_plan({}, _plan(intent="探明玄色小牌"), "细看小牌", _context(), 1)
+        second_raw = _plan(action="continue", intent="探明玄色小牌", same=True, payoff="mystery")
+        second = game._apply_director_plan(first, second_raw, "继续感应牌中白影", _context(), 2)
+
+        self.assertEqual(second["intent"]["attempts"], 2)
+        self.assertEqual(second["current_plan"]["event_action"], "resolve")
+        self.assertEqual(second["current_plan"]["turn_mode"], "resolve")
+        self.assertTrue(any("2 次" in reason for reason in second["current_plan"]["forced_reasons"]))
+
+    def test_fifth_event_turn_forces_resolution(self):
+        state = game._apply_director_plan({}, _plan(), "迎战", _context(), 1)
+        for turn in range(2, 6):
+            raw = _plan(action="continue", intent=f"不同战术{turn}")
+            state = game._apply_director_plan(state, raw, f"行动{turn}", _context(), turn)
+
+        self.assertEqual(state["event"]["turns"], 5)
+        self.assertEqual(state["current_plan"]["event_action"], "resolve")
+        self.assertTrue(any("第 5 轮" in reason for reason in state["current_plan"]["forced_reasons"]))
+
+    def test_invalid_gain_reference_is_removed(self):
+        raw = _plan(payoff="gain")
+        raw["payoff"]["source_ids"] = ["invented_heaven_art"]
+        raw["arts_to_grant"] = ["invented_heaven_art"]
+        state = game._apply_director_plan({}, raw, "获得天外神功", _context(), 1)
+        plan = state["current_plan"]
+
+        self.assertEqual(plan["payoff"]["source_ids"], [])
+        self.assertEqual(plan["arts_to_grant"], [])
+        self.assertEqual(plan["payoff"]["type"], "reversal")
+
+    def test_valid_fixed_art_can_back_gain(self):
+        raw = _plan(payoff="gain")
+        raw["payoff"]["source_ids"] = ["yin_qi_jue"]
+        raw["arts_to_grant"] = ["yin_qi_jue"]
+        state = game._apply_director_plan({}, raw, "取得引气诀", _context(), 1)
+
+        self.assertEqual(state["current_plan"]["payoff"]["type"], "gain")
+        self.assertEqual(state["current_plan"]["arts_to_grant"], ["yin_qi_jue"])
+        self.assertEqual(state["current_plan"]["selected_facts"][0]["id"], "yin_qi_jue")
+
+    def test_planner_timeout_uses_dynamic_fallback(self):
+        async def slow_complete(*args, **kwargs):
+            await asyncio.sleep(0.05)
+            return "{}"
+
+        state = {
+            "turns": 1,
+            "transcript": [],
+            "character_state": {},
+            "director_state": {
+                "event": {
+                    "id": "event-1",
+                    "core": "解决山匪威胁",
+                    "status": "active",
+                    "start_turn": 1,
+                    "turns": 1,
+                    "max_turns": 5,
+                },
+                "intent": {"key": "迎战", "attempts": 1},
+                "current_plan": None,
+            },
+        }
+        with patch.object(game, "DIRECTOR_PLANNER_TIMEOUT_SECONDS", 0.01), patch.object(
+            game, "complete_chat", slow_complete
+        ):
+            planned = asyncio.run(game._plan_director_turn(state, "撤回村里避战", _context()))
+
+        self.assertEqual(planned["current_plan"]["payoff"]["type"], "escape")
+        self.assertEqual(planned["current_plan"]["event_action"], "resolve")
+        self.assertEqual(planned["event"]["id"], "event-1")
+
+
+if __name__ == "__main__":
+    unittest.main()

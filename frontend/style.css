@@ -212,6 +212,16 @@ html, body {
 .save-name { color: var(--accent-soft); font-size: 14px; max-width: 140px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+@media (max-width: 600px) {
+  .topbar { align-items: flex-start; flex-wrap: wrap; gap: 10px; padding-bottom: 10px; }
+  .topbar h1 { width: 100%; }
+  .actions {
+    width: 100%; overflow-x: auto; padding-bottom: 4px;
+    scrollbar-width: thin;
+  }
+  .actions > * { flex: none; }
+}
+
 /* 抽屉 */
 .drawer.hidden { display: none; }
 .drawer { position: fixed; inset: 0; z-index: 20; }

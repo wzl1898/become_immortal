@@ -133,6 +133,136 @@ def get_world_state(session_id: str) -> dict | None:
     }
 
 
+def director_context(session_id: str, action: str) -> dict:
+    """Return the objective world slice the director may use this turn.
+
+    The director may inspect hidden local opportunities so it can plan real
+    payoffs, but the narrative agent only receives references selected by the
+    validated plan. This keeps hidden world truth separate from protagonist
+    cognition.
+    """
+    snap = store.world_snapshot(session_id)
+    if not snap:
+        return {}
+    action = (action or "").strip()
+    matches = _match_entities(snap, action)
+    local = _local_context(snap, matches)
+    knowledge = _knowledge_map(snap)
+    current_id = snap["location"]["location_id"]
+    relevant_location_ids = {current_id}
+    relevant_location_ids.update(row["id"] for row in matches.get("location", []))
+
+    arts = []
+    for row in snap["arts"]:
+        known = knowledge.get(("art", row["id"]))
+        if (
+            row.get("source_location_id") in relevant_location_ids
+            or row in matches.get("art", [])
+            or known is not None
+        ):
+            arts.append({
+                "id": row["id"],
+                "name": row["name"],
+                "rank": row["rank"],
+                "category": row["category"],
+                "summary": row["summary"],
+                "visibility": row["visibility"],
+                "source_location_id": row.get("source_location_id"),
+                "knowledge_status": known.get("status") if known else "unknown",
+            })
+
+    opportunities = []
+    seen_opportunities = set()
+    for row in local["opportunities"] + matches.get("opportunity", []):
+        if row["id"] in seen_opportunities:
+            continue
+        seen_opportunities.add(row["id"])
+        known = knowledge.get(("opportunity", row["id"]))
+        opportunities.append({
+            "id": row["id"],
+            "name": row["name"],
+            "kind": row["kind"],
+            "clue": row["clue"],
+            "danger": row["danger"],
+            "state": row.get("save_state") or row["default_state"],
+            "knowledge_status": known.get("status") if known else "unknown",
+        })
+
+    facts = [{
+        "id": f"location:{snap['location']['location_id']}",
+        "kind": "location",
+        "text": snap["location"]["location_summary"],
+    }]
+    facts.extend({
+        "id": f"route:{row['id']}",
+        "kind": "route",
+        "text": row["summary"],
+    } for row in local["routes"])
+    facts.extend({
+        "id": f"faction:{row['id']}",
+        "kind": "faction",
+        "text": row["summary"],
+    } for row in local["factions"])
+    facts.extend({
+        "id": f"opportunity:{row['id']}",
+        "kind": "opportunity",
+        "text": f"{row['name']}：{row['clue']}（危险：{row['danger']}）",
+    } for row in opportunities)
+    facts.extend({
+        "id": f"art:{row['id']}",
+        "kind": "art",
+        "text": f"{row['name']}：{row['summary']}，来源为{row['source_label']}",
+    } for row in snap["arts"] if row["id"] in {art["id"] for art in arts})
+
+    allowed_reference_ids = {row["id"] for row in facts}
+    allowed_reference_ids.update(row["id"] for row in arts)
+    allowed_reference_ids.update(row["id"] for row in opportunities)
+    return {
+        "location": {
+            "region_id": snap["location"]["region_id"],
+            "region_name": snap["location"]["region_name"],
+            "location_id": current_id,
+            "location_name": snap["location"]["location_name"],
+            "site_name": snap["location"]["site_name"],
+            "location_state": snap["location"]["location_state"],
+            "lost_risk": snap["location"]["lost_risk"],
+        },
+        "player_cognition": {
+            "locations": _names_for_knowledge(snap, knowledge, "location", None),
+            "routes": _names_for_knowledge(snap, knowledge, "route", None),
+            "factions": _names_for_knowledge(snap, knowledge, "faction", None),
+            "arts": _names_for_knowledge(snap, knowledge, "art", None),
+            "opportunities": _names_for_knowledge(snap, knowledge, "opportunity", None),
+        },
+        "facts": facts,
+        "arts": arts,
+        "opportunities": opportunities,
+        "allowed_reference_ids": sorted(allowed_reference_ids),
+        "forbidden_reveals": [
+            "切片之外的地点、路线、势力、功法、机缘和秘境",
+            "主角未知且未被本轮骨架选中的客观世界事实",
+            "没有固定来源 ID 的功法、传承、法宝或重大资源",
+        ],
+    }
+
+
+def selected_director_facts(context: dict, reference_ids: list[str]) -> list[dict]:
+    """Resolve validated director references to the minimal GM-visible facts."""
+    wanted = {str(ref) for ref in reference_ids}
+    selected = [row for row in context.get("facts", []) if row.get("id") in wanted]
+    selected.extend(
+        {"id": row["id"], "kind": "art", "text": f"{row['name']}：{row['summary']}"}
+        for row in context.get("arts", [])
+        if row.get("id") in wanted
+    )
+    selected.extend(
+        {"id": row["id"], "kind": "opportunity", "text": f"{row['name']}：{row['clue']}"}
+        for row in context.get("opportunities", [])
+        if row.get("id") in wanted
+    )
+    return selected
+
+
 def _render_constraint_block(title: str, lines: list[str]) -> str:
     body = "\n".join(line for line in lines if line)
     return f"【{title}】\n{body}\n【/世界约束 Agent】\n\n"
