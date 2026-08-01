@@ -408,3 +408,33 @@ html, body {
 .constraint-none {
   color: var(--muted); font-size: 13px;
 }
+
+/* LLM 请求指标 */
+.llm-live {
+  border: 1px solid var(--accent); border-radius: 8px; padding: 8px 12px;
+  background: rgba(180,138,60,0.08); display: flex; flex-direction: column; gap: 7px;
+}
+.llm-live.hidden { display: none; }
+.llm-live-row { display: flex; align-items: center; gap: 9px; min-height: 22px; color: var(--ink); font-size: 13px; }
+.llm-live-row b { margin-left: auto; color: var(--accent-soft); font-variant-numeric: tabular-nums; }
+.llm-pulse {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--accent-soft);
+  box-shadow: 0 0 0 4px rgba(216,181,106,0.12);
+}
+.llm-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.llm-item {
+  border: 1px solid #2a2f38; border-radius: 8px; padding: 10px 12px;
+  background: #12151b; display: grid; gap: 7px;
+}
+.llm-item-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.llm-kind { color: var(--ink); font-size: 14px; font-weight: 600; }
+.llm-duration { margin-left: auto; color: var(--accent-soft); font-size: 13px; font-variant-numeric: tabular-nums; }
+.llm-status { font-size: 11px; border: 1px solid #3b414c; border-radius: 5px; padding: 1px 6px; color: var(--muted); }
+.llm-status.success { color: #87b890; border-color: #416548; }
+.llm-status.timeout, .llm-status.error { color: var(--danger); border-color: #704242; }
+.llm-item-meta { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 11px; }
+.llm-model { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.llm-time { flex: none; }
+.llm-error { color: var(--danger); font-size: 11px; overflow-wrap: anywhere; }
+.llm-empty { color: var(--muted); text-align: center; padding: 20px 0; }
+.llm-empty.hidden { display: none; }
