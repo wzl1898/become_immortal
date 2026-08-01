@@ -154,8 +154,12 @@ def messages_for_opening(session_id: str) -> list[dict]:
     state = _get(session_id)
     inject = _injection(state, None)
     world_constraints = constraints.opening_constraints(session_id)
-    content = f"{world_constraints}{inject}{OPENING_PROMPT}"
-    return state["messages"] + [{"role": "user", "content": content}]
+    messages = list(state["messages"])
+    if world_constraints:
+        messages.append({"role": "system", "content": world_constraints.rstrip()})
+    content = f"{inject}{OPENING_PROMPT}"
+    messages.append({"role": "user", "content": content})
+    return messages
 
 
 _STATUS_RE = re.compile(r"《状态》(.*?)《/状态》", re.S)
@@ -632,11 +636,12 @@ async def prepare_action(session_id: str, action: str) -> list[dict]:
     store.save_director_state(session_id, director_state)
     selected_memories = (director_state.get("current_plan") or {}).get("selected_memories") or []
     inject = _injection(state, action, selected_memories)
-    content = f"{world_constraints}{inject}{action}"
-    messages = list(state["messages"])
     director_message = _render_director_plan(director_state, world_context)
-    if director_message:
-        messages.insert(1, {"role": "system", "content": director_message})
+    parts = [world_constraints.rstrip(), inject.rstrip(), director_message.rstrip()]
+    parts = [part for part in parts if part]
+    parts.append(f"【玩家原始行动】\n{action}")
+    content = "\n\n".join(parts)
+    messages = list(state["messages"])
     messages.append({"role": "user", "content": content})
     return messages
 
@@ -673,19 +678,17 @@ def messages_for_inquiry(session_id: str, question: str) -> list[dict]:
     query = "\n\n".join(p for p in (question, scene) if p)
     knowledge = constraints.inquiry_constraints(session_id)
     memory = _world_memory_dossier(_recall_world_memory(state, query))
-    parts = []
+    messages = [{"role": "system", "content": INQUIRY_SYSTEM_PROMPT}]
     if knowledge:
-        parts.append(knowledge.rstrip())
+        messages.append({"role": "system", "content": knowledge.rstrip()})
+    parts = []
     if scene:
         parts.append(f"【当前情境（主角所处的最近情节）】\n{scene}")
     if memory:
         parts.append(memory.rstrip())
     parts.append(f"【主角想打听的】\n{question}")
-    user_content = "\n\n".join(parts)
-    return [
-        {"role": "system", "content": INQUIRY_SYSTEM_PROMPT},
-        {"role": "user", "content": user_content},
-    ]
+    messages.append({"role": "user", "content": "\n\n".join(parts)})
+    return messages
 
 
 def commit(session_id: str, user_content: str | None, assistant_content: str) -> None:
@@ -804,27 +807,18 @@ def _memory_extract_user_prompt(
     objects = _OBJECTS_RE.search(assistant_content)
     body = _narration_body(assistant_content)
     action = user_content if user_content is not None else "（开始这一世）"
-    parts = [
-        f"【回合】\n{turn}",
+    parts = []
+    compact_known = _compact_memories(known_memories or [])
+    if compact_known:
+        parts.append("【已有相关记忆】\n" + _stable_json(compact_known))
+    parts.extend([
         f"【玩家行动】\n{action}",
         f"【本轮叙事正文】\n{body}",
-    ]
+    ])
     if status:
         parts.append(f"【状态面板】\n{status.group(1).strip()}")
     if objects:
         parts.append(f"【关键物件面板】\n{objects.group(1).strip()}")
-    if known_memories:
-        lines = []
-        for mem in known_memories:
-            text = _memory_text(mem)
-            if not text:
-                continue
-            kind = mem.get("type") or "plot"
-            lines.append(f"- [{kind}] {text}")
-        if lines:
-            parts.append(
-                "【已记录的相关记忆（这些事实已在库中，不要重复提取）】\n" + "\n".join(lines)
-            )
     return "\n\n".join(parts)
 
 
@@ -1303,6 +1297,11 @@ def _render_director_plan(state: dict, world_context: dict) -> str:
     if plan.get("selected_facts"):
         lines.append("本轮获准使用的固定事实：")
         lines.extend(f"- [{row['id']}] {row['text']}" for row in plan["selected_facts"])
+    if plan.get("selected_memories"):
+        lines.append("本轮获准引用的主角记忆：")
+        lines.extend(
+            f"- [{row['id']}] {row['text']}" for row in plan["selected_memories"]
+        )
     prohibited = list(plan.get("must_not") or []) + list(world_context.get("forbidden_reveals") or [])
     if prohibited:
         lines.append("禁止：" + "；".join(prohibited))
@@ -1368,12 +1367,9 @@ async def _run_director_audit(
         raw = await complete_chat(
             [
                 {"role": "system", "content": DIRECTOR_AUDIT_SYSTEM_PROMPT},
-                {"role": "user", "content": "\n\n".join([
-                    f"【回合】\n{turn}",
-                    f"【玩家行动】\n{user_content}",
-                    f"【导演骨架】\n{json.dumps(plan, ensure_ascii=False)}",
-                    f"【剧情正文】\n{assistant_content}",
-                ])},
+                {"role": "user", "content": _director_audit_prompt(
+                    plan, user_content, assistant_content
+                )},
             ],
             temperature=0.1,
             max_tokens=500,
@@ -1403,6 +1399,36 @@ async def _run_director_audit(
         store.save_director_state(session_id, director)
     except Exception:  # noqa: BLE001
         _LOG.exception("director audit failed for session %s turn %s", session_id, turn)
+
+
+def _compact_audit_plan(plan: dict) -> dict:
+    payoff = plan.get("payoff") if isinstance(plan.get("payoff"), dict) else {}
+    return {
+        "turn_mode": plan.get("turn_mode"),
+        "required_outcome": plan.get("current_goal"),
+        "payoff": {
+            "type": payoff.get("type"),
+            "proof": payoff.get("proof"),
+        },
+        "beats": plan.get("beats") or [],
+        "state_changes": plan.get("state_changes") or {},
+        "selected_fact_ids": [
+            row.get("id") for row in (plan.get("selected_facts") or []) if row.get("id")
+        ],
+        "memory_refs": plan.get("memory_refs") or [],
+    }
+
+
+def _director_audit_prompt(plan: dict, action: str, assistant_content: str) -> str:
+    status = _STATUS_RE.search(assistant_content)
+    parts = [
+        "【导演骨架】\n" + _stable_json(_compact_audit_plan(plan)),
+        f"【玩家行动】\n{action}",
+        f"【剧情正文】\n{_narration_body(assistant_content)}",
+    ]
+    if status:
+        parts.append(f"【状态面板】\n{status.group(1).strip()}")
+    return "\n\n".join(parts)
 
 
 # ---- 旧导演模块：只保留代码兼容，新的生成链路不再调用 ----

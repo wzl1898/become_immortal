@@ -177,6 +177,55 @@ class DirectorPlanTests(unittest.TestCase):
         self.assertLess(messages[-1]["content"].find("最近一轮正文"), messages[-1]["content"].find("玩家本轮行动"))
         self.assertTrue(messages[-1]["content"].rstrip().endswith("【玩家本轮行动】\n回家"))
 
+    def test_narrative_plan_is_appended_after_history(self):
+        sid = "cache-prefix-test"
+        historical = [
+            {"role": "system", "content": "fixed"},
+            {"role": "user", "content": "old action"},
+            {"role": "assistant", "content": "old result"},
+        ]
+        game._CACHE[sid] = {
+            "messages": list(historical),
+            "transcript": [],
+            "turns": 1,
+            "character_state": {},
+            "world_memory": [],
+            "inventory": [],
+            "director_state": {},
+            "_injected": [],
+        }
+        planned = game._apply_director_plan({}, _plan(), "迎战", _context(), 2)
+
+        async def fake_plan(*args, **kwargs):
+            return planned
+
+        try:
+            with patch.object(game.constraints, "action_constraints", return_value="world"), patch.object(
+                game.constraints, "director_context", return_value=_context()
+            ), patch.object(game, "_plan_director_turn", fake_plan), patch.object(
+                game.store, "save_director_state"
+            ):
+                messages = asyncio.run(game.prepare_action(sid, "迎战"))
+        finally:
+            game._CACHE.pop(sid, None)
+
+        self.assertEqual(messages[:-1], historical)
+        self.assertIn("本轮导演骨架", messages[-1]["content"])
+        self.assertTrue(messages[-1]["content"].endswith("【玩家原始行动】\n迎战"))
+
+    def test_audit_prompt_omits_plan_metadata(self):
+        plan = _plan()
+        plan.update({"plan_id": "random", "note": "long note", "selected_facts": []})
+        prompt = game._director_audit_prompt(
+            plan,
+            "迎战",
+            "正文。《状态》\n境界：凡人\n《/状态》",
+        )
+
+        self.assertNotIn("plan_id", prompt)
+        self.assertNotIn("long note", prompt)
+        self.assertIn("境界：凡人", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()
