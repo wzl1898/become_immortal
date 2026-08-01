@@ -23,6 +23,7 @@ MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
 TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.9"))
 MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 ANTHROPIC_VERSION = os.getenv("ANTHROPIC_VERSION", "2023-06-01")
+CONNECT_RETRY_DELAYS = (0.5, 1.5)
 
 _TIMEOUT = httpx.Timeout(120.0, connect=15.0)
 
@@ -198,24 +199,33 @@ async def _stream_openai(messages: list[dict]):
     }
 
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        async with client.stream("POST", url, headers=headers, json=payload) as resp:
-            await _raise_for_status(resp)
-            async for line in resp.aiter_lines():
-                data = _iter_sse_data(line)
-                if data is None:
-                    continue
-                if data == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                choices = chunk.get("choices") or []
-                if not choices:
-                    continue
-                piece = (choices[0].get("delta") or {}).get("content")
-                if piece:
-                    yield piece
+        for attempt in range(len(CONNECT_RETRY_DELAYS) + 1):
+            yielded = False
+            try:
+                async with client.stream("POST", url, headers=headers, json=payload) as resp:
+                    await _raise_for_status(resp)
+                    async for line in resp.aiter_lines():
+                        data = _iter_sse_data(line)
+                        if data is None:
+                            continue
+                        if data == "[DONE]":
+                            return
+                        try:
+                            chunk = json.loads(data)
+                        except json.JSONDecodeError:
+                            continue
+                        choices = chunk.get("choices") or []
+                        if not choices:
+                            continue
+                        piece = (choices[0].get("delta") or {}).get("content")
+                        if piece:
+                            yielded = True
+                            yield piece
+                return
+            except httpx.ConnectError:
+                if yielded or attempt >= len(CONNECT_RETRY_DELAYS):
+                    raise
+                await asyncio.sleep(CONNECT_RETRY_DELAYS[attempt])
 
 
 async def _complete_openai(
@@ -239,8 +249,15 @@ async def _complete_openai(
 
     timeout = httpx.Timeout(config.timeout_seconds, connect=min(15.0, config.timeout_seconds))
     async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(url, headers=headers, json=payload)
-        await _raise_for_status(resp)
+        for attempt in range(len(CONNECT_RETRY_DELAYS) + 1):
+            try:
+                resp = await client.post(url, headers=headers, json=payload)
+                await _raise_for_status(resp)
+                break
+            except httpx.ConnectError:
+                if attempt >= len(CONNECT_RETRY_DELAYS):
+                    raise
+                await asyncio.sleep(CONNECT_RETRY_DELAYS[attempt])
     body = resp.json()
     choices = body.get("choices") or []
     if not choices:
@@ -279,25 +296,33 @@ async def _stream_anthropic(messages: list[dict]):
         payload["system"] = system
 
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        async with client.stream("POST", url, headers=headers, json=payload) as resp:
-            await _raise_for_status(resp)
-            async for line in resp.aiter_lines():
-                data = _iter_sse_data(line)
-                if data is None:
-                    continue
-                try:
-                    evt = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                # 文本增量只在 content_block_delta.text_delta 里
-                if evt.get("type") == "content_block_delta":
-                    delta = evt.get("delta") or {}
-                    if delta.get("type") == "text_delta":
-                        piece = delta.get("text")
-                        if piece:
-                            yield piece
-                elif evt.get("type") == "message_stop":
-                    break
+        for attempt in range(len(CONNECT_RETRY_DELAYS) + 1):
+            yielded = False
+            try:
+                async with client.stream("POST", url, headers=headers, json=payload) as resp:
+                    await _raise_for_status(resp)
+                    async for line in resp.aiter_lines():
+                        data = _iter_sse_data(line)
+                        if data is None:
+                            continue
+                        try:
+                            evt = json.loads(data)
+                        except json.JSONDecodeError:
+                            continue
+                        if evt.get("type") == "content_block_delta":
+                            delta = evt.get("delta") or {}
+                            if delta.get("type") == "text_delta":
+                                piece = delta.get("text")
+                                if piece:
+                                    yielded = True
+                                    yield piece
+                        elif evt.get("type") == "message_stop":
+                            return
+                return
+            except httpx.ConnectError:
+                if yielded or attempt >= len(CONNECT_RETRY_DELAYS):
+                    raise
+                await asyncio.sleep(CONNECT_RETRY_DELAYS[attempt])
 
 
 async def _complete_anthropic(
@@ -324,8 +349,15 @@ async def _complete_anthropic(
 
     timeout = httpx.Timeout(config.timeout_seconds, connect=min(15.0, config.timeout_seconds))
     async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(url, headers=headers, json=payload)
-        await _raise_for_status(resp)
+        for attempt in range(len(CONNECT_RETRY_DELAYS) + 1):
+            try:
+                resp = await client.post(url, headers=headers, json=payload)
+                await _raise_for_status(resp)
+                break
+            except httpx.ConnectError:
+                if attempt >= len(CONNECT_RETRY_DELAYS):
+                    raise
+                await asyncio.sleep(CONNECT_RETRY_DELAYS[attempt])
     body = resp.json()
     parts = []
     for block in body.get("content") or []:

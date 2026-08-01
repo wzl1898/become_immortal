@@ -205,8 +205,14 @@ class DirectorPlanTests(unittest.TestCase):
                 game.constraints, "director_context", return_value=_context()
             ), patch.object(game, "_plan_director_turn", fake_plan), patch.object(
                 game.store, "save_director_state"
-            ):
+            ) as save_director:
                 messages = asyncio.run(game.prepare_action(sid, "迎战"))
+                self.assertEqual(game._CACHE[sid]["_pending_director_prev"], {})
+                self.assertEqual(game._CACHE[sid]["director_state"], planned)
+                save_director.assert_not_called()
+                game.rollback_prepared_action(sid)
+                self.assertEqual(game._CACHE[sid]["director_state"], {})
+                self.assertNotIn("_pending_director_prev", game._CACHE[sid])
         finally:
             game._CACHE.pop(sid, None)
 

@@ -11,6 +11,7 @@
 """
 
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -646,8 +647,8 @@ async def prepare_action(session_id: str, action: str) -> list[dict]:
     recall_query = "\n\n".join(part for part in (event_core, latest_scene, action) if part)
     recalled_memories = _recall_world_memory(state, recall_query)
     director_state = await _plan_director_turn(state, action, world_context, recalled_memories)
+    state["_pending_director_prev"] = copy.deepcopy(state.get("director_state") or {})
     state["director_state"] = director_state
-    store.save_director_state(session_id, director_state)
     selected_memories = (director_state.get("current_plan") or {}).get("selected_memories") or []
     inject = _injection(state, action, selected_memories)
     director_message = _render_director_plan(director_state, world_context)
@@ -717,6 +718,7 @@ def commit(session_id: str, user_content: str | None, assistant_content: str) ->
     transcript 里则只记开场旁白（不显示占位）。
     """
     state = _get(session_id)
+    state.pop("_pending_director_prev", None)
     messages = state["messages"]
     transcript = state["transcript"]
 
@@ -752,6 +754,14 @@ def commit(session_id: str, user_content: str | None, assistant_content: str) ->
     store.save_director_state(session_id, state.get("director_state") or {})
     _schedule_memory_extraction(session_id, user_content, assistant_content, state["turns"])
     _schedule_director_audit(session_id, user_content, assistant_content, state["turns"])
+
+
+def rollback_prepared_action(session_id: str) -> None:
+    """Restore the director state when narrative generation never commits."""
+    state = _get(session_id)
+    if state is None or "_pending_director_prev" not in state:
+        return
+    state["director_state"] = state.pop("_pending_director_prev")
 
 
 def _schedule_memory_extraction(
