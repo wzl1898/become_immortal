@@ -136,6 +136,47 @@ class DirectorPlanTests(unittest.TestCase):
         self.assertEqual(planned["current_plan"]["event_action"], "resolve")
         self.assertEqual(planned["event"]["id"], "event-1")
 
+    def test_fallback_respects_negated_investigation(self):
+        result = game._fallback_director_plan({}, "不要查看埋好的牌子，回家假装没事")
+
+        self.assertEqual(result["payoff"]["type"], "escape")
+        self.assertNotIn("追查的问题", result["current_goal"])
+        self.assertIn("牌子", result["event_core"])
+
+    def test_memory_refs_are_validated_and_compacted(self):
+        raw = _plan()
+        raw["memory_refs"] = ["memory-b", "invented-memory"]
+        memories = [
+            {"id": "memory-b", "type": "plot", "text": "阿七曾在夜里异变。"},
+            {"id": "memory-a", "type": "plot", "text": "村外有一块黑牌。"},
+        ]
+        state = game._apply_director_plan(
+            {}, raw, "迎战", _context(), 1, memory_candidates=memories
+        )
+
+        plan = state["current_plan"]
+        self.assertEqual(plan["memory_refs"], ["memory-b"])
+        self.assertEqual(plan["selected_memories"], [memories[0]])
+
+    def test_director_dynamic_message_puts_player_action_last(self):
+        state = {
+            "turns": 3,
+            "transcript": [{"role": "narration", "text": "上一轮正文"}],
+            "character_state": {"realm": "凡人", "updated_at": 123.0},
+        }
+        messages = game._director_planning_messages(
+            state,
+            "回家",
+            _context(),
+            {},
+            [{"id": "m1", "type": "plot", "text": "已知事实"}],
+        )
+
+        self.assertEqual([m["role"] for m in messages], ["system", "system", "user"])
+        self.assertNotIn("updated_at", messages[-1]["content"])
+        self.assertLess(messages[-1]["content"].find("最近一轮正文"), messages[-1]["content"].find("玩家本轮行动"))
+        self.assertTrue(messages[-1]["content"].rstrip().endswith("【玩家本轮行动】\n回家"))
+
 
 if __name__ == "__main__":
     unittest.main()

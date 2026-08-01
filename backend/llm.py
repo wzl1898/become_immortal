@@ -10,6 +10,7 @@
 
 import json
 import os
+from dataclasses import dataclass
 
 import httpx
 
@@ -22,6 +23,29 @@ MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 ANTHROPIC_VERSION = os.getenv("ANTHROPIC_VERSION", "2023-06-01")
 
 _TIMEOUT = httpx.Timeout(120.0, connect=15.0)
+
+
+@dataclass(frozen=True)
+class LLMConfig:
+    protocol: str
+    base_url: str
+    api_key: str
+    model: str
+    timeout_seconds: float = 120.0
+
+
+DEFAULT_CONFIG = LLMConfig(PROTOCOL, BASE_URL, API_KEY, MODEL)
+
+
+def config_from_env(prefix: str) -> LLMConfig:
+    """Build an agent-specific config, falling back to the main LLM."""
+    return LLMConfig(
+        protocol=os.getenv(f"{prefix}_PROTOCOL", PROTOCOL).strip().lower(),
+        base_url=os.getenv(f"{prefix}_BASE_URL", BASE_URL).rstrip("/"),
+        api_key=os.getenv(f"{prefix}_API_KEY", API_KEY),
+        model=os.getenv(f"{prefix}_MODEL", MODEL),
+        timeout_seconds=float(os.getenv(f"{prefix}_TIMEOUT", "120")),
+    )
 
 
 async def stream_chat(messages: list[dict]):
@@ -51,16 +75,18 @@ async def complete_chat(
     messages: list[dict],
     temperature: float | None = None,
     max_tokens: int | None = None,
+    config: LLMConfig | None = None,
 ) -> str:
     """向 LLM 发起非流式对话，用于后台结构化任务。"""
-    if not API_KEY:
+    config = config or DEFAULT_CONFIG
+    if not config.api_key:
         raise RuntimeError("未配置 LLM_API_KEY，请复制 .env.example 为 .env 并填写。")
 
-    if PROTOCOL == "anthropic":
-        return await _complete_anthropic(messages, temperature, max_tokens)
-    if PROTOCOL == "openai":
-        return await _complete_openai(messages, temperature, max_tokens)
-    raise RuntimeError(f"未知的 LLM_PROTOCOL={PROTOCOL!r}，应为 openai 或 anthropic。")
+    if config.protocol == "anthropic":
+        return await _complete_anthropic(messages, temperature, max_tokens, config)
+    if config.protocol == "openai":
+        return await _complete_openai(messages, temperature, max_tokens, config)
+    raise RuntimeError(f"未知的 LLM_PROTOCOL={config.protocol!r}，应为 openai 或 anthropic。")
 
 
 def _iter_sse_data(line: str) -> str | None:
@@ -109,21 +135,23 @@ async def _complete_openai(
     messages: list[dict],
     temperature: float | None,
     max_tokens: int | None,
+    config: LLMConfig,
 ) -> str:
-    url = f"{BASE_URL}/chat/completions"
+    url = f"{config.base_url}/chat/completions"
     headers = {
-        "Authorization": f"Bearer {API_KEY}",
+        "Authorization": f"Bearer {config.api_key}",
         "Content-Type": "application/json",
     }
     payload = {
-        "model": MODEL,
+        "model": config.model,
         "messages": messages,
         "temperature": TEMPERATURE if temperature is None else temperature,
         "max_tokens": MAX_TOKENS if max_tokens is None else max_tokens,
         "stream": False,
     }
 
-    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+    timeout = httpx.Timeout(config.timeout_seconds, connect=min(15.0, config.timeout_seconds))
+    async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(url, headers=headers, json=payload)
         await _raise_for_status(resp)
     body = resp.json()
@@ -189,16 +217,17 @@ async def _complete_anthropic(
     messages: list[dict],
     temperature: float | None,
     max_tokens: int | None,
+    config: LLMConfig,
 ) -> str:
     system, convo = _split_system(messages)
-    url = f"{BASE_URL}/messages"
+    url = f"{config.base_url}/messages"
     headers = {
-        "x-api-key": API_KEY,
+        "x-api-key": config.api_key,
         "anthropic-version": ANTHROPIC_VERSION,
         "Content-Type": "application/json",
     }
     payload = {
-        "model": MODEL,
+        "model": config.model,
         "max_tokens": MAX_TOKENS if max_tokens is None else max_tokens,
         "temperature": TEMPERATURE if temperature is None else temperature,
         "messages": convo,
@@ -206,7 +235,8 @@ async def _complete_anthropic(
     if system:
         payload["system"] = system
 
-    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+    timeout = httpx.Timeout(config.timeout_seconds, connect=min(15.0, config.timeout_seconds))
+    async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(url, headers=headers, json=payload)
         await _raise_for_status(resp)
     body = resp.json()

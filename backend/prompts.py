@@ -256,6 +256,7 @@ payoff.type 只能是 gain、combat、mystery、reversal、escape 之一：
 # 世界边界
 - 只能使用输入【世界约束切片】中的事实与 reference ID。
 - facts_to_reveal、payoff.source_ids 只能填写切片提供的 ID。
+- protagonist_memories 是主角过往认知候选，只能通过 memory_refs 引用其 ID；不得把记忆当成固定功法或机缘的授权来源。
 - gain 必须有固定来源 ID；不得自行生成新功法、机缘、秘境、地点、法宝或势力。
 - 主角未知事实只有被 facts_to_reveal 明确选中时，才允许在本轮按骨架揭示。
 
@@ -279,6 +280,7 @@ payoff.type 只能是 gain、combat、mystery、reversal、escape 之一：
   "facts_to_reveal": [],
   "arts_to_grant": [],
   "opportunities_to_trigger": [],
+  "memory_refs": ["只能填写输入中提供的记忆 ID"],
   "beats": ["本轮按顺序发生的 2 至 3 个紧凑、确切节拍"],
   "state_changes": {},
   "must_not": ["本轮特别禁止的拖延或越界写法"],

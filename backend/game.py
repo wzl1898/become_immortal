@@ -13,6 +13,7 @@
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 import uuid
@@ -20,7 +21,7 @@ import uuid
 import constraints
 import embed
 import store
-from llm import complete_chat
+from llm import complete_chat, config_from_env
 from prompts import (
     DIRECTOR_AUDIT_SYSTEM_PROMPT,
     DIRECTOR_PLANNER_SYSTEM_PROMPT,
@@ -70,7 +71,9 @@ DIRECTOR_PLAN_MAX_CHARS = 1800
 DIRECTOR_PAYOFF_TYPES = {"gain", "combat", "mystery", "reversal", "escape"}
 DIRECTOR_EVENT_ACTIONS = {"start", "continue", "resolve", "abandon", "none"}
 DIRECTOR_TURN_MODES = {"setup", "progress", "escalate", "resolve", "transition"}
-DIRECTOR_PLANNER_TIMEOUT_SECONDS = 20
+DIRECTOR_PLANNER_TIMEOUT_SECONDS = float(os.getenv("DIRECTOR_LLM_TIMEOUT", "35"))
+DIRECTOR_PLANNER_MAX_TOKENS = int(os.getenv("DIRECTOR_LLM_MAX_TOKENS", "600"))
+DIRECTOR_LLM_CONFIG = config_from_env("DIRECTOR_LLM")
 
 # ---- 旧导演状态机常量（只用于读取历史状态，新的预规划链路不再维护）----
 # 连续偏离多少轮就弃掉当前爽点、改跟玩家的路（实测微调）。
@@ -508,6 +511,20 @@ def _memory_candidate(mem: dict) -> str:
     return f"{mem.get('type', '')} {entities} {_memory_text(mem)}".strip()
 
 
+def _stable_json(value) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _compact_memories(items: list[dict]) -> list[dict]:
+    compact = []
+    for item in items:
+        memory_id = str(item.get("id") or "").strip()
+        text = _memory_text(item)
+        if memory_id and text:
+            compact.append({"id": memory_id, "type": item.get("type") or "plot", "text": text})
+    return sorted(compact, key=lambda row: row["id"])
+
+
 def _num(val, default: float = 0.0) -> float:
     try:
         return float(val)
@@ -568,7 +585,11 @@ def _world_memory_dossier(items: list[dict]) -> str:
     )
 
 
-def _injection(state: dict, action: str | None) -> str:
+def _injection(
+    state: dict,
+    action: str | None,
+    memories: list[dict] | None = None,
+) -> str:
     """行动/开场前注入的约束串：当前主角状态 + 当前物品档案（热+召回）+ 世界记忆。
 
     冷热按 turn - last_turn < HOT_TURNS 划分。有玩家输入时对冷物品做语义召回，
@@ -581,8 +602,9 @@ def _injection(state: dict, action: str | None) -> str:
     recalled = _recall_cold(state, cold, action or "")
     active = hot + recalled
     state["_injected"] = [it["name"] for it in active]
-    query = "\n\n".join(p for p in (action or "", _recent_scene(state["transcript"])) if p)
-    memories = _recall_world_memory(state, query)
+    if memories is None:
+        query = "\n\n".join(p for p in (action or "", _recent_scene(state["transcript"])) if p)
+        memories = _recall_world_memory(state, query)
     return (
         _character_state_dossier(state.get("character_state") or {})
         + _inventory_dossier(active)
@@ -600,10 +622,16 @@ async def prepare_action(session_id: str, action: str) -> list[dict]:
     state = _get(session_id)
     world_constraints = constraints.action_constraints(session_id, action)
     world_context = constraints.director_context(session_id, action)
-    director_state = await _plan_director_turn(state, action, world_context)
+    previous = _dynamic_director_state(state.get("director_state"))
+    event_core = ((previous.get("event") or {}).get("core") or "").strip()
+    latest_scene = _latest_scene(state.get("transcript") or [])
+    recall_query = "\n\n".join(part for part in (event_core, latest_scene, action) if part)
+    recalled_memories = _recall_world_memory(state, recall_query)
+    director_state = await _plan_director_turn(state, action, world_context, recalled_memories)
     state["director_state"] = director_state
     store.save_director_state(session_id, director_state)
-    inject = _injection(state, action)
+    selected_memories = (director_state.get("current_plan") or {}).get("selected_memories") or []
+    inject = _injection(state, action, selected_memories)
     content = f"{world_constraints}{inject}{action}"
     messages = list(state["messages"])
     director_message = _render_director_plan(director_state, world_context)
@@ -625,6 +653,13 @@ def _recent_scene(transcript: list[dict]) -> str:
                 break
     bodies.reverse()
     return "\n\n".join(bodies)
+
+
+def _latest_scene(transcript: list[dict], limit: int = 300) -> str:
+    for block in reversed(transcript):
+        if block.get("role") == "narration":
+            return _narration_body(block.get("text", ""))[-limit:]
+    return ""
 
 
 def messages_for_inquiry(session_id: str, question: str) -> list[dict]:
@@ -889,43 +924,114 @@ def _dynamic_director_state(raw: dict | None) -> dict:
     }
 
 
-async def _plan_director_turn(state: dict, action: str, world_context: dict) -> dict:
+async def _plan_director_turn(
+    state: dict,
+    action: str,
+    world_context: dict,
+    recalled_memories: list[dict] | None = None,
+) -> dict:
     prev = _dynamic_director_state(state.get("director_state"))
-    prompt = _director_planning_prompt(state, action, world_context, prev)
+    compact_memories = _compact_memories(recalled_memories or [])
+    messages = _director_planning_messages(state, action, world_context, prev, compact_memories)
     result = None
+    source = "llm"
+    fallback_reason = ""
     try:
         raw = await asyncio.wait_for(
             complete_chat(
-                [
-                    {"role": "system", "content": DIRECTOR_PLANNER_SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
-                ],
+                messages,
                 temperature=0.25,
-                max_tokens=1000,
+                max_tokens=DIRECTOR_PLANNER_MAX_TOKENS,
+                config=DIRECTOR_LLM_CONFIG,
             ),
             timeout=DIRECTOR_PLANNER_TIMEOUT_SECONDS,
         )
         result = _extract_json_object(raw)
+        if result is None:
+            fallback_reason = "invalid_json"
     except asyncio.TimeoutError:
+        fallback_reason = "timeout"
         _LOG.warning("director planning timed out after %ss; using fallback", DIRECTOR_PLANNER_TIMEOUT_SECONDS)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        fallback_reason = type(exc).__name__
         _LOG.exception("director planning failed")
     if result is None:
+        source = "fallback"
         result = _fallback_director_plan(prev, action)
-    return _apply_director_plan(prev, result, action, world_context, state["turns"] + 1)
+    planned = _apply_director_plan(
+        prev,
+        result,
+        action,
+        world_context,
+        state["turns"] + 1,
+        memory_candidates=compact_memories,
+    )
+    planned["planner"] = {
+        "source": source,
+        "model": DIRECTOR_LLM_CONFIG.model if source == "llm" else "local",
+        "fallback_reason": fallback_reason,
+    }
+    return planned
 
 
-def _director_planning_prompt(state: dict, action: str, world_context: dict, prev: dict) -> str:
-    scene = _recent_scene(state.get("transcript") or [])
-    character = state.get("character_state") or {}
-    return "\n\n".join([
-        f"【即将生成的回合】\n{state['turns'] + 1}",
-        f"【玩家本轮行动】\n{action}",
-        f"【最近剧情】\n{scene or '（暂无）'}",
-        f"【当前主角状态】\n{json.dumps(character, ensure_ascii=False)}",
-        f"【上一轮导演状态】\n{json.dumps(prev, ensure_ascii=False)}",
-        f"【世界约束切片】\n{json.dumps(world_context, ensure_ascii=False)}",
+def _compact_director_state(prev: dict) -> dict:
+    event = prev.get("event") if isinstance(prev.get("event"), dict) else None
+    plan = prev.get("current_plan") if isinstance(prev.get("current_plan"), dict) else {}
+    audit = prev.get("last_audit") if isinstance(prev.get("last_audit"), dict) else {}
+    return {
+        "event": ({
+            "id": event.get("id"),
+            "core": event.get("core"),
+            "start_turn": event.get("start_turn"),
+            "status": event.get("status"),
+            "turns": event.get("turns"),
+            "max_turns": event.get("max_turns"),
+        } if event else None),
+        "intent": prev.get("intent"),
+        "previous_result": {
+            "current_goal": plan.get("current_goal"),
+            "payoff": plan.get("payoff"),
+            "turn_mode": plan.get("turn_mode"),
+            "audit": {
+                "fulfilled": audit.get("fulfilled"),
+                "payoff_delivered": audit.get("payoff_delivered"),
+                "note": audit.get("note"),
+            } if audit else None,
+        },
+        "scene": prev.get("scene"),
+        "scene_turns": prev.get("scene_turns", 0),
+        "needs_repair": bool(prev.get("needs_repair")),
+    }
+
+
+def _director_planning_messages(
+    state: dict,
+    action: str,
+    world_context: dict,
+    prev: dict,
+    memories: list[dict],
+) -> list[dict]:
+    character = {
+        key: value for key, value in (state.get("character_state") or {}).items()
+        if key != "updated_at"
+    }
+    world_layer = {
+        "world_version": 1,
+        "world_slice": world_context,
+        "protagonist_memories": memories,
+    }
+    turn_content = "\n\n".join([
+        f"【回合】\n{state['turns'] + 1}",
+        "【当前事件】\n" + _stable_json(_compact_director_state(prev)),
+        "【主角状态】\n" + _stable_json(character),
+        "【最近一轮正文】\n" + (_latest_scene(state.get("transcript") or []) or "（暂无）"),
+        "【玩家本轮行动】\n" + action,
     ])
+    return [
+        {"role": "system", "content": DIRECTOR_PLANNER_SYSTEM_PROMPT},
+        {"role": "system", "content": "【稳定世界层】\n" + _stable_json(world_layer)},
+        {"role": "user", "content": turn_content},
+    ]
 
 
 def _fallback_director_plan(prev: dict, action: str) -> dict:
@@ -934,9 +1040,17 @@ def _fallback_director_plan(prev: dict, action: str) -> dict:
         isinstance(prev.get("event"), dict)
         and prev["event"].get("status") in {"active", "resolving", "abandoning"}
     )
-    avoid = any(word in action for word in ("避", "躲", "逃", "撤", "绕开", "不打"))
-    fight = any(word in action for word in ("打", "战", "杀", "攻", "反击", "迎敌"))
-    investigate = any(word in action for word in ("看", "查", "问", "探", "研究", "观察"))
+    avoid = any(word in action for word in (
+        "避", "躲", "逃", "撤", "绕开", "不打", "不理", "放弃", "回家", "假装没事",
+    ))
+    fight_words = ("打", "战", "杀", "攻", "反击", "迎敌")
+    investigate_words = ("看", "查", "问", "探", "研究", "观察", "细想")
+    fight = any(word in action for word in fight_words) and not _negates_any(action, fight_words)
+    investigate = (
+        any(word in action for word in investigate_words)
+        and not _negates_any(action, investigate_words)
+        and not avoid
+    )
     if not active and not (avoid or fight or investigate):
         return {
             "event_action": "none",
@@ -952,11 +1066,11 @@ def _fallback_director_plan(prev: dict, action: str) -> dict:
     outcome = {
         "escape": "彻底摆脱当前直接威胁并确认安全",
         "combat": "完成有攻防、有代价和明确战果的冲突",
-        "mystery": "对玩家正在追查的问题给出有效进展",
+        "mystery": f"查明玩家本轮调查对象的关键事实：{action[:60]}",
     }[payoff_type]
     return {
         "event_action": "continue" if active else "start",
-        "event_core": (prev.get("event") or {}).get("core") or "解决玩家当前主动介入的冲突或疑问",
+        "event_core": (prev.get("event") or {}).get("core") or f"结算玩家行动涉及的直接处境：{action[:60]}",
         "current_goal": outcome,
         "turn_mode": "progress",
         "intent": {"key": action[:80], "same_as_previous": False},
@@ -964,6 +1078,11 @@ def _fallback_director_plan(prev: dict, action: str) -> dict:
         "beats": ["让玩家行动产生有效变化", "给出可以验证的结果或代价"],
         "must_not": ["只增加模糊感受或新悬念"],
     }
+
+
+def _negates_any(action: str, words: tuple[str, ...]) -> bool:
+    prefixes = ("不", "不要", "不再", "别", "停止", "放弃", "无需")
+    return any(f"{prefix}{word}" in action for prefix in prefixes for word in words)
 
 
 def _clean_text(value, limit: int = 240) -> str:
@@ -976,7 +1095,11 @@ def _clean_string_list(value, *, limit: int = 6, item_limit: int = 180) -> list[
     return [_clean_text(item, item_limit) for item in value[:limit] if _clean_text(item, item_limit)]
 
 
-def _sanitize_director_plan(result: dict, world_context: dict) -> dict:
+def _sanitize_director_plan(
+    result: dict,
+    world_context: dict,
+    memory_ids: set[str] | None = None,
+) -> dict:
     allowed = set(world_context.get("allowed_reference_ids") or [])
     arts_allowed = {row["id"] for row in world_context.get("arts", [])}
     opps_allowed = {row["id"] for row in world_context.get("opportunities", [])}
@@ -1028,6 +1151,7 @@ def _sanitize_director_plan(result: dict, world_context: dict) -> dict:
         "facts_to_reveal": refs(result.get("facts_to_reveal") or []),
         "arts_to_grant": arts,
         "opportunities_to_trigger": opportunities,
+        "memory_refs": refs(result.get("memory_refs") or [], memory_ids or set()),
         "beats": _clean_string_list(result.get("beats"), limit=3, item_limit=120),
         "state_changes": state_changes,
         "must_not": _clean_string_list(result.get("must_not"), limit=6),
@@ -1061,8 +1185,12 @@ def _apply_director_plan(
     action: str,
     world_context: dict,
     turn: int,
+    memory_candidates: list[dict] | None = None,
 ) -> dict:
-    plan = _sanitize_director_plan(result, world_context)
+    memory_candidates = memory_candidates or []
+    memory_by_id = {row["id"]: row for row in memory_candidates if row.get("id")}
+    plan = _sanitize_director_plan(result, world_context, set(memory_by_id))
+    plan["selected_memories"] = [memory_by_id[mid] for mid in plan["memory_refs"]]
     prev_event = prev.get("event") if isinstance(prev.get("event"), dict) else None
     active = bool(
         prev_event and prev_event.get("status") in {"active", "resolving", "abandoning"}
