@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>问道 · 修仙文字奇缘</title>
-  <link rel="stylesheet" href="style.css?v=director2" />
+  <link rel="stylesheet" href="style.css?v=llm1" />
 </head>
 <body>
   <div class="app">
@@ -14,6 +14,7 @@
         <span id="save-name" class="save-name" title="当前存档"></span>
         <button id="constraint-btn" class="ghost" title="查看世界约束 Agent 的实时状态">约束</button>
         <button id="director-btn" class="ghost" title="查看导演模块状态（幕后剧情调度）">导演</button>
+        <button id="llm-btn" class="ghost" title="查看 LLM 请求类别与耗时">请求</button>
         <button id="lore-btn" class="ghost" title="查看与打听世界记忆">记忆</button>
         <button id="saves-btn" class="ghost" title="存档 / 读档">存档</button>
         <button id="restart" class="ghost" title="另起新的一世">新的一世</button>
@@ -89,6 +90,22 @@
       <div class="drawer-mask"></div>
     </div>
 
+    <div id="llm-drawer" class="drawer hidden">
+      <div class="drawer-panel">
+        <div class="drawer-head">
+          <h2>LLM 请求</h2>
+          <div class="drawer-head-btns">
+            <button id="llm-refresh" class="ghost" title="刷新请求记录">刷新</button>
+            <button id="llm-close" class="ghost">关闭</button>
+          </div>
+        </div>
+        <div id="llm-live" class="llm-live hidden"></div>
+        <ul id="llm-list" class="llm-list"></ul>
+        <p id="llm-empty" class="llm-empty hidden">还没有 LLM 请求记录。</p>
+      </div>
+      <div class="drawer-mask"></div>
+    </div>
+
     <form id="input-form" class="input-bar" autocomplete="off">
       <input
         id="action"
@@ -100,6 +117,6 @@
     </form>
   </div>
 
-  <script src="app.js?v=director2"></script>
+  <script src="app.js?v=llm1"></script>
 </body>
 </html>

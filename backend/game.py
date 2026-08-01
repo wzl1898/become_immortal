@@ -1820,6 +1820,10 @@ def get_turns(session_id: str) -> int | None:
     return None if state is None else state["turns"]
 
 
+def get_llm_request_metrics(session_id: str, limit: int = 30) -> list[dict] | None:
+    return store.list_llm_request_metrics(session_id, limit)
+
+
 def commit_inquiry_memory(session_id: str, question: str, answer: str) -> None:
     """把一次问答追加进世界记忆并落盘（不碰 messages/transcript）。"""
     state = _get(session_id)

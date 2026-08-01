@@ -32,6 +32,13 @@ const constraintClose = document.getElementById("constraint-close");
 const constraintRefresh = document.getElementById("constraint-refresh");
 const constraintBodyEl = document.getElementById("constraint-body");
 const constraintEmptyEl = document.getElementById("constraint-empty");
+const llmBtn = document.getElementById("llm-btn");
+const llmDrawer = document.getElementById("llm-drawer");
+const llmClose = document.getElementById("llm-close");
+const llmRefresh = document.getElementById("llm-refresh");
+const llmLiveEl = document.getElementById("llm-live");
+const llmListEl = document.getElementById("llm-list");
+const llmEmptyEl = document.getElementById("llm-empty");
 
 function clearStatus() {
   statusBodyEl.innerHTML = "";
@@ -44,6 +51,55 @@ let busy = false;
 let worldMemory = []; // 世界记忆，含 qa 与自动提取的长期事实
 let worldState = null; // 世界约束 Agent 的实时状态：位置 + 主角知识视野
 let loreBusy = false; // 问询独立忙态，不锁主行动
+const liveLLMRequests = new Map();
+let liveLLMTimer = null;
+let llmRefreshTimer = null;
+
+const LLM_REQUEST_LABELS = {
+  opening: "开场生成",
+  director_plan: "导演规划",
+  narrative: "剧情生成",
+  memory_extract: "记忆提取",
+  director_audit: "执行审计",
+  inquiry: "记忆问询",
+  legacy_director: "旧版导演",
+};
+
+function formatDuration(ms) {
+  const value = Math.max(0, Number(ms) || 0);
+  return value < 1000 ? `${Math.round(value)} ms` : `${(value / 1000).toFixed(1)} s`;
+}
+
+function renderLiveLLMRequests() {
+  llmLiveEl.innerHTML = "";
+  llmLiveEl.classList.toggle("hidden", liveLLMRequests.size === 0);
+  for (const request of liveLLMRequests.values()) {
+    const row = document.createElement("div");
+    row.className = "llm-live-row";
+    row.innerHTML = `<span class="llm-pulse"></span><span class="llm-live-label"></span><b></b>`;
+    row.querySelector(".llm-live-label").textContent = request.label;
+    row.querySelector("b").textContent = formatDuration(Date.now() - request.startedAt);
+    llmLiveEl.appendChild(row);
+  }
+}
+
+function startLiveLLMRequest(channel, type) {
+  liveLLMRequests.set(channel, {
+    label: LLM_REQUEST_LABELS[type] || type,
+    startedAt: Date.now(),
+  });
+  renderLiveLLMRequests();
+  if (!liveLLMTimer) liveLLMTimer = setInterval(renderLiveLLMRequests, 100);
+}
+
+function stopLiveLLMRequest(channel) {
+  liveLLMRequests.delete(channel);
+  if (!liveLLMRequests.size && liveLLMTimer) {
+    clearInterval(liveLLMTimer);
+    liveLLMTimer = null;
+  }
+  renderLiveLLMRequests();
+}
 
 function addBlock(kind, text = "") {
   const el = document.createElement("p");
@@ -263,6 +319,7 @@ async function narrate(url, options = {}) {
   const block = addBlock("narration cursor");
   let hintBlock = null;
   let full = "";
+  if (url.includes("opening")) startLiveLLMRequest("story", "opening");
   try {
     const done = await streamSSE(url, (text) => {
       full += text;
@@ -276,6 +333,8 @@ async function narrate(url, options = {}) {
       storyEl.scrollTop = storyEl.scrollHeight;
     }, options, (stage) => {
       if (!full) block.textContent = `〔${stage.label || "正在准备"}〕`;
+      if (stage.key === "director") startLiveLLMRequest("story", "director_plan");
+      else if (stage.key === "narrative") startLiveLLMRequest("story", "narrative");
     });
     // 流结束：用后端刷新后的结构化库补上冷物品折叠区
     if (done && done.inventory) renderColdItems(done.inventory);
@@ -287,6 +346,8 @@ async function narrate(url, options = {}) {
     addBlock("error", `【出错】${e.message}`);
     throw e;
   } finally {
+    stopLiveLLMRequest("story");
+    refreshLLMMetrics({ quiet: true });
     block.classList.remove("cursor");
   }
 }
@@ -529,6 +590,7 @@ function setLoreBusy(state) {
 
 async function askLore(q) {
   setLoreBusy(true);
+  startLiveLLMRequest("inquiry", "inquiry");
   loreEmptyEl.classList.add("hidden");
   // 先落一个"问 + 答（流式）"的临时条目
   const li = document.createElement("li");
@@ -563,6 +625,8 @@ async function askLore(q) {
     aEl.textContent = `【出错】${e.message}`;
     aEl.classList.add("error");
   } finally {
+    stopLiveLLMRequest("inquiry");
+    refreshLLMMetrics({ quiet: true });
     setLoreBusy(false);
     loreInput.focus();
   }
@@ -918,6 +982,81 @@ constraintBtn.addEventListener("click", openConstraintDrawer);
 constraintClose.addEventListener("click", closeConstraintDrawer);
 constraintRefresh.addEventListener("click", refreshConstraint);
 constraintDrawer.querySelector(".drawer-mask").addEventListener("click", closeConstraintDrawer);
+
+// ---- LLM 请求指标 ----
+function formatRequestTime(ts) {
+  const d = new Date(Number(ts) * 1000);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+function renderLLMMetrics(items) {
+  llmListEl.innerHTML = "";
+  llmEmptyEl.textContent = "还没有 LLM 请求记录。";
+  llmEmptyEl.classList.toggle("hidden", items.length > 0);
+  const statusLabels = { success: "成功", timeout: "超时", api_error: "接口错误", error: "错误" };
+  for (const item of items) {
+    const li = document.createElement("li");
+    const statusClass = item.status === "api_error" ? "error" : item.status;
+    li.className = "llm-item";
+    li.innerHTML = `
+      <div class="llm-item-head">
+        <span class="llm-kind"></span>
+        <span class="llm-status ${statusClass}"></span>
+        <span class="llm-duration"></span>
+      </div>
+      <div class="llm-item-meta">
+        <span class="llm-model"></span>
+        <time class="llm-time"></time>
+      </div>`;
+    li.querySelector(".llm-kind").textContent = LLM_REQUEST_LABELS[item.request_type] || item.request_type;
+    li.querySelector(".llm-status").textContent = statusLabels[item.status] || item.status;
+    li.querySelector(".llm-duration").textContent = formatDuration(item.duration_ms);
+    li.querySelector(".llm-model").textContent = item.model || "未记录模型";
+    li.querySelector(".llm-time").textContent = formatRequestTime(item.created_at);
+    if (item.error_type) {
+      const error = document.createElement("div");
+      error.className = "llm-error";
+      error.textContent = item.error_type;
+      li.appendChild(error);
+    }
+    llmListEl.appendChild(li);
+  }
+}
+
+async function refreshLLMMetrics({ quiet = false } = {}) {
+  if (!sessionId) return;
+  try {
+    const data = await fetchJSON(`/api/llm-metrics?sid=${sessionId}&limit=30`);
+    renderLLMMetrics(data.requests || []);
+  } catch (e) {
+    if (quiet) return;
+    llmListEl.innerHTML = "";
+    llmEmptyEl.textContent = `读取失败：${e.message}`;
+    llmEmptyEl.classList.remove("hidden");
+  }
+}
+
+async function openLLMDrawer() {
+  if (!sessionId) return;
+  llmDrawer.classList.remove("hidden");
+  renderLiveLLMRequests();
+  await refreshLLMMetrics();
+  if (!llmRefreshTimer) {
+    llmRefreshTimer = setInterval(() => refreshLLMMetrics({ quiet: true }), 2000);
+  }
+}
+
+function closeLLMDrawer() {
+  llmDrawer.classList.add("hidden");
+  if (llmRefreshTimer) clearInterval(llmRefreshTimer);
+  llmRefreshTimer = null;
+}
+
+llmBtn.addEventListener("click", openLLMDrawer);
+llmClose.addEventListener("click", closeLLMDrawer);
+llmRefresh.addEventListener("click", refreshLLMMetrics);
+llmDrawer.querySelector(".drawer-mask").addEventListener("click", closeLLMDrawer);
 
 // ---- 启动：有存档则续上最近一局，否则开新局 ----
 async function boot() {

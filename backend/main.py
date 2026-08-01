@@ -283,6 +283,15 @@ async def director(sid: str):
     return {"director_state": state, "turns": game.get_turns(sid) or 0}
 
 
+@app.get("/api/llm-metrics")
+async def llm_metrics(sid: str, limit: int = 30):
+    """Read recent LLM request categories, statuses, and timings."""
+    items = game.get_llm_request_metrics(sid, limit)
+    if items is None:
+        raise HTTPException(404, "存档不存在")
+    return {"requests": items}
+
+
 @app.get("/api/world-state")
 async def world_state(sid: str):
     """读取主角当前位置与知识视野（不展示行动菜单）。"""

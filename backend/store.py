@@ -737,6 +737,27 @@ def record_llm_request_metric(metric: dict) -> None:
         )
 
 
+def list_llm_request_metrics(sid: str, limit: int = 30) -> list[dict] | None:
+    """Return recent LLM requests for a save, newest first."""
+    limit = max(1, min(int(limit), 50))
+    with _conn() as conn:
+        if conn.execute("SELECT 1 FROM saves WHERE id=?", (sid,)).fetchone() is None:
+            return None
+        rows = conn.execute(
+            """
+            SELECT id, request_type, protocol, model, status, duration_ms,
+                   input_chars, output_chars, prompt_tokens, completion_tokens,
+                   cache_hit_tokens, cache_miss_tokens, error_type, created_at
+            FROM llm_request_metrics
+            WHERE save_id=?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (sid, limit),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def save_lore(sid: str, lore: list[dict]) -> None:
     """只更新见闻录（问询旁路，不触发主状态落盘）。"""
     with _conn() as conn:
