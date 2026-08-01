@@ -41,6 +41,7 @@ def init() -> None:
                 lore        TEXT NOT NULL DEFAULT '[]',  -- JSON: list[dict{q,a,ts}]，见闻录
                 character_state TEXT NOT NULL DEFAULT '{}', -- JSON: dict，主角当前状态
                 world_memory TEXT NOT NULL DEFAULT '[]', -- JSON: list[dict]，长期世界记忆
+                world_entities TEXT NOT NULL DEFAULT '{}', -- JSON: dict，规范实体表 canonical_id->{name,aliases,identity}
                 inventory   TEXT NOT NULL DEFAULT '[]',  -- JSON: list[dict{id,name,attrs,kind,whereabouts,last_turn}]，物品影子库
                 director_state TEXT NOT NULL DEFAULT '{}', -- JSON: dict，导演模块状态（当前爽点/留白期等）
                 created_at  REAL NOT NULL,
@@ -58,6 +59,8 @@ def init() -> None:
             conn.execute("ALTER TABLE saves ADD COLUMN character_state TEXT NOT NULL DEFAULT '{}'")
         if "world_memory" not in cols:
             conn.execute("ALTER TABLE saves ADD COLUMN world_memory TEXT NOT NULL DEFAULT '[]'")
+        if "world_entities" not in cols:
+            conn.execute("ALTER TABLE saves ADD COLUMN world_entities TEXT NOT NULL DEFAULT '{}'")
         if "director_state" not in cols:
             conn.execute("ALTER TABLE saves ADD COLUMN director_state TEXT NOT NULL DEFAULT '{}'")
         _init_world_tables(conn)
@@ -727,6 +730,61 @@ def append_world_memory(sid: str, items: list[dict]) -> list[dict] | None:
         return current
 
 
+def save_world_entities(sid: str, world_entities: dict) -> None:
+    """只更新规范实体表。"""
+    with _conn() as conn:
+        conn.execute(
+            "UPDATE saves SET world_entities=?, updated_at=? WHERE id=?",
+            (json.dumps(world_entities, ensure_ascii=False), time.time(), sid),
+        )
+
+
+def _state_key(mem: dict) -> tuple | None:
+    """状态型记忆的合并键：(type, canonical_id)。缺 canonical_id 或非状态型返回 None。"""
+    if mem.get("scope") != "state":
+        return None
+    cid = mem.get("canonical_id")
+    if not cid:
+        return None
+    return (mem.get("type"), cid)
+
+
+def upsert_world_memory(sid: str, items: list[dict]) -> list[dict] | None:
+    """写入世界记忆：事件型追加，状态型按 (type, canonical_id) 覆盖旧条。
+
+    存档不存在返回 None；items 为空返回当前列表。同批多条命中同键时以最后一条为准。
+    """
+    if not items:
+        return load(sid)["world_memory"] if exists(sid) else None
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT world_memory FROM saves WHERE id=?",
+            (sid,),
+        ).fetchone()
+        if row is None:
+            return None
+        current = json.loads(row["world_memory"] or "[]")
+        # 建索引：状态键 -> 在 current 中的下标
+        index: dict[tuple, int] = {}
+        for i, m in enumerate(current):
+            k = _state_key(m)
+            if k is not None:
+                index[k] = i
+        for item in items:
+            k = _state_key(item)
+            if k is not None and k in index:
+                current[index[k]] = item  # 覆盖旧状态（丢弃旧内容）
+            else:
+                current.append(item)
+                if k is not None:
+                    index[k] = len(current) - 1
+        conn.execute(
+            "UPDATE saves SET world_memory=?, updated_at=? WHERE id=?",
+            (json.dumps(current, ensure_ascii=False), time.time(), sid),
+        )
+        return current
+
+
 def save_inventory(sid: str, inventory: list[dict]) -> None:
     """只更新物品影子库。"""
     with _conn() as conn:
@@ -760,6 +818,7 @@ def load(sid: str) -> dict | None:
         "lore": json.loads(row["lore"] or "[]"),
         "character_state": json.loads(row["character_state"] or "{}"),
         "world_memory": json.loads(row["world_memory"] or "[]"),
+        "world_entities": json.loads(row["world_entities"] or "{}"),
         "inventory": json.loads(row["inventory"] or "[]"),
         "director_state": json.loads(row["director_state"] or "{}"),
         "created_at": row["created_at"],

@@ -101,6 +101,7 @@ def create_session(name: str = DEFAULT_NAME) -> str:
         "turns": 0,
         "character_state": {},
         "world_memory": [],
+        "world_entities": {},
         "inventory": [],
         "director_state": {},
         "_injected": [],  # 上一回合注入过（热+召回）的物品归一化名，供 _reconcile 判失去
@@ -130,6 +131,7 @@ def _get(session_id: str) -> dict | None:
         "turns": data["turns"],
         "character_state": data.get("character_state", {}),
         "world_memory": data.get("world_memory", []),
+        "world_entities": data.get("world_entities", {}) or {},
         "inventory": data.get("inventory", []),
         "director_state": data.get("director_state", {}) or {},
         "_injected": [],
@@ -552,8 +554,15 @@ def _world_memory_dossier(items: list[dict]) -> str:
         text = _memory_text(entry)
         if not text:
             continue
-        kind = entry.get("type") or "plot"
-        line = f"- [{kind}] {text}"
+        # 状态型标为「现状」，事件型标发生回合，避免 GM 把既往事件误当正在发生
+        if entry.get("scope") == "state":
+            tag = "现状"
+        elif entry.get("scope") == "event":
+            turn = entry.get("turn")
+            tag = f"事件·第{turn}回合" if turn is not None else "事件"
+        else:
+            tag = entry.get("type") or "plot"
+        line = f"- [{tag}] {text}"
         if used + len(line) > WORLD_MEMORY_INJECT_MAX_CHARS and lines:
             break
         lines.append(line)
@@ -716,20 +725,27 @@ async def _extract_and_store_memory(
 ) -> None:
     try:
         known = _recall_for_extraction(session_id, user_content, assistant_content)
+        state = _CACHE.get(session_id)
+        entities = dict((state or {}).get("world_entities") or {})
         raw = await complete_chat(
             [
                 {"role": "system", "content": MEMORY_EXTRACT_SYSTEM_PROMPT},
-                {"role": "user", "content": _memory_extract_user_prompt(user_content, assistant_content, turn, known)},
+                {"role": "user", "content": _memory_extract_user_prompt(user_content, assistant_content, turn, known, entities)},
             ],
             temperature=0.2,
             max_tokens=800,
         )
-        items = _parse_extracted_memories(raw, turn)
+        # 解析并就地消解：更新 entities（建新实体 / 追加别名），给每条落 canonical_id
+        items = _parse_extracted_memories(raw, turn, entities)
         if not items:
             return
-        current = store.append_world_memory(session_id, items)
-        if current is not None and session_id in _CACHE:
+        current = store.upsert_world_memory(session_id, items)
+        if current is None:
+            return
+        store.save_world_entities(session_id, entities)
+        if session_id in _CACHE:
             _CACHE[session_id]["world_memory"] = current
+            _CACHE[session_id]["world_entities"] = entities
     except Exception:  # noqa: BLE001
         _LOG.exception("world memory extraction failed for session %s turn %s", session_id, turn)
 
@@ -764,6 +780,7 @@ def _memory_extract_user_prompt(
     assistant_content: str,
     turn: int,
     known_memories: list[dict] | None = None,
+    known_entities: dict | None = None,
 ) -> str:
     status = _STATUS_RE.search(assistant_content)
     objects = _OBJECTS_RE.search(assistant_content)
@@ -789,6 +806,27 @@ def _memory_extract_user_prompt(
         if lines:
             parts.append(
                 "【已记录的相关记忆（这些事实已在库中，不要重复提取）】\n" + "\n".join(lines)
+            )
+    if known_entities:
+        ent_lines = []
+        for cid, ent in known_entities.items():
+            if not isinstance(ent, dict):
+                continue
+            name = (ent.get("name") or "").strip()
+            if not name:
+                continue
+            identity = (ent.get("identity") or "").strip()
+            aliases = "、".join(ent.get("aliases") or [])
+            desc = f"id={cid} 「{name}」"
+            if identity:
+                desc += f"：{identity}"
+            if aliases:
+                desc += f"（曾用别名：{aliases}）"
+            ent_lines.append("- " + desc)
+        if ent_lines:
+            parts.append(
+                "【已知实体表（判断 subject 是否为其别名时按身份判，命中则 matched_id 填其 id）】\n"
+                + "\n".join(ent_lines)
             )
     return "\n\n".join(parts)
 
@@ -834,10 +872,32 @@ def _extract_json_object(raw: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def _parse_extracted_memories(raw: str, turn: int) -> list[dict]:
+def _resolve_entity(entities: dict, subject: str, matched_id: str, identity: str) -> str | None:
+    """把 subject 消解到稳定 canonical_id：命中已知实体→追加别名并返回其 id；
+    否则建新实体并返回新 id。subject 为空返回 None。就地更新 entities。"""
+    subject = (subject or "").strip()
+    if not subject:
+        return None
+    matched_id = (matched_id or "").strip()
+    if matched_id and matched_id in entities:
+        ent = entities[matched_id]
+        if isinstance(ent, dict):
+            aliases = ent.setdefault("aliases", [])
+            if subject != ent.get("name") and subject not in aliases:
+                aliases.append(subject)
+            return matched_id
+    # 未命中或 id 失效：建新实体
+    cid = f"ent_{uuid.uuid4().hex[:12]}"
+    entities[cid] = {"name": subject, "aliases": [], "identity": identity}
+    return cid
+
+
+def _parse_extracted_memories(raw: str, turn: int, entities: dict | None = None) -> list[dict]:
     data = _extract_json_array(raw)
     if not data:
         return []
+    if entities is None:
+        entities = {}
     allowed = {"plot", "character", "item", "location"}
     items: list[dict] = []
     now = time.time()
@@ -848,24 +908,38 @@ def _parse_extracted_memories(raw: str, turn: int) -> list[dict]:
         text = (entry.get("text") or "").strip()
         if kind not in allowed or not text:
             continue
-        entities = entry.get("entities") or []
-        if not isinstance(entities, list):
-            entities = []
+        # scope：非法/缺失一律按 event（事件只追加，不会误覆盖其它状态，最安全）
+        scope = entry.get("scope")
+        if scope not in ("state", "event"):
+            scope = "event"
+        raw_entities = entry.get("entities") or []
+        if not isinstance(raw_entities, list):
+            raw_entities = []
         try:
             importance = float(entry.get("importance", 0.5))
         except (TypeError, ValueError):
             importance = 0.5
         importance = max(0.0, min(1.0, importance))
-        items.append({
+        item = {
             "id": uuid.uuid4().hex,
+            "scope": scope,
             "type": kind,
             "text": text,
-            "entities": [str(e).strip() for e in entities if str(e).strip()][:12],
+            "entities": [str(e).strip() for e in raw_entities if str(e).strip()][:12],
             "turn": turn,
             "importance": importance,
             "source": "extractor",
             "ts": now,
-        })
+        }
+        subject = (entry.get("subject") or "").strip()
+        if subject:
+            item["subject"] = subject
+        # 状态型才需要 canonical_id 做覆盖键；事件型只追加，消解可省
+        if scope == "state":
+            cid = _resolve_entity(entities, subject, entry.get("matched_id", ""), text)
+            if cid:
+                item["canonical_id"] = cid
+        items.append(item)
     return items
 
 
@@ -1446,6 +1520,7 @@ def _apply_director_result(prev: dict, result: dict, turn: int) -> tuple[dict, d
             if thread:
                 buried = {
                     "id": uuid.uuid4().hex,
+                    "scope": "event",
                     "type": "plot",
                     "text": thread,
                     "entities": [],
@@ -1614,6 +1689,7 @@ def commit_inquiry_memory(session_id: str, question: str, answer: str) -> None:
         return
     item = {
         "id": uuid.uuid4().hex,
+        "scope": "event",
         "type": "qa",
         "text": f"问：{question}　答：{answer}",
         "entities": [],
