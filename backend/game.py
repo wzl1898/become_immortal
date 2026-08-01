@@ -38,6 +38,9 @@ _LOG = logging.getLogger(__name__)
 
 # 保留的历史轮数（system 之外），防止上下文无限增长
 MAX_TURNS = 40
+RECENT_RAW_ROUNDS = 16
+SUMMARY_INTERVAL = 10
+STAGE_SUMMARY_MAX_CHARS = 1800
 
 # 世界记忆注入后续生成时的规模上限。
 WORLD_MEMORY_RECALL_TOP_K = 8
@@ -99,6 +102,7 @@ def create_session(name: str = DEFAULT_NAME) -> str:
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     sid = store.create(name, messages)
     _CACHE[sid] = {
+        "session_id": sid,
         "messages": messages,
         "transcript": [],
         "turns": 0,
@@ -106,6 +110,8 @@ def create_session(name: str = DEFAULT_NAME) -> str:
         "world_memory": [],
         "inventory": [],
         "director_state": {},
+        "stage_summary": "",
+        "summary_turn": 0,
         "_injected": [],  # 上一回合注入过（热+召回）的物品归一化名，供 _reconcile 判失去
     }
     return sid
@@ -128,6 +134,7 @@ def _get(session_id: str) -> dict | None:
         if m.get("role") == "assistant":
             m["content"] = _strip_hint(m["content"])
     _CACHE[session_id] = {
+        "session_id": session_id,
         "messages": data["messages"],
         "transcript": data["transcript"],
         "turns": data["turns"],
@@ -135,6 +142,8 @@ def _get(session_id: str) -> dict | None:
         "world_memory": data.get("world_memory", []),
         "inventory": data.get("inventory", []),
         "director_state": data.get("director_state", {}) or {},
+        "stage_summary": data.get("stage_summary", "") or "",
+        "summary_turn": int(data.get("summary_turn") or 0),
         "_injected": [],
     }
     return _CACHE[session_id]
@@ -155,6 +164,11 @@ def messages_for_opening(session_id: str) -> list[dict]:
     inject = _injection(state, None)
     world_constraints = constraints.opening_constraints(session_id)
     messages = list(state["messages"])
+    if state.get("stage_summary"):
+        messages.insert(1, {
+            "role": "system",
+            "content": "【既往阶段摘要】\n" + state["stage_summary"],
+        })
     if world_constraints:
         messages.append({"role": "system", "content": world_constraints.rstrip()})
     content = f"{inject}{OPENING_PROMPT}"
@@ -642,6 +656,11 @@ async def prepare_action(session_id: str, action: str) -> list[dict]:
     parts.append(f"【玩家原始行动】\n{action}")
     content = "\n\n".join(parts)
     messages = list(state["messages"])
+    if state.get("stage_summary"):
+        messages.insert(1, {
+            "role": "system",
+            "content": "【既往阶段摘要】\n" + state["stage_summary"],
+        })
     messages.append({"role": "user", "content": content})
     return messages
 
@@ -724,6 +743,9 @@ def commit(session_id: str, user_content: str | None, assistant_content: str) ->
     _reconcile_inventory(state, assistant_content)
     _finalize_director_state(state, assistant_content)
     store.save_state(session_id, state["messages"], state["transcript"], state["turns"])
+    store.save_stage_summary(
+        session_id, state.get("stage_summary") or "", int(state.get("summary_turn") or 0)
+    )
     if character_state:
         store.save_character_state(session_id, character_state)
     store.save_inventory(session_id, state["inventory"])
@@ -761,6 +783,8 @@ async def _extract_and_store_memory(
             ],
             temperature=0.2,
             max_tokens=800,
+            request_type="memory_extract",
+            session_id=session_id,
         )
         items = _parse_extracted_memories(raw, turn)
         if not items:
@@ -937,6 +961,8 @@ async def _plan_director_turn(
                 temperature=0.25,
                 max_tokens=DIRECTOR_PLANNER_MAX_TOKENS,
                 config=DIRECTOR_LLM_CONFIG,
+                request_type="director_plan",
+                session_id=state.get("session_id"),
             ),
             timeout=DIRECTOR_PLANNER_TIMEOUT_SECONDS,
         )
@@ -1373,6 +1399,8 @@ async def _run_director_audit(
             ],
             temperature=0.1,
             max_tokens=500,
+            request_type="director_audit",
+            session_id=session_id,
         )
         result = _extract_json_object(raw) or {}
         audit = {
@@ -1515,6 +1543,8 @@ async def _run_director(
             ],
             temperature=0.4,
             max_tokens=700,
+            request_type="legacy_director",
+            session_id=session_id,
         )
         result = _extract_json_object(raw)
         if result is None:
@@ -1699,10 +1729,29 @@ def _sanitize_payoff(payoff_in: dict | None, prev_payoff, turn: int) -> dict | N
 
 
 def _trim(state: dict) -> None:
+    """Roll history only on summary boundaries so cache prefixes stay stable."""
     messages = state["messages"]
     system, rest = messages[0], messages[1:]
-    if len(rest) > MAX_TURNS * 2:
-        rest = rest[-MAX_TURNS * 2:]
+    if state["turns"] % SUMMARY_INTERVAL != 0:
+        return
+    keep = RECENT_RAW_ROUNDS * 2
+    older = rest[:-keep] if len(rest) > keep else []
+    if older:
+        lines = []
+        for message in older:
+            if message.get("role") == "user":
+                text = str(message.get("content") or "").strip()
+                if text:
+                    lines.append("玩家：" + text[:120])
+            elif message.get("role") == "assistant":
+                text = _narration_body(str(message.get("content") or ""))
+                if text:
+                    lines.append("结果：" + text[:220])
+        added = "\n".join(lines)
+        summary = "\n".join(part for part in (state.get("stage_summary") or "", added) if part)
+        state["stage_summary"] = summary[-STAGE_SUMMARY_MAX_CHARS:]
+        state["summary_turn"] = state["turns"]
+        rest = rest[-keep:]
     state["messages"] = [system] + rest
 
 

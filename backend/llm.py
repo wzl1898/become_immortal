@@ -10,6 +10,8 @@
 
 import json
 import os
+import asyncio
+import time
 from dataclasses import dataclass
 
 import httpx
@@ -48,7 +50,11 @@ def config_from_env(prefix: str) -> LLMConfig:
     )
 
 
-async def stream_chat(messages: list[dict]):
+async def stream_chat(
+    messages: list[dict],
+    request_type: str = "narrative",
+    session_id: str | None = None,
+):
     """向 LLM 发起流式对话，逐段 yield 文本增量。
 
     Args:
@@ -58,17 +64,42 @@ async def stream_chat(messages: list[dict]):
     Yields:
         str: 模型输出的文本片段。
     """
-    if not API_KEY:
-        raise RuntimeError("未配置 LLM_API_KEY，请复制 .env.example 为 .env 并填写。")
-
-    if PROTOCOL == "anthropic":
-        async for piece in _stream_anthropic(messages):
+    started = time.monotonic()
+    output_chars = 0
+    status = "success"
+    error_type = ""
+    try:
+        if not API_KEY:
+            raise RuntimeError("未配置 LLM_API_KEY，请复制 .env.example 为 .env 并填写。")
+        if PROTOCOL == "anthropic":
+            iterator = _stream_anthropic(messages)
+        elif PROTOCOL == "openai":
+            iterator = _stream_openai(messages)
+        else:
+            raise RuntimeError(f"未知的 LLM_PROTOCOL={PROTOCOL!r}，应为 openai 或 anthropic。")
+        async for piece in iterator:
+            output_chars += len(piece)
             yield piece
-    elif PROTOCOL == "openai":
-        async for piece in _stream_openai(messages):
-            yield piece
-    else:
-        raise RuntimeError(f"未知的 LLM_PROTOCOL={PROTOCOL!r}，应为 openai 或 anthropic。")
+    except asyncio.CancelledError:
+        status = "timeout"
+        error_type = "CancelledError"
+        raise
+    except Exception as exc:
+        status = "api_error"
+        error_type = type(exc).__name__
+        raise
+    finally:
+        _record_metric({
+            "save_id": session_id,
+            "request_type": request_type,
+            "protocol": PROTOCOL,
+            "model": MODEL,
+            "status": status,
+            "duration_ms": round((time.monotonic() - started) * 1000),
+            "input_chars": sum(len(str(message.get("content") or "")) for message in messages),
+            "output_chars": output_chars,
+            "error_type": error_type,
+        })
 
 
 async def complete_chat(
@@ -76,17 +107,73 @@ async def complete_chat(
     temperature: float | None = None,
     max_tokens: int | None = None,
     config: LLMConfig | None = None,
+    request_type: str = "background",
+    session_id: str | None = None,
 ) -> str:
     """向 LLM 发起非流式对话，用于后台结构化任务。"""
     config = config or DEFAULT_CONFIG
     if not config.api_key:
         raise RuntimeError("未配置 LLM_API_KEY，请复制 .env.example 为 .env 并填写。")
 
-    if config.protocol == "anthropic":
-        return await _complete_anthropic(messages, temperature, max_tokens, config)
-    if config.protocol == "openai":
-        return await _complete_openai(messages, temperature, max_tokens, config)
-    raise RuntimeError(f"未知的 LLM_PROTOCOL={config.protocol!r}，应为 openai 或 anthropic。")
+    started = time.monotonic()
+    text = ""
+    usage = {}
+    status = "success"
+    error_type = ""
+    try:
+        if config.protocol == "anthropic":
+            text, usage = await _complete_anthropic(messages, temperature, max_tokens, config)
+        elif config.protocol == "openai":
+            text, usage = await _complete_openai(messages, temperature, max_tokens, config)
+        else:
+            raise RuntimeError(f"未知的 LLM_PROTOCOL={config.protocol!r}，应为 openai 或 anthropic。")
+        return text
+    except asyncio.CancelledError:
+        status = "timeout"
+        error_type = "CancelledError"
+        raise
+    except Exception as exc:
+        status = "api_error"
+        error_type = type(exc).__name__
+        raise
+    finally:
+        _record_metric({
+            "save_id": session_id,
+            "request_type": request_type,
+            "protocol": config.protocol,
+            "model": config.model,
+            "status": status,
+            "duration_ms": round((time.monotonic() - started) * 1000),
+            "input_chars": sum(len(str(message.get("content") or "")) for message in messages),
+            "output_chars": len(text),
+            "error_type": error_type,
+            **_usage_metrics(usage),
+        })
+
+
+def _usage_metrics(usage: dict | None) -> dict:
+    usage = usage if isinstance(usage, dict) else {}
+    details = usage.get("prompt_tokens_details") or {}
+    hit = usage.get("prompt_cache_hit_tokens")
+    if hit is None:
+        hit = details.get("cached_tokens")
+    miss = usage.get("prompt_cache_miss_tokens")
+    if miss is None and hit is not None and usage.get("prompt_tokens") is not None:
+        miss = max(0, usage["prompt_tokens"] - hit)
+    return {
+        "prompt_tokens": usage.get("prompt_tokens") or usage.get("input_tokens"),
+        "completion_tokens": usage.get("completion_tokens") or usage.get("output_tokens"),
+        "cache_hit_tokens": hit,
+        "cache_miss_tokens": miss,
+    }
+
+
+def _record_metric(metric: dict) -> None:
+    try:
+        import store
+        store.record_llm_request_metric(metric)
+    except Exception:
+        pass
 
 
 def _iter_sse_data(line: str) -> str | None:
@@ -136,7 +223,7 @@ async def _complete_openai(
     temperature: float | None,
     max_tokens: int | None,
     config: LLMConfig,
-) -> str:
+) -> tuple[str, dict]:
     url = f"{config.base_url}/chat/completions"
     headers = {
         "Authorization": f"Bearer {config.api_key}",
@@ -157,8 +244,8 @@ async def _complete_openai(
     body = resp.json()
     choices = body.get("choices") or []
     if not choices:
-        return ""
-    return ((choices[0].get("message") or {}).get("content") or "").strip()
+        return "", body.get("usage") or {}
+    return ((choices[0].get("message") or {}).get("content") or "").strip(), body.get("usage") or {}
 
 
 def _split_system(messages: list[dict]) -> tuple[str, list[dict]]:
@@ -218,7 +305,7 @@ async def _complete_anthropic(
     temperature: float | None,
     max_tokens: int | None,
     config: LLMConfig,
-) -> str:
+) -> tuple[str, dict]:
     system, convo = _split_system(messages)
     url = f"{config.base_url}/messages"
     headers = {
@@ -244,7 +331,7 @@ async def _complete_anthropic(
     for block in body.get("content") or []:
         if block.get("type") == "text" and block.get("text"):
             parts.append(block["text"])
-    return "".join(parts).strip()
+    return "".join(parts).strip(), body.get("usage") or {}
 
 
 async def _raise_for_status(resp: httpx.Response) -> None:

@@ -43,6 +43,8 @@ def init() -> None:
                 world_memory TEXT NOT NULL DEFAULT '[]', -- JSON: list[dict]，长期世界记忆
                 inventory   TEXT NOT NULL DEFAULT '[]',  -- JSON: list[dict{id,name,attrs,kind,whereabouts,last_turn}]，物品影子库
                 director_state TEXT NOT NULL DEFAULT '{}', -- JSON: dict，导演模块状态（当前爽点/留白期等）
+                stage_summary TEXT NOT NULL DEFAULT '', -- 低频更新的历史阶段摘要
+                summary_turn INTEGER NOT NULL DEFAULT 0,
                 created_at  REAL NOT NULL,
                 updated_at  REAL NOT NULL
             )
@@ -60,6 +62,31 @@ def init() -> None:
             conn.execute("ALTER TABLE saves ADD COLUMN world_memory TEXT NOT NULL DEFAULT '[]'")
         if "director_state" not in cols:
             conn.execute("ALTER TABLE saves ADD COLUMN director_state TEXT NOT NULL DEFAULT '{}'")
+        if "stage_summary" not in cols:
+            conn.execute("ALTER TABLE saves ADD COLUMN stage_summary TEXT NOT NULL DEFAULT ''")
+        if "summary_turn" not in cols:
+            conn.execute("ALTER TABLE saves ADD COLUMN summary_turn INTEGER NOT NULL DEFAULT 0")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS llm_request_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                save_id TEXT,
+                request_type TEXT NOT NULL,
+                protocol TEXT NOT NULL,
+                model TEXT NOT NULL,
+                status TEXT NOT NULL,
+                duration_ms INTEGER NOT NULL,
+                input_chars INTEGER NOT NULL,
+                output_chars INTEGER NOT NULL,
+                prompt_tokens INTEGER,
+                completion_tokens INTEGER,
+                cache_hit_tokens INTEGER,
+                cache_miss_tokens INTEGER,
+                error_type TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL
+            )
+            """
+        )
         _init_world_tables(conn)
         _migrate_lore_to_world_memory(conn)
         _migrate_character_state(conn)
@@ -680,6 +707,36 @@ def save_state(sid: str, messages: list[dict], transcript: list[dict], turns: in
         )
 
 
+def save_stage_summary(sid: str, summary: str, summary_turn: int) -> None:
+    with _conn() as conn:
+        conn.execute(
+            "UPDATE saves SET stage_summary=?, summary_turn=? WHERE id=?",
+            (summary, summary_turn, sid),
+        )
+
+
+def record_llm_request_metric(metric: dict) -> None:
+    with _conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO llm_request_metrics (
+                save_id, request_type, protocol, model, status, duration_ms,
+                input_chars, output_chars, prompt_tokens, completion_tokens,
+                cache_hit_tokens, cache_miss_tokens, error_type, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                metric.get("save_id"), metric.get("request_type") or "unknown",
+                metric.get("protocol") or "", metric.get("model") or "",
+                metric.get("status") or "error", int(metric.get("duration_ms") or 0),
+                int(metric.get("input_chars") or 0), int(metric.get("output_chars") or 0),
+                metric.get("prompt_tokens"), metric.get("completion_tokens"),
+                metric.get("cache_hit_tokens"), metric.get("cache_miss_tokens"),
+                metric.get("error_type") or "", time.time(),
+            ),
+        )
+
+
 def save_lore(sid: str, lore: list[dict]) -> None:
     """只更新见闻录（问询旁路，不触发主状态落盘）。"""
     with _conn() as conn:
@@ -762,6 +819,8 @@ def load(sid: str) -> dict | None:
         "world_memory": json.loads(row["world_memory"] or "[]"),
         "inventory": json.loads(row["inventory"] or "[]"),
         "director_state": json.loads(row["director_state"] or "{}"),
+        "stage_summary": row["stage_summary"] or "",
+        "summary_turn": int(row["summary_turn"] or 0),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }

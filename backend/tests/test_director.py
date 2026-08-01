@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import patch
 
 import game
+import llm
 
 
 def _context():
@@ -225,6 +226,45 @@ class DirectorPlanTests(unittest.TestCase):
         self.assertNotIn("plan_id", prompt)
         self.assertNotIn("long note", prompt)
         self.assertIn("境界：凡人", prompt)
+
+    def test_stage_summary_updates_only_on_boundary(self):
+        messages = [{"role": "system", "content": "fixed"}]
+        for turn in range(1, 21):
+            messages.extend([
+                {"role": "user", "content": f"行动{turn}"},
+                {"role": "assistant", "content": f"结果{turn}"},
+            ])
+        state = {
+            "messages": messages,
+            "turns": 20,
+            "stage_summary": "",
+            "summary_turn": 0,
+        }
+
+        game._trim(state)
+
+        self.assertEqual(len(state["messages"]), 1 + game.RECENT_RAW_ROUNDS * 2)
+        self.assertEqual(state["summary_turn"], 20)
+        self.assertIn("行动1", state["stage_summary"])
+        self.assertEqual(state["messages"][1]["content"], "行动5")
+
+    def test_deepseek_cache_usage_is_parsed_tolerantly(self):
+        direct = llm._usage_metrics({
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "prompt_cache_hit_tokens": 70,
+            "prompt_cache_miss_tokens": 30,
+        })
+        nested = llm._usage_metrics({
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "prompt_tokens_details": {"cached_tokens": 60},
+        })
+
+        self.assertEqual(direct["cache_hit_tokens"], 70)
+        self.assertEqual(direct["cache_miss_tokens"], 30)
+        self.assertEqual(nested["cache_hit_tokens"], 60)
+        self.assertEqual(nested["cache_miss_tokens"], 40)
 
 
 if __name__ == "__main__":
