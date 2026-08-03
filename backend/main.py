@@ -49,7 +49,14 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-async def _stream(messages: list[dict], on_done):
+async def _stream(
+    messages: list[dict],
+    on_done,
+    *,
+    request_type: str,
+    session_id: str,
+    on_error=None,
+):
     """公共的流式生成器：边流边发 delta，结束后调 on_done(full_text) 落库。
 
     on_done 可返回一个 dict 作为 done 事件的 payload（如刷新后的物品库）；返回
@@ -57,10 +64,18 @@ async def _stream(messages: list[dict], on_done):
     """
     full = []
     try:
-        async for piece in stream_chat(messages):
+        async for piece in stream_chat(
+            messages, request_type=request_type, session_id=session_id
+        ):
             full.append(piece)
             yield _sse("delta", {"text": piece})
+    except asyncio.CancelledError:
+        if on_error:
+            on_error()
+        raise
     except Exception as e:  # noqa: BLE001
+        if on_error:
+            on_error()
         yield _sse("error", {"message": str(e)})
         return
     payload = on_done("".join(full)) or {}
@@ -77,12 +92,24 @@ def _narrate(messages: list[dict], sid: str, user_content: str | None):
             "world_state": game.get_world_state(sid) or {},
             "director_state": game.get_director_state(sid) or {},
         }
-    return _stream(messages, _done)
+    request_type = "opening" if user_content is None else "narrative"
+    return _stream(
+        messages,
+        _done,
+        request_type=request_type,
+        session_id=sid,
+        on_error=(lambda: game.rollback_prepared_action(sid)) if user_content is not None else None,
+    )
 
 
 def _answer_inquiry(messages: list[dict], sid: str, question: str):
     """问询流：结束后只把问答追加进世界记忆，不推进剧情。"""
-    return _stream(messages, lambda text: game.commit_inquiry_memory(sid, question, text))
+    return _stream(
+        messages,
+        lambda text: game.commit_inquiry_memory(sid, question, text),
+        request_type="inquiry",
+        session_id=sid,
+    )
 
 
 class NewGameBody(BaseModel):
@@ -254,6 +281,15 @@ async def director(sid: str):
     if state is None:
         raise HTTPException(404, "存档不存在")
     return {"director_state": state, "turns": game.get_turns(sid) or 0}
+
+
+@app.get("/api/llm-metrics")
+async def llm_metrics(sid: str, limit: int = 30):
+    """Read recent LLM request categories, statuses, and timings."""
+    items = game.get_llm_request_metrics(sid, limit)
+    if items is None:
+        raise HTTPException(404, "存档不存在")
+    return {"requests": items}
 
 
 @app.get("/api/world-state")

@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import patch
 
 import game
+import llm
 
 
 def _context():
@@ -135,6 +136,141 @@ class DirectorPlanTests(unittest.TestCase):
         self.assertEqual(planned["current_plan"]["payoff"]["type"], "escape")
         self.assertEqual(planned["current_plan"]["event_action"], "resolve")
         self.assertEqual(planned["event"]["id"], "event-1")
+
+    def test_fallback_respects_negated_investigation(self):
+        result = game._fallback_director_plan({}, "不要查看埋好的牌子，回家假装没事")
+
+        self.assertEqual(result["payoff"]["type"], "escape")
+        self.assertNotIn("追查的问题", result["current_goal"])
+        self.assertIn("牌子", result["event_core"])
+
+    def test_memory_refs_are_validated_and_compacted(self):
+        raw = _plan()
+        raw["memory_refs"] = ["memory-b", "invented-memory"]
+        memories = [
+            {"id": "memory-b", "type": "plot", "text": "阿七曾在夜里异变。"},
+            {"id": "memory-a", "type": "plot", "text": "村外有一块黑牌。"},
+        ]
+        state = game._apply_director_plan(
+            {}, raw, "迎战", _context(), 1, memory_candidates=memories
+        )
+
+        plan = state["current_plan"]
+        self.assertEqual(plan["memory_refs"], ["memory-b"])
+        self.assertEqual(plan["selected_memories"], [memories[0]])
+
+    def test_director_dynamic_message_puts_player_action_last(self):
+        state = {
+            "turns": 3,
+            "transcript": [{"role": "narration", "text": "上一轮正文"}],
+            "character_state": {"realm": "凡人", "updated_at": 123.0},
+        }
+        messages = game._director_planning_messages(
+            state,
+            "回家",
+            _context(),
+            {},
+            [{"id": "m1", "type": "plot", "text": "已知事实"}],
+        )
+
+        self.assertEqual([m["role"] for m in messages], ["system", "system", "user"])
+        self.assertNotIn("updated_at", messages[-1]["content"])
+        self.assertLess(messages[-1]["content"].find("最近一轮正文"), messages[-1]["content"].find("玩家本轮行动"))
+        self.assertTrue(messages[-1]["content"].rstrip().endswith("【玩家本轮行动】\n回家"))
+
+    def test_narrative_plan_is_appended_after_history(self):
+        sid = "cache-prefix-test"
+        historical = [
+            {"role": "system", "content": "fixed"},
+            {"role": "user", "content": "old action"},
+            {"role": "assistant", "content": "old result"},
+        ]
+        game._CACHE[sid] = {
+            "messages": list(historical),
+            "transcript": [],
+            "turns": 1,
+            "character_state": {},
+            "world_memory": [],
+            "inventory": [],
+            "director_state": {},
+            "_injected": [],
+        }
+        planned = game._apply_director_plan({}, _plan(), "迎战", _context(), 2)
+
+        async def fake_plan(*args, **kwargs):
+            return planned
+
+        try:
+            with patch.object(game.constraints, "action_constraints", return_value="world"), patch.object(
+                game.constraints, "director_context", return_value=_context()
+            ), patch.object(game, "_plan_director_turn", fake_plan), patch.object(
+                game.store, "save_director_state"
+            ) as save_director:
+                messages = asyncio.run(game.prepare_action(sid, "迎战"))
+                self.assertEqual(game._CACHE[sid]["_pending_director_prev"], {})
+                self.assertEqual(game._CACHE[sid]["director_state"], planned)
+                save_director.assert_not_called()
+                game.rollback_prepared_action(sid)
+                self.assertEqual(game._CACHE[sid]["director_state"], {})
+                self.assertNotIn("_pending_director_prev", game._CACHE[sid])
+        finally:
+            game._CACHE.pop(sid, None)
+
+        self.assertEqual(messages[:-1], historical)
+        self.assertIn("本轮导演骨架", messages[-1]["content"])
+        self.assertTrue(messages[-1]["content"].endswith("【玩家原始行动】\n迎战"))
+
+    def test_audit_prompt_omits_plan_metadata(self):
+        plan = _plan()
+        plan.update({"plan_id": "random", "note": "long note", "selected_facts": []})
+        prompt = game._director_audit_prompt(
+            plan,
+            "迎战",
+            "正文。《状态》\n境界：凡人\n《/状态》",
+        )
+
+        self.assertNotIn("plan_id", prompt)
+        self.assertNotIn("long note", prompt)
+        self.assertIn("境界：凡人", prompt)
+
+    def test_stage_summary_updates_only_on_boundary(self):
+        messages = [{"role": "system", "content": "fixed"}]
+        for turn in range(1, 21):
+            messages.extend([
+                {"role": "user", "content": f"行动{turn}"},
+                {"role": "assistant", "content": f"结果{turn}"},
+            ])
+        state = {
+            "messages": messages,
+            "turns": 20,
+            "stage_summary": "",
+            "summary_turn": 0,
+        }
+
+        game._trim(state)
+
+        self.assertEqual(len(state["messages"]), 1 + game.RECENT_RAW_ROUNDS * 2)
+        self.assertEqual(state["summary_turn"], 20)
+        self.assertIn("行动1", state["stage_summary"])
+        self.assertEqual(state["messages"][1]["content"], "行动5")
+
+    def test_deepseek_cache_usage_is_parsed_tolerantly(self):
+        direct = llm._usage_metrics({
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "prompt_cache_hit_tokens": 70,
+            "prompt_cache_miss_tokens": 30,
+        })
+        nested = llm._usage_metrics({
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "prompt_tokens_details": {"cached_tokens": 60},
+        })
+
+        self.assertEqual(direct["cache_hit_tokens"], 70)
+        self.assertEqual(direct["cache_miss_tokens"], 30)
+        self.assertEqual(nested["cache_hit_tokens"], 60)
+        self.assertEqual(nested["cache_miss_tokens"], 40)
 
 
 if __name__ == "__main__":
