@@ -759,8 +759,12 @@ function renderDynamicDirector(state) {
     tag.textContent = `${plan.turn_mode || "progress"} · ${plan.event_action || "none"}`;
     card.appendChild(tag);
     card.appendChild(field("本轮目标", plan.turn_objective || plan.current_goal));
-    if (plan.payoff) {
-      card.appendChild(field("动态爽点", `[${plan.payoff.type || "—"}] ${plan.payoff.outcome || "—"}`, "desc"));
+    if (plan.payoff?.desc) {
+      card.appendChild(field("待触发爽点", plan.payoff.desc, "desc"));
+      card.appendChild(field("触发条件", plan.payoff.trigger, "trigger"));
+    } else if (plan.payoff) {
+      // 兼容拆分前保存的即时爽点结构。
+      card.appendChild(field("历史爽点", `[${plan.payoff.type || "—"}] ${plan.payoff.outcome || "—"}`, "desc"));
       card.appendChild(field("兑现证明", plan.payoff.proof));
     }
     if (Array.isArray(plan.beats) && plan.beats.length) {
@@ -783,6 +787,9 @@ function renderDynamicDirector(state) {
     audit.className = "dir-last";
     const ok = !!state.last_audit.fulfilled;
     audit.appendChild(field("执行审计", ok ? "已落实导演骨架" : "未完整落实，需要修复", ok ? "desc" : "trigger"));
+    if (state.last_audit.payoff_triggered != null) {
+      audit.appendChild(field("爽点审计", state.last_audit.payoff_triggered ? "本轮已触发" : "本轮未触发", state.last_audit.payoff_triggered ? "desc" : ""));
+    }
     if (state.last_audit.evidence) audit.appendChild(field("正文证据", state.last_audit.evidence));
     if (Array.isArray(state.last_audit.violations) && state.last_audit.violations.length) {
       audit.appendChild(field("违规", state.last_audit.violations.join("；"), "trigger"));
