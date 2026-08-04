@@ -52,10 +52,14 @@ cd backend
 | `LLM_TEMPERATURE` | 采样温度，叙事建议 0.8~1.0 | `0.9` |
 | `LLM_MAX_TOKENS` | 单次回复最大 token | `2048` |
 | `DIRECTOR_LLM_*` | 可选的独立导演模型配置；协议、地址、Key、模型默认继承主模型 | 未设置 |
-| `DIRECTOR_LLM_MAX_TOKENS` | 导演结构化输出上限 | `600` |
-| `DIRECTOR_LLM_TIMEOUT` | 导演规划硬超时（秒） | `35` |
+| `DIRECTOR_EVENT_MAX_TOKENS` | 事件 Agent 结构化输出上限 | `350` |
+| `DIRECTOR_PAYOFF_MAX_TOKENS` | 爽点 Agent 结构化输出上限 | `450` |
+| `DIRECTOR_PACING_MAX_TOKENS` | 节奏 Agent 结构化输出上限 | `450` |
+| `DIRECTOR_LLM_TIMEOUT` | 每个导演 Agent 的硬超时（秒） | `35` |
 | `EMBED_ENABLED` | 是否启用冷物品语义召回；设 `0` 可关闭 | `1` |
 | `EMBED_MODEL` | fastembed 模型名 | `BAAI/bge-small-zh-v1.5` |
+
+旧配置 `DIRECTOR_LLM_MAX_TOKENS` 仍兼容：未设置三个专职 Agent 上限时，它会作为共同上限。
 
 LLM 请求会写入 SQLite 的 `llm_request_metrics` 表，包含请求类型、模型、耗时、状态、字符量及供应商返回的缓存命中/未命中 token。剧情历史每 10 轮更新一次阶段摘要，并保留最近 16 轮原文。
 | `EMBED_CACHE_DIR` | fastembed 模型缓存目录 | `backend/data/fastembed_cache` |

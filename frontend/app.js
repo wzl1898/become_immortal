@@ -58,6 +58,9 @@ let llmRefreshTimer = null;
 const LLM_REQUEST_LABELS = {
   opening: "开场生成",
   director_plan: "导演规划",
+  director_event: "事件 Agent",
+  director_payoff: "爽点 Agent",
+  director_pacing: "节奏 Agent",
   narrative: "剧情生成",
   memory_extract: "记忆提取",
   director_audit: "执行审计",
@@ -755,7 +758,7 @@ function renderDynamicDirector(state) {
     tag.className = "dir-armed-tag" + (plan.turn_mode === "resolve" ? "" : " off");
     tag.textContent = `${plan.turn_mode || "progress"} · ${plan.event_action || "none"}`;
     card.appendChild(tag);
-    card.appendChild(field("本轮目标", plan.current_goal));
+    card.appendChild(field("本轮目标", plan.turn_objective || plan.current_goal));
     if (plan.event_action !== "none" && plan.payoff) {
       card.appendChild(field("动态爽点", `[${plan.payoff.type || "—"}] ${plan.payoff.outcome || "—"}`, "desc"));
       card.appendChild(field("兑现证明", plan.payoff.proof));

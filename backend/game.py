@@ -25,7 +25,9 @@ import store
 from llm import complete_chat, config_from_env
 from prompts import (
     DIRECTOR_AUDIT_SYSTEM_PROMPT,
-    DIRECTOR_PLANNER_SYSTEM_PROMPT,
+    DIRECTOR_EVENT_SYSTEM_PROMPT,
+    DIRECTOR_PACING_SYSTEM_PROMPT,
+    DIRECTOR_PAYOFF_SYSTEM_PROMPT,
     DIRECTOR_SYSTEM_PROMPT,
     INQUIRY_SYSTEM_PROMPT,
     MEMORY_EXTRACT_SYSTEM_PROMPT,
@@ -75,8 +77,18 @@ DIRECTOR_PLAN_MAX_CHARS = 1800
 DIRECTOR_PAYOFF_TYPES = {"gain", "combat", "mystery", "reversal", "escape"}
 DIRECTOR_EVENT_ACTIONS = {"start", "continue", "resolve", "abandon", "none"}
 DIRECTOR_TURN_MODES = {"setup", "progress", "escalate", "resolve", "transition"}
+DIRECTOR_ROUTE_KEYS = {"none", "engage", "escape", "investigate", "negotiate", "acquire", "other"}
 DIRECTOR_PLANNER_TIMEOUT_SECONDS = float(os.getenv("DIRECTOR_LLM_TIMEOUT", "35"))
-DIRECTOR_PLANNER_MAX_TOKENS = int(os.getenv("DIRECTOR_LLM_MAX_TOKENS", "600"))
+_DIRECTOR_LEGACY_MAX_TOKENS = os.getenv("DIRECTOR_LLM_MAX_TOKENS")
+DIRECTOR_EVENT_MAX_TOKENS = int(os.getenv(
+    "DIRECTOR_EVENT_MAX_TOKENS", _DIRECTOR_LEGACY_MAX_TOKENS or "350"
+))
+DIRECTOR_PAYOFF_MAX_TOKENS = int(os.getenv(
+    "DIRECTOR_PAYOFF_MAX_TOKENS", _DIRECTOR_LEGACY_MAX_TOKENS or "450"
+))
+DIRECTOR_PACING_MAX_TOKENS = int(os.getenv(
+    "DIRECTOR_PACING_MAX_TOKENS", _DIRECTOR_LEGACY_MAX_TOKENS or "450"
+))
 DIRECTOR_LLM_CONFIG = config_from_env("DIRECTOR_LLM")
 
 # ---- 旧导演状态机常量（只用于读取历史状态，新的预规划链路不再维护）----
@@ -1034,48 +1046,85 @@ async def _plan_director_turn(
 ) -> dict:
     prev = _dynamic_director_state(state.get("director_state"))
     compact_memories = _compact_memories(recalled_memories or [])
-    messages = _director_planning_messages(state, action, world_context, prev, compact_memories)
+    event_messages, payoff_messages = _director_parallel_messages(
+        state, action, world_context, prev, compact_memories
+    )
+    event_call, payoff_call = await asyncio.gather(
+        _call_director_agent(
+            event_messages, "director_event", DIRECTOR_EVENT_MAX_TOKENS, state.get("session_id")
+        ),
+        _call_director_agent(
+            payoff_messages, "director_payoff", DIRECTOR_PAYOFF_MAX_TOKENS, state.get("session_id")
+        ),
+    )
+    event_result, event_meta = event_call
+    payoff_result, payoff_meta = payoff_call
+    if event_result is None:
+        event_result = _fallback_director_event(prev, action)
+    if payoff_result is None:
+        payoff_result = _fallback_director_payoff(action)
+
+    combined = {**event_result, **payoff_result}
+    planned = _apply_director_plan(
+        prev,
+        combined,
+        action,
+        world_context,
+        state["turns"] + 1,
+        memory_candidates=compact_memories,
+        advance_scene=False,
+    )
+    pacing_result, pacing_meta = await _call_director_agent(
+        _director_pacing_messages(state, action, planned),
+        "director_pacing",
+        DIRECTOR_PACING_MAX_TOKENS,
+        state.get("session_id"),
+    )
+    if pacing_result is None:
+        pacing_result = _fallback_director_pacing(planned, action)
+    planned = _apply_director_pacing(planned, pacing_result, prev)
+    metas = {"event": event_meta, "payoff": payoff_meta, "pacing": pacing_meta}
+    fallback_agents = [name for name, meta in metas.items() if meta["source"] == "fallback"]
+    planned["planner"] = {
+        "source": "fallback" if len(fallback_agents) == 3 else "mixed" if fallback_agents else "llm",
+        "model": DIRECTOR_LLM_CONFIG.model,
+        "fallback_reason": ",".join(fallback_agents),
+        "agents": metas,
+    }
+    return planned
+
+
+async def _call_director_agent(
+    messages: list[dict], request_type: str, max_tokens: int, session_id: str | None
+) -> tuple[dict | None, dict]:
     result = None
-    source = "llm"
-    fallback_reason = ""
+    reason = ""
     try:
         raw = await asyncio.wait_for(
             complete_chat(
                 messages,
                 temperature=0.25,
-                max_tokens=DIRECTOR_PLANNER_MAX_TOKENS,
+                max_tokens=max_tokens,
                 config=DIRECTOR_LLM_CONFIG,
-                request_type="director_plan",
-                session_id=state.get("session_id"),
+                request_type=request_type,
+                session_id=session_id,
             ),
             timeout=DIRECTOR_PLANNER_TIMEOUT_SECONDS,
         )
         result = _extract_json_object(raw)
         if result is None:
-            fallback_reason = "invalid_json"
+            reason = "invalid_json"
     except asyncio.TimeoutError:
-        fallback_reason = "timeout"
-        _LOG.warning("director planning timed out after %ss; using fallback", DIRECTOR_PLANNER_TIMEOUT_SECONDS)
+        reason = "timeout"
+        _LOG.warning("%s timed out after %ss; using fallback", request_type, DIRECTOR_PLANNER_TIMEOUT_SECONDS)
     except Exception as exc:  # noqa: BLE001
-        fallback_reason = type(exc).__name__
-        _LOG.exception("director planning failed")
-    if result is None:
-        source = "fallback"
-        result = _fallback_director_plan(prev, action)
-    planned = _apply_director_plan(
-        prev,
-        result,
-        action,
-        world_context,
-        state["turns"] + 1,
-        memory_candidates=compact_memories,
-    )
-    planned["planner"] = {
-        "source": source,
-        "model": DIRECTOR_LLM_CONFIG.model if source == "llm" else "local",
-        "fallback_reason": fallback_reason,
+        reason = type(exc).__name__
+        _LOG.exception("%s failed", request_type)
+    return result, {
+        "source": "llm" if result is not None else "fallback",
+        "model": DIRECTOR_LLM_CONFIG.model if result is not None else "local",
+        "fallback_reason": reason,
     }
-    return planned
 
 
 def _compact_director_state(prev: dict) -> dict:
@@ -1093,7 +1142,7 @@ def _compact_director_state(prev: dict) -> dict:
         } if event else None),
         "intent": prev.get("intent"),
         "previous_result": {
-            "current_goal": plan.get("current_goal"),
+            "turn_objective": plan.get("turn_objective") or plan.get("current_goal"),
             "payoff": plan.get("payoff"),
             "turn_mode": plan.get("turn_mode"),
             "audit": {
@@ -1108,13 +1157,13 @@ def _compact_director_state(prev: dict) -> dict:
     }
 
 
-def _director_planning_messages(
+def _director_parallel_messages(
     state: dict,
     action: str,
     world_context: dict,
     prev: dict,
     memories: list[dict],
-) -> list[dict]:
+) -> tuple[list[dict], list[dict]]:
     character = {
         key: value for key, value in (state.get("character_state") or {}).items()
         if key != "updated_at"
@@ -1131,15 +1180,51 @@ def _director_planning_messages(
         "【最近一轮正文】\n" + (_latest_scene(state.get("transcript") or []) or "（暂无）"),
         "【玩家本轮行动】\n" + action,
     ])
-    return [
-        {"role": "system", "content": DIRECTOR_PLANNER_SYSTEM_PROMPT},
+    event_messages = [
+        {"role": "system", "content": DIRECTOR_EVENT_SYSTEM_PROMPT},
+        {"role": "user", "content": turn_content},
+    ]
+    payoff_messages = [
+        {"role": "system", "content": DIRECTOR_PAYOFF_SYSTEM_PROMPT},
         {"role": "system", "content": "【稳定世界层】\n" + _stable_json(world_layer)},
         {"role": "user", "content": turn_content},
     ]
+    return event_messages, payoff_messages
 
 
-def _fallback_director_plan(prev: dict, action: str) -> dict:
-    """Deterministic plan used when the planner is unavailable."""
+def _director_pacing_messages(state: dict, action: str, planned: dict) -> list[dict]:
+    plan = planned.get("current_plan") or {}
+    content = "\n\n".join([
+        "【事件 Agent 结果】\n" + _stable_json({
+            "event": planned.get("event"),
+            "intent": planned.get("intent"),
+            "event_action": plan.get("event_action"),
+            "turn_mode": plan.get("turn_mode"),
+            "route_key": plan.get("route_key"),
+            "forced_reasons": plan.get("forced_reasons"),
+        }),
+        "【爽点 Agent 结果】\n" + _stable_json({
+            "interpreted_route": plan.get("interpreted_route"),
+            "payoff": plan.get("payoff"),
+            "selected_facts": plan.get("selected_facts"),
+            "selected_memories": plan.get("selected_memories"),
+        }),
+        "【场景状态】\n" + _stable_json({
+            "scene": planned.get("scene"),
+            "scene_turns": planned.get("scene_turns", 0),
+            "stale_after": DIRECTOR_SCENE_STALE_TURNS,
+        }),
+        "【最近一轮正文】\n" + (_latest_scene(state.get("transcript") or []) or "（暂无）"),
+        "【玩家本轮行动】\n" + action,
+    ])
+    return [
+        {"role": "system", "content": DIRECTOR_PACING_SYSTEM_PROMPT},
+        {"role": "user", "content": content},
+    ]
+
+
+def _fallback_director_event(prev: dict, action: str) -> dict:
+    """Deterministic event decision used when the event Agent is unavailable."""
     active = (
         isinstance(prev.get("event"), dict)
         and prev["event"].get("status") in {"active", "resolving", "abandoning"}
@@ -1159,28 +1244,59 @@ def _fallback_director_plan(prev: dict, action: str) -> dict:
         return {
             "event_action": "none",
             "event_core": "",
-            "current_goal": "贴合玩家行动给出明确结果",
             "turn_mode": "progress",
+            "route_key": "none",
             "intent": {"key": action[:80], "same_as_previous": False},
-            "payoff": {"type": "reversal", "outcome": "", "proof": "", "source_ids": []},
-            "beats": ["直接回应玩家行动，不增加无结果的铺垫"],
-            "must_not": ["生成固定世界库之外的重大设定"],
         }
-    payoff_type = "escape" if avoid else "combat" if fight else "mystery"
+    route = "escape" if avoid else "engage" if fight else "investigate"
+    return {
+        "event_action": "continue" if active else "start",
+        "event_core": (prev.get("event") or {}).get("core") or f"结算玩家行动涉及的直接处境：{action[:60]}",
+        "turn_mode": "progress",
+        "route_key": route,
+        "intent": {"key": action[:80], "same_as_previous": False},
+    }
+
+
+def _fallback_director_payoff(action: str) -> dict:
+    """Deterministic payoff used when the payoff Agent is unavailable."""
+    avoid = any(word in action for word in (
+        "避", "躲", "逃", "撤", "绕开", "不打", "不理", "放弃", "回家", "假装没事",
+    ))
+    fight_words = ("打", "战", "杀", "攻", "反击", "迎敌")
+    investigate_words = ("看", "查", "问", "探", "研究", "观察", "细想")
+    fight = any(word in action for word in fight_words) and not _negates_any(action, fight_words)
+    investigate = any(word in action for word in investigate_words) and not _negates_any(action, investigate_words) and not avoid
+    payoff_type = "escape" if avoid else "combat" if fight else "mystery" if investigate else "reversal"
     outcome = {
         "escape": "彻底摆脱当前直接威胁并确认安全",
         "combat": "完成有攻防、有代价和明确战果的冲突",
         "mystery": f"查明玩家本轮调查对象的关键事实：{action[:60]}",
+        "reversal": "让玩家行动产生明确、可验证的局势变化",
     }[payoff_type]
     return {
-        "event_action": "continue" if active else "start",
-        "event_core": (prev.get("event") or {}).get("core") or f"结算玩家行动涉及的直接处境：{action[:60]}",
-        "current_goal": outcome,
-        "turn_mode": "progress",
-        "intent": {"key": action[:80], "same_as_previous": False},
+        "interpreted_route": "escape" if avoid else "engage" if fight else "investigate" if investigate else "other",
         "payoff": {"type": payoff_type, "outcome": outcome, "proof": outcome, "source_ids": []},
-        "beats": ["让玩家行动产生有效变化", "给出可以验证的结果或代价"],
-        "must_not": ["只增加模糊感受或新悬念"],
+        "facts_to_reveal": [],
+        "arts_to_grant": [],
+        "opportunities_to_trigger": [],
+        "memory_refs": [],
+    }
+
+
+def _fallback_director_pacing(planned: dict, action: str) -> dict:
+    plan = planned.get("current_plan") or {}
+    payoff = plan.get("payoff") or {}
+    resolving = plan.get("event_action") == "resolve"
+    objective = payoff.get("outcome") if resolving else f"让玩家行动产生明确进展：{action[:80]}"
+    return {
+        "turn_objective": objective or "直接回应玩家行动并给出明确变化",
+        "beats": ["直接落实玩家行动", "给出可以验证的结果或代价"],
+        "state_changes": {},
+        "must_not": ["只增加模糊感受或新悬念", "生成固定世界库之外的重大设定"],
+        "scene": planned.get("scene") or "",
+        "scene_change": False,
+        "note": "节奏 Agent 不可用，已采用本地紧凑骨架。",
     }
 
 
@@ -1213,10 +1329,16 @@ def _sanitize_director_plan(
         return [str(item) for item in value if str(item) in valid] if isinstance(value, list) else []
 
     payoff_in = result.get("payoff") if isinstance(result.get("payoff"), dict) else {}
+    route_key = result.get("route_key") if result.get("route_key") in DIRECTOR_ROUTE_KEYS else "other"
+    interpreted_route = (
+        result.get("interpreted_route")
+        if result.get("interpreted_route") in DIRECTOR_ROUTE_KEYS else "other"
+    )
     payoff_type = payoff_in.get("type") if payoff_in.get("type") in DIRECTOR_PAYOFF_TYPES else "reversal"
     source_ids = refs(payoff_in.get("source_ids") or [])
     arts = refs(result.get("arts_to_grant") or [], arts_allowed)
     opportunities = refs(result.get("opportunities_to_trigger") or [], opps_allowed)
+    facts = refs(result.get("facts_to_reveal") or [])
     source_ids = list(dict.fromkeys(source_ids + arts + opportunities))
     outcome = _clean_text(payoff_in.get("outcome"), 320)
     proof = _clean_text(payoff_in.get("proof"), 320)
@@ -1224,24 +1346,28 @@ def _sanitize_director_plan(
         payoff_type = "reversal"
         outcome = "通过本轮行动取得明确、可验证的主动权"
         proof = "正文明确写出主角处境由被动转为主动"
-
-    state_changes = result.get("state_changes") if isinstance(result.get("state_changes"), dict) else {}
-    allowed_state_keys = {"health", "spiritual_power", "condition"}
-    if source_ids:
-        allowed_state_keys.update({"realm", "cultivation", "resources", "artifacts"})
-    state_changes = {
-        key: _clean_text(value, 180)
-        for key, value in state_changes.items()
-        if key in allowed_state_keys and _clean_text(value, 180)
-    }
+    if route_key not in {"none", interpreted_route} and interpreted_route != "none":
+        source_ids = []
+        arts = []
+        opportunities = []
+        facts = []
+        if payoff_type == "gain":
+            payoff_type = "reversal"
+            outcome = "通过本轮行动取得明确、可验证的主动权"
+            proof = "正文明确写出主角处境由被动转为主动"
+    if route_key == "escape" and payoff_type != "escape":
+        payoff_type = "escape"
+        outcome = "彻底摆脱当前直接威胁并获得可验证的安全"
+        proof = "正文明确确认威胁已经失去追踪，主角当前处境安全"
     action = result.get("event_action")
     mode = result.get("turn_mode")
     intent = result.get("intent") if isinstance(result.get("intent"), dict) else {}
     return {
         "event_action": action if action in DIRECTOR_EVENT_ACTIONS else "none",
         "event_core": _clean_text(result.get("event_core"), 240),
-        "current_goal": _clean_text(result.get("current_goal"), 280),
         "turn_mode": mode if mode in DIRECTOR_TURN_MODES else "progress",
+        "route_key": route_key,
+        "interpreted_route": interpreted_route,
         "intent": {
             "key": _clean_text(intent.get("key"), 120),
             "same_as_previous": bool(intent.get("same_as_previous")),
@@ -1252,12 +1378,35 @@ def _sanitize_director_plan(
             "proof": proof,
             "source_ids": source_ids,
         },
-        "facts_to_reveal": refs(result.get("facts_to_reveal") or []),
+        "facts_to_reveal": facts,
         "arts_to_grant": arts,
         "opportunities_to_trigger": opportunities,
         "memory_refs": refs(result.get("memory_refs") or [], memory_ids or set()),
+        "turn_objective": "",
+        "beats": [],
+        "state_changes": {},
+        "must_not": [],
+        "scene": "",
+        "scene_change": False,
+        "note": "",
+    }
+
+
+def _sanitize_pacing_result(result: dict, source_ids: list[str]) -> dict:
+    state_changes = result.get("state_changes") if isinstance(result.get("state_changes"), dict) else {}
+    allowed_state_keys = {"health", "spiritual_power", "condition"}
+    if source_ids:
+        allowed_state_keys.update({"realm", "cultivation", "resources", "artifacts"})
+    return {
+        "turn_objective": _clean_text(
+            result.get("turn_objective") or result.get("current_goal"), 280
+        ),
         "beats": _clean_string_list(result.get("beats"), limit=3, item_limit=120),
-        "state_changes": state_changes,
+        "state_changes": {
+            key: _clean_text(value, 180)
+            for key, value in state_changes.items()
+            if key in allowed_state_keys and _clean_text(value, 180)
+        },
         "must_not": _clean_string_list(result.get("must_not"), limit=6),
         "scene": _clean_text(result.get("scene"), 100),
         "scene_change": bool(result.get("scene_change")),
@@ -1273,8 +1422,8 @@ def _same_intent(prev_intent: dict | None, plan_intent: dict) -> bool:
     return bool(plan_intent.get("same_as_previous") or (old and new and old == new))
 
 
-def _player_demands_terminal_escape(action: str, payoff_type: str) -> bool:
-    if payoff_type != "escape":
+def _player_demands_terminal_escape(action: str, route_key: str, payoff_type: str) -> bool:
+    if route_key != "escape" and payoff_type != "escape":
         return False
     terminal_phrases = (
         "撤回", "退回", "逃离", "脱身", "摆脱", "离开这里", "回村",
@@ -1290,6 +1439,7 @@ def _apply_director_plan(
     world_context: dict,
     turn: int,
     memory_candidates: list[dict] | None = None,
+    advance_scene: bool = True,
 ) -> dict:
     memory_candidates = memory_candidates or []
     memory_by_id = {row["id"]: row for row in memory_candidates if row.get("id")}
@@ -1337,7 +1487,9 @@ def _apply_director_plan(
         event_action = "resolve"
         plan["turn_mode"] = "resolve"
         forced_reasons.append("同一意图已连续尝试 2 次，本轮必须结算")
-    if event and _player_demands_terminal_escape(action, plan["payoff"]["type"]):
+    if event and _player_demands_terminal_escape(
+        action, plan["route_key"], plan["payoff"]["type"]
+    ):
         event_action = "resolve"
         plan["turn_mode"] = "resolve"
         forced_reasons.append("玩家明确选择脱离冲突，安全爽点必须在本轮完整兑现")
@@ -1348,10 +1500,40 @@ def _apply_director_plan(
     plan["plan_id"] = uuid.uuid4().hex
     plan["planned_turn"] = turn
     plan["forced_reasons"] = forced_reasons
+    if event_action == "none":
+        plan["facts_to_reveal"] = []
+        plan["arts_to_grant"] = []
+        plan["opportunities_to_trigger"] = []
+        plan["payoff"]["source_ids"] = []
     plan["selected_facts"] = constraints.selected_director_facts(
         world_context,
         plan["facts_to_reveal"] + plan["payoff"]["source_ids"],
     )
+
+    planned = {
+        "event": event,
+        "intent": intent,
+        "current_plan": plan,
+        "last_payoff": prev.get("last_payoff"),
+        "last_audit": prev.get("last_audit"),
+        "needs_repair": False,
+        "scene": _clean_text(prev.get("scene"), 100),
+        "scene_turns": int(prev.get("scene_turns") or 0),
+        "note": "",
+    }
+    return _apply_director_pacing(planned, result, prev) if advance_scene else planned
+
+
+def _apply_director_pacing(planned: dict, result: dict, prev: dict) -> dict:
+    plan = planned["current_plan"]
+    pacing = _sanitize_pacing_result(result, (plan.get("payoff") or {}).get("source_ids") or [])
+    plan.update(pacing)
+    route = plan.get("route_key")
+    payoff_route = plan.get("interpreted_route")
+    if route not in {"none", payoff_route} and payoff_route != "none":
+        warning = f"爽点路线判断为 {payoff_route}，本轮必须以事件路线 {route} 为准"
+        if warning not in plan["must_not"]:
+            plan["must_not"].append(warning)
 
     prev_scene = _clean_text(prev.get("scene"), 100)
     scene = plan["scene"] or prev_scene
@@ -1361,20 +1543,13 @@ def _apply_director_plan(
         scene_turns = 1
     else:
         scene_turns = int(prev.get("scene_turns") or 0) + 1
-    if scene_turns >= DIRECTOR_SCENE_STALE_TURNS:
-        plan["must_not"].append("继续停留在同一处境逐个细演；本轮应合并节拍或切换场景")
-
-    return {
-        "event": event,
-        "intent": intent,
-        "current_plan": plan,
-        "last_payoff": prev.get("last_payoff"),
-        "last_audit": prev.get("last_audit"),
-        "needs_repair": False,
-        "scene": scene,
-        "scene_turns": scene_turns,
-        "note": plan["note"],
-    }
+    stale_warning = "继续停留在同一处境逐个细演；本轮应合并节拍或切换场景"
+    if scene_turns >= DIRECTOR_SCENE_STALE_TURNS and stale_warning not in plan["must_not"]:
+        plan["must_not"].append(stale_warning)
+    planned["scene"] = scene
+    planned["scene_turns"] = scene_turns
+    planned["note"] = plan["note"]
+    return planned
 
 
 def _render_director_plan(state: dict, world_context: dict) -> str:
@@ -1388,7 +1563,7 @@ def _render_director_plan(state: dict, world_context: dict) -> str:
         f"事件进度：{event.get('turns', 0)}/{event.get('max_turns', DIRECTOR_EVENT_MAX_TURNS)}",
         f"玩家意图：{(state.get('intent') or {}).get('key') or '未归类'}（第 {(state.get('intent') or {}).get('attempts', 1)} 次）",
         f"本轮模式：{plan.get('turn_mode')}；事件动作：{plan.get('event_action')}",
-        f"当前目标：{plan.get('current_goal') or '直接回应玩家行动'}",
+        f"本轮目标：{plan.get('turn_objective') or plan.get('current_goal') or '直接回应玩家行动'}",
     ]
     if plan.get("event_action") != "none":
         payoff = plan.get("payoff") or {}
@@ -1517,7 +1692,7 @@ def _compact_audit_plan(plan: dict) -> dict:
     payoff = plan.get("payoff") if isinstance(plan.get("payoff"), dict) else {}
     return {
         "turn_mode": plan.get("turn_mode"),
-        "required_outcome": plan.get("current_goal"),
+        "required_outcome": plan.get("turn_objective") or plan.get("current_goal"),
         "payoff": {
             "type": payoff.get("type"),
             "proof": payoff.get("proof"),
