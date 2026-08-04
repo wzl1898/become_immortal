@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 
 import store
@@ -25,6 +26,27 @@ FACTION_HOME_LOCATIONS = {
     "tianheng_sect": "tianheng_sect",
     "taixuan_academy": "taixuan_academy",
 }
+
+# Only aliases that are unambiguous within the fixed world. They help the
+# reconciliation pass understand natural prose without creating locations.
+LOCATION_ALIASES = {
+    "baishi_village": ("村里", "村中", "村内"),
+    "baishi_back_mountain": ("后山",),
+    "baishi_ruined_temple": ("破庙",),
+    "xuanxiao_outer_gate": ("玄霄宗山门", "外山门"),
+}
+
+_ARRIVAL_BEFORE_RE = re.compile(
+    r"(?:抵达|到达|来到|赶到|走到|行至|回到|返回到?|进入|走进|踏入|"
+    r"身处|置身于?|住进|落脚在?|(?:你|主角)(?:已经|已|正)?在|到了|进了)"
+    r"[了在于]?\s*[「『\u201c\"]?$"
+)
+_UNREALIZED_BEFORE_RE = re.compile(
+    r"(?:尚未|还未|还没|未能|没能|并未|无法|不能|不曾|打算|计划|准备|想要|希望|欲|"
+    r"若|如果|一旦|需要|须|必须|可以|试图|尝试|开始).{0,8}"
+    r"(?:抵达|到达|来到|赶到|走到|行至|回到|返回到?|进入|走进|踏入|身处|置身|住进|落脚)"
+)
+_UNREALIZED_AFTER_RE = re.compile(r"^.{0,6}(?:计划|打算|念头|想法|路线|尚未|还未|还没)")
 
 
 def opening_constraints(session_id: str) -> str:
@@ -48,7 +70,7 @@ def opening_constraints(session_id: str) -> str:
 
 
 def action_constraints(session_id: str, action: str) -> str:
-    """根据用户输入与世界知识生成本回合叙事边界，并做轻量状态更新。"""
+    """根据用户输入与世界知识生成本回合叙事边界，并记录移动意图。"""
     snap = store.world_snapshot(session_id)
     if not snap:
         return ""
@@ -131,6 +153,61 @@ def get_world_state(session_id: str) -> dict | None:
             "known_opportunities": _names_for_knowledge(snap, knowledge, "opportunity", None),
         },
     }
+
+
+def reconcile_location(session_id: str, assistant_content: str) -> dict | None:
+    """正文明确确认抵达后，才把固定地点写入结构化位置。"""
+    snap = store.world_snapshot(session_id)
+    narrative = (assistant_content or "").strip()
+    if not snap or not narrative:
+        return None
+
+    arrivals: list[tuple[int, dict, str]] = []
+    for location in snap["locations"]:
+        aliases = (location["name"],) + LOCATION_ALIASES.get(location["id"], ())
+        for alias in aliases:
+            start = 0
+            while True:
+                index = narrative.find(alias, start)
+                if index < 0:
+                    break
+                before = narrative[max(0, index - 28):index]
+                after = narrative[index + len(alias):index + len(alias) + 16]
+                if _is_confirmed_arrival(before, after):
+                    arrivals.append((index, location, alias))
+                start = index + len(alias)
+
+    if not arrivals:
+        return None
+
+    # The final confirmed arrival in the prose is the end-of-turn location.
+    _, target, alias = max(arrivals, key=lambda row: (row[0], len(row[2])))
+    route = _route_between(snap, snap["location"]["location_id"], target["id"])
+    lost_risk = "低" if route and route.get("risk") in ("medium", "high") else "无"
+    store.update_player_location(
+        session_id,
+        region_id=target["region_id"],
+        location_id=target["id"],
+        site_name="",
+        location_state=_state_for_location(target),
+        intended_destination_id=None,
+        lost_risk=lost_risk,
+    )
+    store.upsert_knowledge(
+        session_id,
+        "location",
+        target["id"],
+        "confirmed",
+        reliability="high",
+        source="正文确认抵达",
+    )
+    return target
+
+
+def _is_confirmed_arrival(before: str, after: str) -> bool:
+    if _UNREALIZED_BEFORE_RE.search(before) or _UNREALIZED_AFTER_RE.search(after):
+        return False
+    return bool(_ARRIVAL_BEFORE_RE.search(before))
 
 
 def director_context(session_id: str, action: str) -> dict:
@@ -320,7 +397,8 @@ def _match_entities(snap: dict, action: str) -> dict[str, list[dict]]:
     for source, kind in specs:
         for row in snap[source]:
             name = row.get("name") or ""
-            if name and name in action:
+            aliases = LOCATION_ALIASES.get(row["id"], ()) if kind == "location" else ()
+            if (name and name in action) or any(alias in action for alias in aliases):
                 buckets[kind].append(row)
     return dict(buckets)
 
@@ -413,22 +491,17 @@ def _adjudicate_movement(
     status = knowledge.get(("location", target["id"]), {}).get("status")
     route = _route_between(snap, snap["location"]["location_id"], target["id"])
     route_status = knowledge.get(("route", route["id"]), {}).get("status") if route else None
-    if status == "confirmed" and route and route_status == "confirmed":
-        store.update_player_location(
-            session_id,
-            region_id=target["region_id"],
-            location_id=target["id"],
-            site_name="",
-            location_state=_state_for_location(target),
-            intended_destination_id=None,
-            lost_risk="低" if route["risk"] in ("medium", "high") else "无",
-        )
-        store.upsert_knowledge(session_id, "location", target["id"], "confirmed", reliability="high", source="亲自抵达")
+    if status == "confirmed" and (
+        target["id"] == snap["location"]["location_id"]
+        or (route and route_status == "confirmed")
+    ):
+        store.set_intended_destination(session_id, target["id"])
+        route_reason = f"且已确认路线「{route['name']}」" if route else "且当前就在该地点范围内"
         return {
             "verdict": "allowed",
-            "reason": f"主角知道{target['name']}，且已确认路线「{route['name']}」。",
+            "reason": f"主角知道{target['name']}，{route_reason}。",
             "core_result": f"本回合可以抵达或进入{target['name']}；路上可有小阻滞，但不要阻止已确认路线的基本移动。",
-            "allowed_reveals": allowed + [target["summary"], route["summary"]],
+            "allowed_reveals": allowed + [target["summary"]] + ([route["summary"]] if route else []),
             "forbidden_reveals": forbidden,
         }
     if status in ("confirmed", "known", "rumored"):
