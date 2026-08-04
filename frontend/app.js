@@ -759,7 +759,7 @@ function renderDynamicDirector(state) {
     tag.textContent = `${plan.turn_mode || "progress"} · ${plan.event_action || "none"}`;
     card.appendChild(tag);
     card.appendChild(field("本轮目标", plan.turn_objective || plan.current_goal));
-    if (plan.event_action !== "none" && plan.payoff) {
+    if (plan.payoff) {
       card.appendChild(field("动态爽点", `[${plan.payoff.type || "—"}] ${plan.payoff.outcome || "—"}`, "desc"));
       card.appendChild(field("兑现证明", plan.payoff.proof));
     }
