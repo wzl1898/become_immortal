@@ -698,8 +698,16 @@ function renderDynamicDirector(state) {
   phaseWrap.className = "dir-phase";
   const badge = document.createElement("span");
   const status = event?.status || "idle";
-  badge.className = `dir-badge ${status === "active" ? "active" : "cooldown"}`;
-  badge.textContent = status === "active" ? "事件进行中" : status === "resolved" ? "事件已结算" : status === "abandoned" ? "事件已离开" : "自由场景";
+  const activeStatuses = new Set(["active", "resolving", "abandoning"]);
+  const statusLabels = {
+    active: "事件进行中",
+    resolving: "事件结算中",
+    resolved: "事件已结算",
+    abandoning: "事件离开中",
+    abandoned: "事件已离开",
+  };
+  badge.className = `dir-badge ${activeStatuses.has(status) ? "active" : "cooldown"}`;
+  badge.textContent = statusLabels[status] || "自由场景";
   phaseWrap.appendChild(badge);
   const note = document.createElement("span");
   note.className = "dir-phase-note";
@@ -712,9 +720,14 @@ function renderDynamicDirector(state) {
     meta.className = "dir-meta";
     const turns = Number(event.turns) || 0;
     const maxTurns = Number(event.max_turns) || 5;
-    meta.innerHTML =
-      `<span class="item${turns >= maxTurns ? " warn" : ""}">事件轮数 <b>${turns}/${maxTurns}</b></span>` +
-      `<span class="item">开始于第 <b>${Number(event.start_turn) || 0}</b> 回合</span>`;
+    const startTurn = Number(event.start_turn) || 0;
+    const endedTurn = Number(event.ended_turn) || 0;
+    const isFinished = status === "resolved" || status === "abandoned";
+    meta.innerHTML = isFinished
+      ? `<span class="item">事件历时 <b>${turns}</b> 轮</span>` +
+        `<span class="item">第 <b>${startTurn}</b> 至 <b>${endedTurn || startTurn}</b> 回合</span>`
+      : `<span class="item${turns >= maxTurns ? " warn" : ""}">事件轮数 <b>${turns}/${maxTurns}</b></span>` +
+        `<span class="item">开始于第 <b>${startTurn}</b> 回合</span>`;
     directorBodyEl.appendChild(meta);
   }
 
