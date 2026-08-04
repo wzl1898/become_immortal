@@ -90,6 +90,25 @@ def init() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS save_opportunity_rewards (
+                payoff_id       TEXT PRIMARY KEY,
+                save_id         TEXT NOT NULL,
+                opportunity_id  TEXT NOT NULL,
+                reward_kind     TEXT NOT NULL,
+                reward_id       TEXT NOT NULL,
+                status          TEXT NOT NULL DEFAULT 'pending',
+                created_turn    INTEGER NOT NULL,
+                triggered_turn  INTEGER,
+                updated_at      REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_save_opportunity_rewards_save "
+            "ON save_opportunity_rewards(save_id, status)"
+        )
         _init_world_tables(conn)
         _migrate_lore_to_world_memory(conn)
         _migrate_character_state(conn)
@@ -881,6 +900,52 @@ def save_director_state(sid: str, state: dict) -> None:
         )
 
 
+def save_opportunity_reward_binding(sid: str, payoff: dict | None) -> None:
+    """Persist the director's save-specific opportunity-to-reward binding."""
+    binding = payoff.get("binding") if isinstance(payoff, dict) else None
+    required = ("opportunity_id", "reward_kind", "reward_id")
+    if (
+        not isinstance(binding, dict)
+        or not payoff.get("id")
+        or any(not binding.get(key) for key in required)
+    ):
+        return
+    with _conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO save_opportunity_rewards (
+                payoff_id, save_id, opportunity_id, reward_kind, reward_id,
+                status, created_turn, triggered_turn, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(payoff_id) DO UPDATE SET
+                status=excluded.status,
+                triggered_turn=excluded.triggered_turn,
+                updated_at=excluded.updated_at
+            """,
+            (
+                payoff["id"], sid, binding.get("opportunity_id"),
+                binding.get("reward_kind"), binding.get("reward_id"),
+                payoff.get("status") or "pending", int(payoff.get("created_turn") or 0),
+                payoff.get("triggered_turn"), time.time(),
+            ),
+        )
+
+
+def list_opportunity_reward_bindings(sid: str) -> list[dict]:
+    with _conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT payoff_id, opportunity_id, reward_kind, reward_id, status,
+                   created_turn, triggered_turn
+            FROM save_opportunity_rewards
+            WHERE save_id=?
+            ORDER BY created_turn, payoff_id
+            """,
+            (sid,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def load(sid: str) -> dict | None:
     """读取单个存档的完整数据；不存在返回 None。"""
     with _conn() as conn:
@@ -951,5 +1016,6 @@ def rename(sid: str, name: str) -> bool:
 
 def delete(sid: str) -> bool:
     with _conn() as conn:
+        conn.execute("DELETE FROM save_opportunity_rewards WHERE save_id=?", (sid,))
         cur = conn.execute("DELETE FROM saves WHERE id=?", (sid,))
     return cur.rowcount > 0

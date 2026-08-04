@@ -20,6 +20,13 @@ def _context():
             "text": "破庙石像后有旧物痕迹。",
         }],
         "arts": [{"id": "yin_qi_jue", "name": "引气诀", "summary": "凡人入门吐纳法。"}],
+        "reward_candidates": [{
+            "id": "yin_qi_jue",
+            "name": "引气诀",
+            "reward_kind": "art",
+            "summary": "凡人入门吐纳法。",
+        }],
+        "existing_reward_bindings": [],
         "opportunities": [{
             "id": "ruined_temple_bones",
             "name": "破庙道人遗骨",
@@ -118,13 +125,40 @@ class DirectorPlanTests(unittest.TestCase):
         self.assertEqual(last["status"], "triggered")
         self.assertEqual(last["trigger_source"], "payoff_agent_recent_story")
 
-    def test_two_field_payoff_binds_exact_world_opportunity_name(self):
-        facts = game._payoff_selected_facts({
-            "desc": "获得破庙道人遗骨中留下的入道机缘",
-            "trigger": "亲自检查破庙道人遗骨",
-        }, _context())
+    def test_two_field_payoff_binds_existing_opportunity_and_reward(self):
+        payoff, _ = game._reconcile_payoff_state({}, {
+            "desc": "通过「破庙道人遗骨」获得「引气诀」",
+            "trigger": "亲自检查破庙道人遗骨中的旧物",
+        }, 4, _context())
+        facts = game._payoff_selected_facts(payoff, _context())
 
-        self.assertIn("ruined_temple_bones", {row["id"] for row in facts})
+        self.assertEqual(payoff["binding"]["opportunity_id"], "ruined_temple_bones")
+        self.assertEqual(payoff["binding"]["reward_id"], "yin_qi_jue")
+        self.assertEqual({row["id"] for row in facts}, {"ruined_temple_bones", "yin_qi_jue"})
+
+    def test_payoff_with_invented_reward_is_rejected(self):
+        payoff, last = game._reconcile_payoff_state({}, {
+            "desc": "通过「破庙道人遗骨」获得「太古飞仙经」",
+            "trigger": "检查遗骨",
+        }, 4, _context())
+
+        self.assertIsNone(payoff)
+        self.assertIsNone(last)
+
+    def test_previously_bound_opportunity_cannot_be_reassigned(self):
+        context = _context()
+        context["existing_reward_bindings"] = [{
+            "opportunity_id": "ruined_temple_bones",
+            "reward_kind": "art",
+            "reward_id": "another_art",
+            "status": "triggered",
+        }]
+        payoff, _ = game._reconcile_payoff_state({}, {
+            "desc": "通过「破庙道人遗骨」获得「引气诀」",
+            "trigger": "检查遗骨",
+        }, 6, context)
+
+        self.assertIsNone(payoff)
 
     def test_planner_timeout_uses_dynamic_fallback(self):
         async def slow_complete(*args, **kwargs):
@@ -148,10 +182,17 @@ class DirectorPlanTests(unittest.TestCase):
                 "current_plan": None,
                 "payoff_state": {
                     "id": "payoff-1",
-                    "desc": "获得破庙道人留下的入道机缘",
+                    "desc": "通过「破庙道人遗骨」获得「引气诀」",
                     "trigger": "检查石像后的遗骨",
                     "status": "pending",
                     "created_turn": 1,
+                    "binding": {
+                        "opportunity_id": "ruined_temple_bones",
+                        "opportunity_name": "破庙道人遗骨",
+                        "reward_kind": "art",
+                        "reward_id": "yin_qi_jue",
+                        "reward_name": "引气诀",
+                    },
                 },
             },
         }
@@ -177,6 +218,33 @@ class DirectorPlanTests(unittest.TestCase):
         })
 
         self.assertIsNone(state["payoff_state"])
+
+    def test_unbound_long_lived_payoff_is_retired_on_migration(self):
+        state = game._dynamic_director_state({
+            "event": None,
+            "current_plan": None,
+            "payoff_state": {
+                "id": "legacy-payoff",
+                "desc": "获得某种未知机缘",
+                "trigger": "检查旧物",
+                "status": "pending",
+            },
+        })
+
+        self.assertIsNone(state["payoff_state"])
+
+    def test_invalid_replacement_cannot_discard_pending_bound_payoff(self):
+        previous, _ = game._reconcile_payoff_state({}, {
+            "desc": "通过「破庙道人遗骨」获得「引气诀」",
+            "trigger": "检查遗骨",
+        }, 4, _context())
+        current, last = game._reconcile_payoff_state({"payoff_state": previous}, {
+            "desc": "通过「破庙道人遗骨」获得「虚构仙经」",
+            "trigger": "检查遗骨",
+        }, 5, _context())
+
+        self.assertEqual(current["id"], previous["id"])
+        self.assertIsNone(last)
 
     def test_director_dynamic_message_puts_player_action_last(self):
         state = {
@@ -227,8 +295,8 @@ class DirectorPlanTests(unittest.TestCase):
             if request_type == "director_payoff":
                 payoff_started.set()
                 return json.dumps({
-                    "desc": "获得山匪秘藏的淬体灵药",
-                    "trigger": "玩家亲自攻入山匪藏宝洞并打开石匣",
+                    "desc": "通过「破庙道人遗骨」获得「引气诀」",
+                    "trigger": "玩家亲自检查破庙道人遗骨中的旧物",
                 }, ensure_ascii=False)
             self.assertEqual(request_type, "director_pacing")
             return json.dumps({
@@ -249,7 +317,9 @@ class DirectorPlanTests(unittest.TestCase):
         self.assertEqual(set(calls[:2]), {"director_event", "director_payoff"})
         self.assertEqual(calls[2], "director_pacing")
         self.assertEqual(planned["current_plan"]["turn_objective"], "本轮完成一次明确攻防")
-        self.assertEqual(planned["current_plan"]["payoff"]["desc"], "获得山匪秘藏的淬体灵药")
+        self.assertEqual(
+            planned["current_plan"]["payoff"]["binding"]["reward_id"], "yin_qi_jue"
+        )
         self.assertNotIn("current_goal", planned["current_plan"])
 
     def test_pacing_receives_backend_forced_resolution(self):
@@ -333,10 +403,17 @@ class DirectorPlanTests(unittest.TestCase):
         sid = "audit-payoff-test"
         payoff = {
             "id": "payoff-1",
-            "desc": "获得破庙道人留下的入道机缘",
+            "desc": "通过「破庙道人遗骨」获得「引气诀」",
             "trigger": "检查石像后的遗骨",
             "status": "pending",
             "created_turn": 3,
+            "binding": {
+                "opportunity_id": "ruined_temple_bones",
+                "opportunity_name": "破庙道人遗骨",
+                "reward_kind": "art",
+                "reward_id": "yin_qi_jue",
+                "reward_name": "引气诀",
+            },
         }
         plan = {
             "plan_id": "plan-4",
@@ -365,7 +442,7 @@ class DirectorPlanTests(unittest.TestCase):
         try:
             with patch.object(game, "complete_chat", fake_complete), patch.object(
                 game.store, "save_director_state"
-            ):
+            ), patch.object(game.store, "save_opportunity_reward_binding"):
                 asyncio.run(game._run_director_audit(
                     sid, "检查遗骨", "主角检查遗骨后取得入道机缘。", 4, plan
                 ))

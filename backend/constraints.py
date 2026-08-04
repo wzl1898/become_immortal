@@ -171,6 +171,24 @@ def director_context(session_id: str, action: str) -> dict:
                 "knowledge_status": known.get("status") if known else "unknown",
             })
 
+    reward_candidates = [{
+        "id": row["id"],
+        "name": row["name"],
+        "reward_kind": "art",
+        "rank": row["rank"],
+        "category": row["category"],
+        "summary": row["summary"],
+        "source_location_id": row.get("source_location_id"),
+        "source_label": row["source_label"],
+    } for row in snap["arts"]]
+    opportunity_names = {row["id"]: row["name"] for row in snap["opportunities"]}
+    reward_names = {row["id"]: row["name"] for row in reward_candidates}
+    existing_reward_bindings = [{
+        **row,
+        "opportunity_name": opportunity_names.get(row["opportunity_id"], ""),
+        "reward_name": reward_names.get(row["reward_id"], ""),
+    } for row in store.list_opportunity_reward_bindings(session_id)]
+
     opportunities = []
     seen_opportunities = set()
     for row in local["opportunities"] + matches.get("opportunity", []):
@@ -217,6 +235,7 @@ def director_context(session_id: str, action: str) -> dict:
     allowed_reference_ids = {row["id"] for row in facts}
     allowed_reference_ids.update(row["id"] for row in arts)
     allowed_reference_ids.update(row["id"] for row in opportunities)
+    allowed_reference_ids.update(row["id"] for row in reward_candidates)
     return {
         "location": {
             "region_id": snap["location"]["region_id"],
@@ -237,6 +256,8 @@ def director_context(session_id: str, action: str) -> dict:
         "facts": facts,
         "arts": arts,
         "opportunities": opportunities,
+        "reward_candidates": reward_candidates,
+        "existing_reward_bindings": existing_reward_bindings,
         "allowed_reference_ids": sorted(allowed_reference_ids),
         "forbidden_reveals": [
             "切片之外的地点、路线、势力、功法、机缘和秘境",
@@ -250,10 +271,15 @@ def selected_director_facts(context: dict, reference_ids: list[str]) -> list[dic
     """Resolve validated director references to the minimal GM-visible facts."""
     wanted = {str(ref) for ref in reference_ids}
     selected = [row for row in context.get("facts", []) if row.get("id") in wanted]
+    reward_rows = {
+        row["id"]: row
+        for row in (context.get("arts", []) + context.get("reward_candidates", []))
+        if row.get("id")
+    }
     selected.extend(
         {"id": row["id"], "kind": "art", "text": f"{row['name']}：{row['summary']}"}
-        for row in context.get("arts", [])
-        if row.get("id") in wanted
+        for row in reward_rows.values()
+        if row["id"] in wanted
     )
     selected.extend(
         {"id": row["id"], "kind": "opportunity", "text": f"{row['name']}：{row['clue']}"}

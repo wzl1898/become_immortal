@@ -762,6 +762,12 @@ function renderDynamicDirector(state) {
     if (plan.payoff?.desc) {
       card.appendChild(field("待触发爽点", plan.payoff.desc, "desc"));
       card.appendChild(field("触发条件", plan.payoff.trigger, "trigger"));
+      if (plan.payoff.binding) {
+        card.appendChild(field(
+          "动态关联",
+          `${plan.payoff.binding.opportunity_name || "—"} → ${plan.payoff.binding.reward_name || "—"}`,
+        ));
+      }
     } else if (plan.payoff) {
       // 兼容拆分前保存的即时爽点结构。
       card.appendChild(field("历史爽点", `[${plan.payoff.type || "—"}] ${plan.payoff.outcome || "—"}`, "desc"));

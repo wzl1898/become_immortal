@@ -772,6 +772,12 @@ def commit(session_id: str, user_content: str | None, assistant_content: str) ->
         store.save_character_state(session_id, character_state)
     store.save_inventory(session_id, state["inventory"])
     store.save_director_state(session_id, state.get("director_state") or {})
+    store.save_opportunity_reward_binding(
+        session_id, (state.get("director_state") or {}).get("payoff_state")
+    )
+    store.save_opportunity_reward_binding(
+        session_id, (state.get("director_state") or {}).get("last_payoff")
+    )
     _schedule_memory_extraction(session_id, user_content, assistant_content, state["turns"])
     _schedule_director_audit(session_id, user_content, assistant_content, state["turns"])
 
@@ -1027,7 +1033,9 @@ def _dynamic_director_state(raw: dict | None) -> dict:
         # Old immediate payoff objects used type/outcome/proof and must not be
         # mistaken for the new long-lived desc/trigger contract.
         payoff = normalized.get("payoff_state")
-        normalized["payoff_state"] = payoff if _is_maintained_payoff(payoff) else None
+        normalized["payoff_state"] = (
+            payoff if _is_maintained_payoff(payoff) and _has_payoff_binding(payoff) else None
+        )
         normalized.setdefault("last_payoff", None)
         return normalized
     return {
@@ -1080,7 +1088,7 @@ async def _plan_director_turn(
         advance_scene=False,
     )
     payoff_state, last_payoff = _reconcile_payoff_state(
-        prev, payoff_result, state["turns"] + 1
+        prev, payoff_result, state["turns"] + 1, world_context
     )
     planned["payoff_state"] = payoff_state
     planned["last_payoff"] = last_payoff
@@ -1319,6 +1327,16 @@ def _is_maintained_payoff(value) -> bool:
     )
 
 
+def _has_payoff_binding(value) -> bool:
+    binding = value.get("binding") if isinstance(value, dict) else None
+    return bool(
+        isinstance(binding, dict)
+        and _clean_text(binding.get("opportunity_id"), 120)
+        and _clean_text(binding.get("reward_id"), 120)
+        and binding.get("reward_kind") == "art"
+    )
+
+
 def _payoff_text(value: dict | None) -> dict | None:
     if not _is_maintained_payoff(value):
         return None
@@ -1328,14 +1346,53 @@ def _payoff_text(value: dict | None) -> dict | None:
     }
 
 
-def _reconcile_payoff_state(prev: dict, result: dict, turn: int) -> tuple[dict | None, dict | None]:
+def _resolve_payoff_binding(result: dict, world_context: dict) -> dict | None:
+    candidate = _payoff_text(result)
+    if candidate is None:
+        return None
+    desc = candidate["desc"]
+    opportunities = [
+        row for row in world_context.get("opportunities", [])
+        if _clean_text(row.get("name"), 120) in desc
+    ]
+    rewards = [
+        row for row in world_context.get("reward_candidates", [])
+        if _clean_text(row.get("name"), 120) in desc
+    ]
+    if len(opportunities) != 1 or len(rewards) != 1:
+        return None
+    opportunity = opportunities[0]
+    reward = rewards[0]
+    if any(
+        row.get("opportunity_id") == opportunity["id"]
+        for row in world_context.get("existing_reward_bindings", [])
+    ):
+        return None
+    return {
+        "opportunity_id": str(opportunity["id"]),
+        "opportunity_name": _clean_text(opportunity["name"], 120),
+        "reward_kind": "art",
+        "reward_id": str(reward["id"]),
+        "reward_name": _clean_text(reward["name"], 120),
+    }
+
+
+def _reconcile_payoff_state(
+    prev: dict,
+    result: dict,
+    turn: int,
+    world_context: dict | None = None,
+) -> tuple[dict | None, dict | None]:
     previous = prev.get("payoff_state") if _is_maintained_payoff(prev.get("payoff_state")) else None
     candidate = _payoff_text(result)
+    binding = _resolve_payoff_binding(result, world_context) if world_context is not None else None
     last_payoff = prev.get("last_payoff") if isinstance(prev.get("last_payoff"), dict) else None
 
     if previous and previous.get("status", "pending") == "pending":
         same = candidate and all(candidate[key] == previous.get(key) for key in ("desc", "trigger"))
         if same or candidate is None:
+            return previous, last_payoff
+        if world_context is not None and binding is None:
             return previous, last_payoff
         last_payoff = {
             **previous,
@@ -1348,27 +1405,25 @@ def _reconcile_payoff_state(prev: dict, result: dict, turn: int) -> tuple[dict |
         if same or candidate is None:
             return previous, last_payoff
 
-    if candidate is None:
+    if candidate is None or (world_context is not None and binding is None):
         return None, last_payoff
-    return {
+    payoff = {
         **candidate,
         "id": uuid.uuid4().hex,
         "status": "pending",
         "created_turn": turn,
-    }, last_payoff
+    }
+    if binding is not None:
+        payoff["binding"] = binding
+    return payoff, last_payoff
 
 
 def _payoff_selected_facts(payoff: dict | None, world_context: dict) -> list[dict]:
-    """Bind the two-field payoff text to exact fixed-world names."""
+    """Expose only the opportunity and reward selected by the dynamic binding."""
     if not _is_maintained_payoff(payoff):
         return []
-    text = f"{payoff.get('desc', '')}\n{payoff.get('trigger', '')}"
-    reference_ids = []
-    for kind, prefix in (("arts", "art"), ("opportunities", "opportunity")):
-        for row in world_context.get(kind, []):
-            name = _clean_text(row.get("name"), 120)
-            if name and name in text:
-                reference_ids.extend((str(row.get("id")), f"{prefix}:{row.get('id')}"))
+    binding = payoff.get("binding") if _has_payoff_binding(payoff) else {}
+    reference_ids = [binding.get("opportunity_id"), binding.get("reward_id")]
     return constraints.selected_director_facts(world_context, reference_ids)
 
 
@@ -1562,6 +1617,11 @@ def _render_director_plan(state: dict, world_context: dict) -> str:
             f"触发条件：{payoff.get('trigger')}",
             "爽点约束：仅当玩家本轮行动明确满足触发条件时才可兑现；否则禁止提前给予或强推玩家触发。",
         ])
+        binding = payoff.get("binding") if _has_payoff_binding(payoff) else {}
+        if binding:
+            lines.append(
+                f"动态机缘关联：{binding.get('opportunity_name')} → {binding.get('reward_name')}"
+            )
     if plan.get("forced_reasons"):
         lines.append("后端强制：" + "；".join(plan["forced_reasons"]))
     if plan.get("beats"):
@@ -1682,6 +1742,7 @@ async def _run_director_audit(
                 current["payoff"] = triggered
         state["director_state"] = director
         store.save_director_state(session_id, director)
+        store.save_opportunity_reward_binding(session_id, director.get("payoff_state"))
     except Exception:  # noqa: BLE001
         _LOG.exception("director audit failed for session %s turn %s", session_id, turn)
 
