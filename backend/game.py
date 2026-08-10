@@ -25,10 +25,13 @@ import store
 from llm import complete_chat, config_from_env
 from prompts import (
     DIRECTOR_AUDIT_SYSTEM_PROMPT,
+    DIRECTOR_CAUSAL_SYSTEM_PROMPT,
+    DIRECTOR_COGNITION_SYSTEM_PROMPT,
     DIRECTOR_EVENT_SYSTEM_PROMPT,
     DIRECTOR_HOOK_SYSTEM_PROMPT,
     DIRECTOR_PACING_SYSTEM_PROMPT,
     DIRECTOR_PAYOFF_SYSTEM_PROMPT,
+    DIRECTOR_SKELETON_SYSTEM_PROMPT,
     DIRECTOR_SYSTEM_PROMPT,
     INQUIRY_SYSTEM_PROMPT,
     MEMORY_EXTRACT_SYSTEM_PROMPT,
@@ -89,10 +92,17 @@ DIRECTOR_PAYOFF_MAX_TOKENS = int(os.getenv(
 DIRECTOR_HOOK_MAX_TOKENS = int(os.getenv(
     "DIRECTOR_HOOK_MAX_TOKENS", _DIRECTOR_LEGACY_MAX_TOKENS or "220"
 ))
+DIRECTOR_CAUSAL_MAX_TOKENS = int(os.getenv("DIRECTOR_CAUSAL_MAX_TOKENS", "1200"))
+DIRECTOR_COGNITION_MAX_TOKENS = int(os.getenv("DIRECTOR_COGNITION_MAX_TOKENS", "900"))
 DIRECTOR_PACING_MAX_TOKENS = int(os.getenv(
     "DIRECTOR_PACING_MAX_TOKENS", _DIRECTOR_LEGACY_MAX_TOKENS or "450"
 ))
+DIRECTOR_SKELETON_MAX_TOKENS = int(os.getenv("DIRECTOR_SKELETON_MAX_TOKENS", "600"))
 DIRECTOR_LLM_CONFIG = config_from_env("DIRECTOR_LLM")
+
+_CAUSAL_VAGUE_RE = re.compile(
+    r"(?:他们|她们|(?<!其)他|她|故人|老者|少年|某人|某物|某件事|此物|那个人|背后势力|真正秘密)"
+)
 
 # ---- 旧导演状态机常量（只用于读取历史状态，新的预规划链路不再维护）----
 # 连续偏离多少轮就弃掉当前爽点、改跟玩家的路（实测微调）。
@@ -173,25 +183,44 @@ def get_transcript(session_id: str) -> list[dict] | None:
     return None if state is None else state["transcript"]
 
 
-def messages_for_opening(session_id: str) -> list[dict]:
-    """构造用于生成开场的消息（不落库，落库由 commit 完成）。
-
-    开场一般无既往世界记忆/物件，但读档到空局再开场时可能已有世界记忆，一并注入。
-    """
+async def prepare_opening(session_id: str) -> list[dict]:
+    """Initialize the first event models, then build opening narrative messages."""
     state = _get(session_id)
-    inject = _injection(state, None)
-    world_constraints = constraints.opening_constraints(session_id)
-    messages = list(state["messages"])
-    if state.get("stage_summary"):
-        messages.insert(1, {
-            "role": "system",
-            "content": "【既往阶段摘要】\n" + state["stage_summary"],
-        })
-    if world_constraints:
-        messages.append({"role": "system", "content": world_constraints.rstrip()})
-    content = f"{inject}{OPENING_PROMPT}"
-    messages.append({"role": "user", "content": content})
-    return messages
+    if state is None:
+        raise ValueError("存档不存在")
+    state["_pending_director_prev"] = copy.deepcopy(state.get("director_state") or {})
+    try:
+        world_context = constraints.director_context(session_id, "")
+        recalled_memories = _compact_memories(state.get("world_memory") or [])
+        foundation = await _ensure_event_foundation(
+            state, "（新存档开场）", world_context, recalled_memories, opening=True
+        )
+        state["director_state"] = foundation
+        director_state = await _plan_director_turn(
+            state, "（新存档开场，玩家尚未行动）", world_context, recalled_memories,
+            event_just_created=True,
+        )
+        state["director_state"] = director_state
+        inject = _injection(state, None)
+        world_constraints = constraints.opening_constraints(session_id)
+        messages = list(state["messages"])
+        if state.get("stage_summary"):
+            messages.insert(1, {
+                "role": "system",
+                "content": "【既往阶段摘要】\n" + state["stage_summary"],
+            })
+        parts = [
+            world_constraints.rstrip(),
+            inject.rstrip(),
+            _render_event_models(director_state).rstrip(),
+            _render_director_plan(director_state, world_context).rstrip(),
+            OPENING_PROMPT,
+        ]
+        messages.append({"role": "user", "content": "\n\n".join(p for p in parts if p)})
+        return messages
+    except Exception:
+        rollback_prepared_action(session_id)
+        raise
 
 
 _STATUS_RE = re.compile(r"《状态》(.*?)《/状态》", re.S)
@@ -663,31 +692,46 @@ async def prepare_action(session_id: str, action: str) -> list[dict]:
     history. Only selected objective facts are exposed to the GM.
     """
     state = _get(session_id)
-    world_constraints = constraints.action_constraints(session_id, action)
-    world_context = constraints.director_context(session_id, action)
-    previous = _dynamic_director_state(state.get("director_state"))
-    event_core = ((previous.get("event") or {}).get("core") or "").strip()
-    latest_scene = _latest_scene(state.get("transcript") or [])
-    recall_query = "\n\n".join(part for part in (event_core, latest_scene, action) if part)
-    recalled_memories = _recall_world_memory(state, recall_query)
-    director_state = await _plan_director_turn(state, action, world_context, recalled_memories)
     state["_pending_director_prev"] = copy.deepcopy(state.get("director_state") or {})
-    state["director_state"] = director_state
-    selected_memories = (director_state.get("current_plan") or {}).get("selected_memories") or []
-    inject = _injection(state, action, selected_memories)
-    director_message = _render_director_plan(director_state, world_context)
-    parts = [world_constraints.rstrip(), inject.rstrip(), director_message.rstrip()]
-    parts = [part for part in parts if part]
-    parts.append(f"【玩家原始行动】\n{action}")
-    content = "\n\n".join(parts)
-    messages = list(state["messages"])
-    if state.get("stage_summary"):
-        messages.insert(1, {
-            "role": "system",
-            "content": "【既往阶段摘要】\n" + state["stage_summary"],
-        })
-    messages.append({"role": "user", "content": content})
-    return messages
+    try:
+        world_constraints = constraints.action_constraints(session_id, action)
+        world_context = constraints.director_context(session_id, action)
+        previous = _dynamic_director_state(state.get("director_state"))
+        event_core = ((previous.get("event") or {}).get("core") or "").strip()
+        latest_scene = _latest_scene(state.get("transcript") or [])
+        recall_query = "\n\n".join(part for part in (event_core, latest_scene, action) if part)
+        recalled_memories = _recall_world_memory(state, recall_query)
+        event_just_created = _event_needs_foundation(previous)
+        foundation = await _ensure_event_foundation(
+            state, action, world_context, _compact_memories(recalled_memories)
+        )
+        state["director_state"] = foundation
+        director_state = await _plan_director_turn(
+            state, action, world_context, recalled_memories,
+            event_just_created=event_just_created,
+        )
+        state["director_state"] = director_state
+        selected_memories = (director_state.get("current_plan") or {}).get("selected_memories") or []
+        inject = _injection(state, action, selected_memories)
+        parts = [
+            world_constraints.rstrip(),
+            inject.rstrip(),
+            _render_event_models(director_state).rstrip(),
+            _render_director_plan(director_state, world_context).rstrip(),
+            f"【玩家原始行动】\n{action}",
+        ]
+        content = "\n\n".join(part for part in parts if part)
+        messages = list(state["messages"])
+        if state.get("stage_summary"):
+            messages.insert(1, {
+                "role": "system",
+                "content": "【既往阶段摘要】\n" + state["stage_summary"],
+            })
+        messages.append({"role": "user", "content": content})
+        return messages
+    except Exception:
+        rollback_prepared_action(session_id)
+        raise
 
 
 def _recent_scene(transcript: list[dict]) -> str:
@@ -1068,41 +1112,37 @@ async def _plan_director_turn(
     action: str,
     world_context: dict,
     recalled_memories: list[dict] | None = None,
+    *,
+    event_just_created: bool = False,
 ) -> dict:
     prev = _dynamic_director_state(state.get("director_state"))
     compact_memories = _compact_memories(recalled_memories or [])
-    event_messages, hook_messages, payoff_messages = _director_parallel_messages(
-        state, action, world_context, prev, compact_memories
-    )
-    event_call, hook_call, payoff_call = await asyncio.gather(
+    payoff_call, pacing_call = await asyncio.gather(
         _call_director_agent(
-            event_messages, "director_event", DIRECTOR_EVENT_MAX_TOKENS, state.get("session_id")
+            _director_payoff_messages(state, action, world_context, prev, compact_memories),
+            "director_payoff", DIRECTOR_PAYOFF_MAX_TOKENS, state.get("session_id")
         ),
         _call_director_agent(
-            hook_messages, "director_hook", DIRECTOR_HOOK_MAX_TOKENS, state.get("session_id")
-        ),
-        _call_director_agent(
-            payoff_messages, "director_payoff", DIRECTOR_PAYOFF_MAX_TOKENS, state.get("session_id")
+            _director_pacing_messages(state, action, prev, event_just_created),
+            "director_pacing", DIRECTOR_PACING_MAX_TOKENS, state.get("session_id")
         ),
     )
-    event_result, event_meta = event_call
-    hook_result, hook_meta = hook_call
     payoff_result, payoff_meta = payoff_call
-    if event_result is None:
-        event_result = _fallback_director_event(prev, action)
+    pacing_result, pacing_meta = pacing_call
     if payoff_result is None:
         payoff_result = _fallback_director_payoff(prev)
-    if hook_result is None:
-        hook_result = _fallback_director_hook(prev)
+    if pacing_result is None:
+        pacing_result = _fallback_director_pacing(prev, action, event_just_created)
 
     planned = _apply_director_plan(
         prev,
-        event_result,
+        pacing_result,
         action,
         world_context,
         state["turns"] + 1,
         memory_candidates=compact_memories,
         advance_scene=False,
+        event_just_created=event_just_created,
     )
     payoff_state, last_payoff = _reconcile_payoff_state(
         prev, payoff_result, state["turns"] + 1, world_context
@@ -1115,39 +1155,197 @@ async def _plan_director_turn(
     planned["current_plan"]["selected_facts"] = _payoff_selected_facts(
         planned["current_plan"]["payoff"], world_context
     )
-    hook_state, last_hook = _reconcile_hook_state(
-        prev,
-        hook_result,
-        bool(planned["current_plan"].get("hook_engaged")),
-        state["turns"] + 1,
-    )
+    hook_state = prev.get("hook_state") if _is_maintained_hook(prev.get("hook_state")) else None
+    if planned["current_plan"].get("event_action") == "start" and hook_state:
+        planned["last_hook"] = {
+            **hook_state, "status": "engaged", "engaged_turn": state["turns"] + 1,
+        }
+        hook_state = None
     planned["hook_state"] = hook_state
-    planned["last_hook"] = last_hook
     planned["current_plan"]["hook"] = dict(hook_state) if hook_state else None
-    pacing_result, pacing_meta = await _call_director_agent(
-        _director_pacing_messages(state, action, planned),
-        "director_pacing",
-        DIRECTOR_PACING_MAX_TOKENS,
+
+    skeleton_result, skeleton_meta = await _call_director_agent(
+        _director_skeleton_messages(state, action, planned),
+        "director_skeleton",
+        DIRECTOR_SKELETON_MAX_TOKENS,
         state.get("session_id"),
     )
-    if pacing_result is None:
-        pacing_result = _fallback_director_pacing(planned, action)
-    planned = _apply_director_pacing(planned, pacing_result, prev)
+    if skeleton_result is None:
+        skeleton_result = _fallback_director_skeleton(planned, action)
+    planned = _apply_director_pacing(planned, skeleton_result, prev)
+    foundation_outputs = {
+        key: value for key, value in (prev.get("agent_outputs") or {}).items()
+        if key in {"event", "causal", "cognition", "hook"}
+    }
     metas = {
-        "event": {**event_meta, "output": event_result},
-        "hook": {**hook_meta, "output": hook_result},
+        **foundation_outputs,
         "payoff": {**payoff_meta, "output": payoff_result},
         "pacing": {**pacing_meta, "output": pacing_result},
+        "director": {**skeleton_meta, "output": skeleton_result},
     }
     fallback_agents = [name for name, meta in metas.items() if meta["source"] == "fallback"]
     planned["planner"] = {
-        "source": "fallback" if len(fallback_agents) == 4 else "mixed" if fallback_agents else "llm",
+        "source": "fallback" if len(fallback_agents) == len(metas) else "mixed" if fallback_agents else "llm",
         "model": DIRECTOR_LLM_CONFIG.model,
         "fallback_reason": ",".join(fallback_agents),
         "agents": metas,
     }
     planned["agent_outputs"] = metas
     return planned
+
+
+def _event_requires_new(prev: dict) -> bool:
+    event = prev.get("event") if isinstance(prev.get("event"), dict) else None
+    return not event or event.get("status") in {"resolved", "abandoned"}
+
+
+def _event_needs_foundation(prev: dict) -> bool:
+    event = prev.get("event") if isinstance(prev.get("event"), dict) else None
+    return bool(
+        _event_requires_new(prev)
+        or not _clean_text((event or {}).get("causal_model"), 12000)
+        or not _clean_text((event or {}).get("cognition_model"), 12000)
+    )
+
+
+async def _ensure_event_foundation(
+    state: dict,
+    action: str,
+    world_context: dict,
+    memories: list[dict],
+    *,
+    opening: bool = False,
+) -> dict:
+    prev = _dynamic_director_state(state.get("director_state"))
+    if not _event_needs_foundation(prev):
+        return prev
+
+    existing = prev.get("event") if isinstance(prev.get("event"), dict) else None
+    reuse_existing = bool(existing and existing.get("status") not in {"resolved", "abandoned"})
+    character = {
+        key: value for key, value in (state.get("character_state") or {}).items()
+        if key != "updated_at"
+    }
+    world_layer = {"world_slice": world_context, "protagonist_memories": memories}
+    base_context = "\n\n".join([
+        "【稳定世界与记忆】\n" + _stable_json(world_layer),
+        "【主角状态】\n" + _stable_json(character),
+        "【最近剧情】\n" + (_recent_scene(state.get("transcript") or []) or "（新存档尚无正文）"),
+        "【当前输入】\n" + action,
+    ])
+
+    if reuse_existing:
+        event_result = {
+            "title": existing.get("title") or existing.get("core") or "当前事件",
+            "core": existing.get("core") or "当前事件",
+            "premise": existing.get("premise") or existing.get("core") or "当前事件",
+        }
+        event_meta = {"source": "existing", "model": "stored", "fallback_reason": ""}
+    else:
+        event_result, event_meta = await _call_director_agent(
+            [
+                {"role": "system", "content": DIRECTOR_EVENT_SYSTEM_PROMPT},
+                {"role": "user", "content": base_context},
+            ],
+            "director_event", DIRECTOR_EVENT_MAX_TOKENS, state.get("session_id"),
+        )
+        if event_result is None:
+            event_result = _fallback_event_creation(world_context)
+    event_seed = _sanitize_event_creation(event_result, world_context)
+
+    causal_model = _clean_markdown((existing or {}).get("causal_model"))
+    if causal_model:
+        causal_meta = {"source": "existing", "model": "stored", "fallback_reason": ""}
+    else:
+        causal_model, causal_meta = await _call_director_text_agent(
+            [
+                {"role": "system", "content": DIRECTOR_CAUSAL_SYSTEM_PROMPT},
+                {"role": "user", "content": "【事件】\n" + _stable_json(event_seed) + "\n\n" + base_context},
+            ],
+            "director_causal", DIRECTOR_CAUSAL_MAX_TOKENS, state.get("session_id"),
+            reject_vague=True,
+        )
+        if not causal_model:
+            causal_model = _fallback_causal_model(event_seed, world_context)
+
+    cognition_model = _clean_markdown((existing or {}).get("cognition_model"))
+    if cognition_model:
+        cognition_meta = {"source": "existing", "model": "stored", "fallback_reason": ""}
+    else:
+        cognition_model, cognition_meta = await _call_director_text_agent(
+            [
+                {"role": "system", "content": DIRECTOR_COGNITION_SYSTEM_PROMPT},
+                {"role": "user", "content": (
+                    "【幕后因果模型】\n" + causal_model + "\n\n" + base_context
+                    + f"\n\n【是否为新存档开场】\n{opening}"
+                )},
+            ],
+            "director_cognition", DIRECTOR_COGNITION_MAX_TOKENS, state.get("session_id"),
+            reject_vague=True,
+        )
+        if not cognition_model:
+            cognition_model = _fallback_cognition_model(event_seed, world_context)
+
+    event = {
+        **(existing if reuse_existing else {}),
+        "id": existing.get("id") if reuse_existing else uuid.uuid4().hex,
+        "title": event_seed["title"],
+        "core": event_seed["core"],
+        "premise": event_seed["premise"],
+        "status": existing.get("status") if reuse_existing else "offered",
+        "created_turn": (
+            int(existing.get("created_turn") or existing.get("start_turn") or state["turns"] + 1)
+            if reuse_existing else state["turns"] + 1
+        ),
+        "turns": int(existing.get("turns") or 0) if reuse_existing else 0,
+        "max_turns": DIRECTOR_EVENT_MAX_TURNS,
+        "causal_model": causal_model,
+        "cognition_model": cognition_model,
+    }
+
+    hook_state = prev.get("hook_state") if _is_maintained_hook(prev.get("hook_state")) else None
+    hook_meta = {"source": "existing", "model": "stored", "fallback_reason": ""}
+    hook_result = _hook_text(hook_state) or {"desc": "", "goal": ""}
+    if event.get("status") == "offered" and hook_state is None:
+        hook_result, hook_meta = await _call_director_agent(
+            [
+                {"role": "system", "content": DIRECTOR_HOOK_SYSTEM_PROMPT},
+                {"role": "user", "content": (
+                    "【事件】\n" + _stable_json(event_seed)
+                    + "\n\n【幕后因果模型】\n" + causal_model
+                    + "\n\n【主角认知模型】\n" + cognition_model
+                )},
+            ],
+            "director_hook", DIRECTOR_HOOK_MAX_TOKENS, state.get("session_id"),
+        )
+        if hook_result is None:
+            hook_result = _fallback_hook_creation(event_seed, world_context)
+        hook_text = _hook_text(hook_result)
+        if hook_text:
+            hook_state = {
+                **hook_text,
+                "id": uuid.uuid4().hex,
+                "event_id": event["id"],
+                "status": "offered",
+                "created_turn": state["turns"] + 1,
+            }
+
+    outputs = {
+        "event": {**event_meta, "output": event_result},
+        "causal": {**causal_meta, "output": causal_model},
+        "cognition": {**cognition_meta, "output": cognition_model},
+    }
+    if hook_state:
+        outputs["hook"] = {**hook_meta, "output": hook_result}
+    return {
+        **prev,
+        "event": event,
+        "intent": None if not reuse_existing else prev.get("intent"),
+        "current_plan": None if not reuse_existing else prev.get("current_plan"),
+        "hook_state": hook_state,
+        "agent_outputs": outputs,
+        "needs_repair": False,
+    }
 
 
 async def _call_director_agent(
@@ -1170,6 +1368,48 @@ async def _call_director_agent(
         result = _extract_json_object(raw)
         if result is None:
             reason = "invalid_json"
+    except asyncio.TimeoutError:
+        reason = "timeout"
+        _LOG.warning("%s timed out after %ss; using fallback", request_type, DIRECTOR_PLANNER_TIMEOUT_SECONDS)
+    except Exception as exc:  # noqa: BLE001
+        reason = type(exc).__name__
+        _LOG.exception("%s failed", request_type)
+    return result, {
+        "source": "llm" if result is not None else "fallback",
+        "model": DIRECTOR_LLM_CONFIG.model if result is not None else "local",
+        "fallback_reason": reason,
+    }
+
+
+async def _call_director_text_agent(
+    messages: list[dict],
+    request_type: str,
+    max_tokens: int,
+    session_id: str | None,
+    *,
+    reject_vague: bool = False,
+) -> tuple[str | None, dict]:
+    result = None
+    reason = ""
+    try:
+        raw = await asyncio.wait_for(
+            complete_chat(
+                messages,
+                temperature=0.2,
+                max_tokens=max_tokens,
+                config=DIRECTOR_LLM_CONFIG,
+                request_type=request_type,
+                session_id=session_id,
+            ),
+            timeout=DIRECTOR_PLANNER_TIMEOUT_SECONDS,
+        )
+        result = _clean_markdown(raw)
+        if not result:
+            reason = "empty_markdown"
+            result = None
+        elif reject_vague and _CAUSAL_VAGUE_RE.search(result):
+            reason = "vague_reference"
+            result = None
     except asyncio.TimeoutError:
         reason = "timeout"
         _LOG.warning("%s timed out after %ss; using fallback", request_type, DIRECTOR_PLANNER_TIMEOUT_SECONDS)
@@ -1213,13 +1453,13 @@ def _compact_director_state(prev: dict) -> dict:
     }
 
 
-def _director_parallel_messages(
+def _director_payoff_messages(
     state: dict,
     action: str,
     world_context: dict,
     prev: dict,
     memories: list[dict],
-) -> tuple[list[dict], list[dict], list[dict]]:
+) -> list[dict]:
     character = {
         key: value for key, value in (state.get("character_state") or {}).items()
         if key != "updated_at"
@@ -1229,14 +1469,6 @@ def _director_parallel_messages(
         "world_slice": world_context,
         "protagonist_memories": memories,
     }
-    turn_content = "\n\n".join([
-        f"【回合】\n{state['turns'] + 1}",
-        "【当前事件】\n" + _stable_json(_compact_director_state(prev)),
-        "【上一轮已展示钩子】\n" + _stable_json(prev.get("hook_state")),
-        "【主角状态】\n" + _stable_json(character),
-        "【最近一轮正文】\n" + (_latest_scene(state.get("transcript") or []) or "（暂无）"),
-        "【玩家本轮行动】\n" + action,
-    ])
     payoff_content = "\n\n".join([
         f"【回合】\n{state['turns'] + 1}",
         "【当前待触发爽点】\n" + _stable_json(prev.get("payoff_state")),
@@ -1244,53 +1476,33 @@ def _director_parallel_messages(
         "【最近几轮剧情】\n" + (_recent_scene(state.get("transcript") or []) or "（暂无）"),
         "【玩家本轮行动】\n" + action,
     ])
-    hook_content = "\n\n".join([
-        f"【回合】\n{state['turns'] + 1}",
-        "【当前正式事件】\n" + _stable_json((prev.get("event") or {})),
-        "【上一轮已展示钩子】\n" + _stable_json(prev.get("hook_state")),
-        "【主角状态】\n" + _stable_json(character),
-        "【稳定世界层】\n" + _stable_json(world_layer),
-        "【最近几轮剧情】\n" + (_recent_scene(state.get("transcript") or []) or "（暂无）"),
-        "【玩家本轮行动】\n" + action,
-    ])
-    event_messages = [
-        {"role": "system", "content": DIRECTOR_EVENT_SYSTEM_PROMPT},
-        {"role": "user", "content": turn_content},
-    ]
-    hook_messages = [
-        {"role": "system", "content": DIRECTOR_HOOK_SYSTEM_PROMPT},
-        {"role": "user", "content": hook_content},
-    ]
-    payoff_messages = [
+    return [
         {"role": "system", "content": DIRECTOR_PAYOFF_SYSTEM_PROMPT},
         {"role": "system", "content": "【稳定世界层】\n" + _stable_json(world_layer)},
         {"role": "user", "content": payoff_content},
     ]
-    return event_messages, hook_messages, payoff_messages
 
 
-def _director_pacing_messages(state: dict, action: str, planned: dict) -> list[dict]:
-    plan = planned.get("current_plan") or {}
+def _director_pacing_messages(
+    state: dict,
+    action: str,
+    prev: dict,
+    event_just_created: bool = False,
+) -> list[dict]:
+    event = prev.get("event") or {}
     content = "\n\n".join([
-        "【事件 Agent 结果】\n" + _stable_json({
-            "event": planned.get("event"),
-            "intent": planned.get("intent"),
-            "event_action": plan.get("event_action"),
-            "turn_mode": plan.get("turn_mode"),
-            "route_key": plan.get("route_key"),
-            "forced_reasons": plan.get("forced_reasons"),
+        "【事件】\n" + _stable_json({
+            key: event.get(key)
+            for key in ("id", "title", "core", "status", "turns", "max_turns", "created_turn")
         }),
-        "【爽点 Agent 结果】\n" + _stable_json({
-            "payoff": plan.get("payoff"),
-            "selected_facts": plan.get("selected_facts"),
-        }),
-        "【钩子 Agent 结果】\n" + _stable_json({
-            "hook": plan.get("hook"),
-            "hook_engaged": plan.get("hook_engaged"),
-        }),
+        "【幕后因果模型】\n" + _clean_markdown(event.get("causal_model")),
+        "【主角认知模型】\n" + _clean_markdown(event.get("cognition_model")),
+        "【入口钩子】\n" + _stable_json(prev.get("hook_state")),
+        f"【事件是否本轮刚创建】\n{event_just_created}",
+        "【上一轮状态】\n" + _stable_json(_compact_director_state(prev)),
         "【场景状态】\n" + _stable_json({
-            "scene": planned.get("scene"),
-            "scene_turns": planned.get("scene_turns", 0),
+            "scene": prev.get("scene"),
+            "scene_turns": prev.get("scene_turns", 0),
             "stale_after": DIRECTOR_SCENE_STALE_TURNS,
         }),
         "【最近一轮正文】\n" + (_latest_scene(state.get("transcript") or []) or "（暂无）"),
@@ -1302,12 +1514,50 @@ def _director_pacing_messages(state: dict, action: str, planned: dict) -> list[d
     ]
 
 
-def _fallback_director_event(prev: dict, action: str) -> dict:
-    """Deterministic event decision used when the event Agent is unavailable."""
-    active = (
-        isinstance(prev.get("event"), dict)
-        and prev["event"].get("status") in {"active", "resolving", "abandoning"}
-    )
+def _director_skeleton_messages(state: dict, action: str, planned: dict) -> list[dict]:
+    event = planned.get("event") or {}
+    plan = planned.get("current_plan") or {}
+    content = "\n\n".join([
+        "【事件】\n" + _stable_json({
+            key: event.get(key)
+            for key in ("id", "title", "core", "status", "turns", "max_turns")
+        }),
+        "【幕后因果模型】\n" + _clean_markdown(event.get("causal_model")),
+        "【主角认知模型】\n" + _clean_markdown(event.get("cognition_model")),
+        "【节奏 Agent结果】\n" + _stable_json({
+            key: plan.get(key)
+            for key in (
+                "event_action", "turn_mode", "route_key", "intent", "stage",
+                "progress", "reveal_boundary", "forced_reasons",
+            )
+        }),
+        "【入口钩子】\n" + _stable_json(plan.get("hook")),
+        "【爽点】\n" + _stable_json({
+            "payoff": plan.get("payoff"), "selected_facts": plan.get("selected_facts"),
+        }),
+        "【最近一轮正文】\n" + (_latest_scene(state.get("transcript") or []) or "（暂无）"),
+        "【玩家本轮行动】\n" + action,
+    ])
+    return [
+        {"role": "system", "content": DIRECTOR_SKELETON_SYSTEM_PROMPT},
+        {"role": "user", "content": content},
+    ]
+
+
+def _fallback_event_creation(world_context: dict) -> dict:
+    location = (world_context.get("location") or {}).get("location_name") or "当前地点"
+    return {
+        "title": f"{location}当前事件",
+        "core": f"{location}正在出现一项玩家角色可以观察和介入的现实变化",
+        "premise": f"玩家角色位于{location}，{location}中的既有人员与环境正在产生一项可验证的变化",
+    }
+
+
+def _fallback_director_pacing(
+    prev: dict, action: str, event_just_created: bool = False
+) -> dict:
+    event = prev.get("event") if isinstance(prev.get("event"), dict) else {}
+    status = event.get("status") or "offered"
     avoid = any(word in action for word in (
         "避", "躲", "逃", "撤", "绕开", "不打", "不理", "放弃", "回家", "假装没事",
     ))
@@ -1319,23 +1569,23 @@ def _fallback_director_event(prev: dict, action: str) -> dict:
         and not _negates_any(action, investigate_words)
         and not avoid
     )
-    if not active and not (avoid or fight or investigate):
-        return {
-            "event_action": "none",
-            "event_core": "",
-            "turn_mode": "progress",
-            "route_key": "none",
-            "hook_engaged": False,
-            "intent": {"key": action[:80], "same_as_previous": False},
-        }
     route = "escape" if avoid else "engage" if fight else "investigate"
+    if event_just_created:
+        event_action = "none"
+        route = "none"
+    elif status == "offered":
+        event_action = "none" if avoid else "start"
+    else:
+        event_action = "resolve" if avoid else "continue"
     return {
-        "event_action": "continue" if active else "start",
-        "event_core": (prev.get("event") or {}).get("core") or f"结算玩家行动涉及的直接处境：{action[:60]}",
-        "turn_mode": "progress",
+        "event_action": event_action,
+        "turn_mode": "resolve" if event_action == "resolve" else "setup" if status == "offered" else "progress",
         "route_key": route,
-        "hook_engaged": False,
         "intent": {"key": action[:80], "same_as_previous": False},
+        "stage": "事件入口" if status == "offered" else "事件推进",
+        "progress": "让玩家行动产生一个可验证的直接结果",
+        "reveal_boundary": "只呈现主角认知模型允许确认的信息",
+        "note": "节奏 Agent不可用，已采用保守推进。",
     }
 
 
@@ -1345,13 +1595,7 @@ def _fallback_director_payoff(prev: dict) -> dict:
     return {"desc": payoff.get("desc", ""), "trigger": payoff.get("trigger", "")}
 
 
-def _fallback_director_hook(prev: dict) -> dict:
-    """Preserve an offered hook when the hook Agent is unavailable."""
-    hook = prev.get("hook_state") if _is_maintained_hook(prev.get("hook_state")) else {}
-    return {"desc": hook.get("desc", ""), "goal": hook.get("goal", "")}
-
-
-def _fallback_director_pacing(planned: dict, action: str) -> dict:
+def _fallback_director_skeleton(planned: dict, action: str) -> dict:
     return {
         "turn_objective": f"让玩家行动产生明确进展：{action[:80]}",
         "beats": ["直接落实玩家行动", "给出可以验证的结果或代价"],
@@ -1359,7 +1603,7 @@ def _fallback_director_pacing(planned: dict, action: str) -> dict:
         "must_not": ["只增加模糊感受或新悬念", "生成固定世界库之外的重大设定"],
         "scene": planned.get("scene") or "",
         "scene_change": False,
-        "note": "节奏 Agent 不可用，已采用本地紧凑骨架。",
+        "note": "导演 Agent不可用，已采用本地紧凑骨架。",
     }
 
 
@@ -1370,6 +1614,50 @@ def _negates_any(action: str, words: tuple[str, ...]) -> bool:
 
 def _clean_text(value, limit: int = 240) -> str:
     return str(value or "").strip()[:limit]
+
+
+def _clean_markdown(value, limit: int = 12000) -> str:
+    text = str(value or "").strip()
+    if text.startswith("```") and text.endswith("```"):
+        lines = text.splitlines()
+        text = "\n".join(lines[1:-1]).strip()
+    return text[:limit]
+
+
+def _sanitize_event_creation(result: dict, world_context: dict) -> dict:
+    fallback = _fallback_event_creation(world_context)
+    return {
+        "title": _clean_text(result.get("title"), 100) or fallback["title"],
+        "core": _clean_text(result.get("core"), 300) or fallback["core"],
+        "premise": _clean_text(result.get("premise"), 600) or fallback["premise"],
+    }
+
+
+def _fallback_causal_model(event_seed: dict, world_context: dict) -> str:
+    location = (world_context.get("location") or {}).get("location_name") or "当前地点"
+    return (
+        f"# {event_seed['title']}幕后事实\n\n"
+        f"玩家角色位于{location}。{event_seed['premise']}。\n\n"
+        f"{event_seed['core']}。稳定世界层尚未提供更多可以确认的人物、物件与历史，"
+        "后续 Agent不得为当前事件补造未记录的固定世界事实。"
+    )
+
+
+def _fallback_cognition_model(event_seed: dict, world_context: dict) -> str:
+    location = (world_context.get("location") or {}).get("location_name") or "当前地点"
+    return (
+        f"# {event_seed['title']}主角认知\n\n"
+        f"玩家角色知道玩家角色当前位于{location}。玩家角色能够观察{location}中直接发生的变化。\n\n"
+        "玩家角色不知道尚未通过角色背景、世界记忆或正文明确呈现的幕后原因。"
+    )
+
+
+def _fallback_hook_creation(event_seed: dict, world_context: dict) -> dict:
+    location = (world_context.get("location") or {}).get("location_name") or "当前地点"
+    return {
+        "desc": f"{location}出现了与平常不同、可以直接观察的变化。",
+        "goal": f"留意{location}的变化并确认发生了什么",
+    }
 
 
 def _clean_string_list(value, *, limit: int = 6, item_limit: int = 180) -> list[str]:
@@ -1552,14 +1840,15 @@ def _sanitize_director_plan(
     intent = result.get("intent") if isinstance(result.get("intent"), dict) else {}
     return {
         "event_action": action if action in DIRECTOR_EVENT_ACTIONS else "none",
-        "event_core": _clean_text(result.get("event_core"), 240),
         "turn_mode": mode if mode in DIRECTOR_TURN_MODES else "progress",
         "route_key": route_key,
-        "hook_engaged": bool(result.get("hook_engaged")),
         "intent": {
             "key": _clean_text(intent.get("key"), 120),
             "same_as_previous": bool(intent.get("same_as_previous")),
         },
+        "stage": _clean_text(result.get("stage"), 180),
+        "progress": _clean_text(result.get("progress"), 360),
+        "reveal_boundary": _clean_text(result.get("reveal_boundary"), 360),
         "payoff": None,
         "turn_objective": "",
         "beats": [],
@@ -1619,39 +1908,39 @@ def _apply_director_plan(
     turn: int,
     memory_candidates: list[dict] | None = None,
     advance_scene: bool = True,
+    event_just_created: bool = False,
 ) -> dict:
     memory_candidates = memory_candidates or []
     plan = _sanitize_director_plan(result, world_context)
     prev_event = prev.get("event") if isinstance(prev.get("event"), dict) else None
-    active = bool(
-        prev_event and prev_event.get("status") in {"active", "resolving", "abandoning"}
-    )
-    if active or not _is_maintained_hook(prev.get("hook_state")):
-        plan["hook_engaged"] = False
+    active = bool(prev_event and prev_event.get("status") == "active")
+    offered = bool(prev_event and prev_event.get("status") == "offered")
     event_action = plan["event_action"]
-    if active and event_action in {"none", "start"}:
+    if event_just_created:
+        event_action = "none"
+        plan["turn_mode"] = "setup"
+        plan["route_key"] = "none"
+    elif active and event_action in {"none", "start"}:
         event_action = "continue"
-    if event_action != "start":
-        plan["hook_engaged"] = False
+    elif offered and event_action == "continue":
+        event_action = "start"
 
-    if not active and event_action == "none":
-        event = prev_event if prev_event and prev_event.get("status") != "active" else None
-        event_turns = 0
-    else:
-        event_turns = int(prev_event.get("turns") or 0) + 1 if active else 1
-        core = prev_event.get("core") if active else plan["event_core"]
-        core = core or "解决玩家当前介入的核心矛盾"
-        event_id = prev_event.get("id") if active else uuid.uuid4().hex
-        event = {
-            "id": event_id,
-            "core": core,
-            "status": "active",
-            "start_turn": int(prev_event.get("start_turn") or turn) if active else turn,
-            "turns": event_turns,
-            "max_turns": DIRECTOR_EVENT_MAX_TURNS,
-        }
+    event = copy.deepcopy(prev_event) if prev_event else None
+    event_turns = int((event or {}).get("turns") or 0)
+    if event and offered and event_action == "start":
+        event_turns = 1
+        event.update({"status": "active", "start_turn": turn, "turns": event_turns})
+    elif event and active and event_action in {"continue", "resolve", "abandon"}:
+        event_turns += 1
+        event["turns"] = event_turns
+    elif event and offered and event_action == "abandon":
+        event["status"] = "abandoning"
+    elif event:
+        event_action = "none"
+        event["turns"] = event_turns
 
-    same_intent = active and _same_intent(prev.get("intent"), plan["intent"])
+    participating = bool(event and event_action in {"start", "continue", "resolve", "abandon"})
+    same_intent = active and participating and _same_intent(prev.get("intent"), plan["intent"])
     attempts = int((prev.get("intent") or {}).get("attempts") or 0) + 1 if same_intent else 1
     intent = {
         "key": plan["intent"]["key"] or action[:120],
@@ -1660,15 +1949,15 @@ def _apply_director_plan(
     }
 
     forced_reasons = []
-    if event and event_turns >= DIRECTOR_EVENT_MAX_TURNS:
+    if active and event_turns >= DIRECTOR_EVENT_MAX_TURNS:
         event_action = "resolve"
         plan["turn_mode"] = "resolve"
         forced_reasons.append("事件达到第 5 轮硬上限，本轮必须结算")
-    if event and attempts >= DIRECTOR_INTENT_MAX_ATTEMPTS:
+    if active and attempts >= DIRECTOR_INTENT_MAX_ATTEMPTS:
         event_action = "resolve"
         plan["turn_mode"] = "resolve"
         forced_reasons.append("同一意图已连续尝试 2 次，本轮必须结算")
-    if event and _player_demands_terminal_escape(action, plan["route_key"]):
+    if active and _player_demands_terminal_escape(action, plan["route_key"]):
         event_action = "resolve"
         plan["turn_mode"] = "resolve"
         forced_reasons.append("玩家明确选择脱离冲突，本轮必须给出完整脱离结果")
@@ -1676,6 +1965,7 @@ def _apply_director_plan(
         plan["turn_mode"] = "resolve" if event_action == "resolve" else "transition"
         event["status"] = "resolving" if event_action == "resolve" else "abandoning"
     plan["event_action"] = event_action
+    plan["event_id"] = event.get("id") if event else None
     plan["plan_id"] = uuid.uuid4().hex
     plan["planned_turn"] = turn
     plan["forced_reasons"] = forced_reasons
@@ -1730,6 +2020,9 @@ def _render_director_plan(state: dict, world_context: dict) -> str:
         f"事件进度：{event.get('turns', 0)}/{event.get('max_turns', DIRECTOR_EVENT_MAX_TURNS)}",
         f"玩家意图：{(state.get('intent') or {}).get('key') or '未归类'}（第 {(state.get('intent') or {}).get('attempts', 1)} 次）",
         f"本轮模式：{plan.get('turn_mode')}；事件动作：{plan.get('event_action')}",
+        f"事实阶段：{plan.get('stage') or '未标注'}",
+        f"因果推进边界：{plan.get('progress') or '只呈现入口钩子，不推进正式事件'}",
+        f"信息揭示边界：{plan.get('reveal_boundary') or '不得超出主角认知模型'}",
         f"本轮目标：{plan.get('turn_objective') or plan.get('current_goal') or '直接回应玩家行动'}",
     ]
     payoff = plan.get("payoff") if _is_maintained_payoff(plan.get("payoff")) else None
@@ -1771,6 +2064,29 @@ def _render_director_plan(state: dict, world_context: dict) -> str:
     return f"{body}\n【/本轮导演骨架】"
 
 
+def _render_event_models(state: dict) -> str:
+    event = state.get("event") if isinstance(state, dict) else None
+    if not isinstance(event, dict):
+        return ""
+    causal = _clean_markdown(event.get("causal_model"))
+    cognition = _clean_markdown(event.get("cognition_model"))
+    parts = []
+    if causal:
+        parts.append(
+            "【当前事件幕后因果模型（不可改写；禁止直接泄露给玩家）】\n"
+            + causal
+            + "\n【/当前事件幕后因果模型】"
+        )
+    if cognition:
+        parts.append(
+            "【当前事件主角认知模型（信息边界）】\n"
+            + cognition
+            + "\n若玩家的选择依赖主角已知但现实玩家尚未从正文获知的信息，必须先在正文中自然呈现该信息。"
+            + "\n【/当前事件主角认知模型】"
+        )
+    return "\n\n".join(parts)
+
+
 def _finalize_director_state(state: dict, assistant_content: str) -> None:
     director = _dynamic_director_state(state.get("director_state"))
     plan = director.get("current_plan") if isinstance(director.get("current_plan"), dict) else None
@@ -1795,8 +2111,6 @@ def _schedule_director_audit(
     assistant_content: str,
     turn: int,
 ) -> None:
-    if user_content is None:
-        return
     state = _CACHE.get(session_id)
     plan = (state or {}).get("director_state", {}).get("current_plan")
     if not isinstance(plan, dict):
@@ -1811,7 +2125,7 @@ def _schedule_director_audit(
 
 async def _run_director_audit(
     session_id: str,
-    user_content: str,
+    user_content: str | None,
     assistant_content: str,
     turn: int,
     plan: dict,
@@ -1821,7 +2135,7 @@ async def _run_director_audit(
             [
                 {"role": "system", "content": DIRECTOR_AUDIT_SYSTEM_PROMPT},
                 {"role": "user", "content": _director_audit_prompt(
-                    plan, user_content, assistant_content
+                    plan, user_content or "（新存档开场，玩家尚未行动）", assistant_content
                 )},
             ],
             temperature=0.1,
@@ -1840,6 +2154,12 @@ async def _run_director_audit(
             "evidence": _clean_text(result.get("evidence"), 360),
             "violations": _clean_string_list(result.get("violations"), limit=8),
             "note": _clean_text(result.get("note"), 360),
+            "cognition_updates": [
+                item for item in _clean_string_list(
+                    result.get("cognition_updates"), limit=8, item_limit=360
+                )
+                if not _CAUSAL_VAGUE_RE.search(item)
+            ],
         }
         state = _CACHE.get(session_id)
         if not state:
@@ -1860,6 +2180,22 @@ async def _run_director_audit(
             },
         }
         director["needs_repair"] = not audit["fulfilled"]
+        event = director.get("event") if isinstance(director.get("event"), dict) else None
+        if event and event.get("id") == plan.get("event_id") and audit["cognition_updates"]:
+            cognition = _clean_markdown(event.get("cognition_model"))
+            additions = []
+            for item in audit["cognition_updates"]:
+                line = f"- 第 {turn} 回合：{item}"
+                if item not in cognition:
+                    additions.append(line)
+            if additions:
+                heading = "## 正文后新增认知"
+                separator = "\n\n" if heading not in cognition else "\n"
+                event["cognition_model"] = _clean_markdown(
+                    cognition + separator + (heading + "\n" if heading not in cognition else "")
+                    + "\n".join(additions)
+                )
+                director["event"] = event
         payoff = plan.get("payoff") if _is_maintained_payoff(plan.get("payoff")) else None
         current_payoff = director.get("payoff_state")
         if (

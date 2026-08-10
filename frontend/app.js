@@ -59,9 +59,12 @@ const LLM_REQUEST_LABELS = {
   opening: "开场生成",
   director_plan: "导演规划",
   director_event: "事件 Agent",
+  director_causal: "因果 Agent",
+  director_cognition: "认知 Agent",
   director_hook: "钩子 Agent",
   director_payoff: "爽点 Agent",
   director_pacing: "节奏 Agent",
+  director_skeleton: "导演骨架 Agent",
   narrative: "剧情生成",
   memory_extract: "记忆提取",
   director_audit: "执行审计",
@@ -697,12 +700,15 @@ function renderAgentOutputs(outputs) {
   if (!outputs || typeof outputs !== "object" || !Object.keys(outputs).length) return;
   const labels = {
     event: "事件",
+    causal: "因果",
+    cognition: "认知",
     hook: "钩子",
     payoff: "爽点",
     pacing: "节奏",
+    director: "骨架",
     audit: "审计",
   };
-  const available = ["event", "hook", "payoff", "pacing", "audit"]
+  const available = ["event", "causal", "cognition", "hook", "payoff", "pacing", "director", "audit"]
     .filter((key) => outputs[key] && typeof outputs[key] === "object");
   if (!available.length) return;
 
@@ -731,7 +737,9 @@ function renderAgentOutputs(outputs) {
     panelMeta.textContent = entry.source === "fallback"
       ? `fallback${entry.fallback_reason ? ` · ${entry.fallback_reason}` : ""}`
       : entry.model || "LLM";
-    pre.textContent = JSON.stringify(entry.output ?? null, null, 2);
+    pre.textContent = typeof entry.output === "string"
+      ? entry.output
+      : JSON.stringify(entry.output ?? null, null, 2);
   }
 
   for (const key of available) {

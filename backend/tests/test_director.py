@@ -39,20 +39,37 @@ def _context():
 def _plan(*, action="start", mode="progress", intent="应对山匪", same=False, route="engage"):
     return {
         "event_action": action,
-        "event_core": "解决山匪造成的直接威胁",
-        "turn_objective": "在本轮让玩家行动产生明确结果",
         "turn_mode": mode,
         "route_key": route,
         "intent": {"key": intent, "same_as_previous": same},
-        "beats": ["敌人逼近", "主角行动产生结果"],
-        "must_not": [],
-        "scene": "山路遭遇",
+        "stage": "山匪封路",
+        "progress": "玩家行动在山路冲突中产生明确结果",
+        "reveal_boundary": "玩家只确认眼前山匪的行动",
     }
+
+
+def _event(*, status="offered", turns=0):
+    return {
+        "id": "event-1",
+        "title": "山路劫掠",
+        "core": "山匪正在截断白石村通往县城的山路",
+        "premise": "黑风寨山匪赵横带领三名山匪拦截白石村行人",
+        "status": status,
+        "created_turn": 1,
+        "turns": turns,
+        "max_turns": 5,
+        "causal_model": "# 幕后事实\n\n黑风寨山匪赵横因缺少粮食拦截白石村行人。",
+        "cognition_model": "# 主角认知\n\n玩家角色知道白石村通往县城的山路近期不安全。",
+    }
+
+
+def _director(*, status="offered", turns=0):
+    return {"event": _event(status=status, turns=turns), "agent_outputs": {}}
 
 
 class DirectorPlanTests(unittest.TestCase):
     def test_player_avoidance_replans_event_without_resetting_it(self):
-        first = game._apply_director_plan({}, _plan(), "迎战", _context(), 1)
+        first = game._apply_director_plan(_director(), _plan(), "迎战", _context(), 1)
         second_raw = _plan(action="continue", intent="避开山匪", route="escape")
         second_raw["turn_objective"] = "摆脱追踪并取得安全"
         second = game._apply_director_plan(first, second_raw, "钻入山林避战", _context(), 2)
@@ -65,7 +82,9 @@ class DirectorPlanTests(unittest.TestCase):
         self.assertTrue(any("脱离冲突" in reason for reason in second["current_plan"]["forced_reasons"]))
 
     def test_second_semantically_same_intent_forces_resolution(self):
-        first = game._apply_director_plan({}, _plan(intent="探明玄色小牌"), "细看小牌", _context(), 1)
+        first = game._apply_director_plan(
+            _director(), _plan(intent="探明玄色小牌"), "细看小牌", _context(), 1
+        )
         second_raw = _plan(action="continue", intent="探明玄色小牌", same=True, route="investigate")
         second = game._apply_director_plan(first, second_raw, "继续感应牌中白影", _context(), 2)
 
@@ -75,7 +94,7 @@ class DirectorPlanTests(unittest.TestCase):
         self.assertTrue(any("2 次" in reason for reason in second["current_plan"]["forced_reasons"]))
 
     def test_fifth_event_turn_forces_resolution(self):
-        state = game._apply_director_plan({}, _plan(), "迎战", _context(), 1)
+        state = game._apply_director_plan(_director(), _plan(), "迎战", _context(), 1)
         for turn in range(2, 6):
             raw = _plan(action="continue", intent=f"不同战术{turn}")
             state = game._apply_director_plan(state, raw, f"行动{turn}", _context(), turn)
@@ -206,10 +225,12 @@ class DirectorPlanTests(unittest.TestCase):
         self.assertEqual(planned["event"]["id"], "event-1")
 
     def test_fallback_respects_negated_investigation(self):
-        event = game._fallback_director_event({}, "不要查看埋好的牌子，回家假装没事")
+        event = game._fallback_director_pacing(
+            _director(), "不要查看埋好的牌子，回家假装没事"
+        )
 
         self.assertEqual(event["route_key"], "escape")
-        self.assertIn("牌子", event["event_core"])
+        self.assertEqual(event["event_action"], "none")
 
     def test_old_immediate_payoff_is_not_migrated_as_maintained_payoff(self):
         state = game._dynamic_director_state({
@@ -255,45 +276,43 @@ class DirectorPlanTests(unittest.TestCase):
             ],
             "character_state": {"realm": "凡人", "updated_at": 123.0},
         }
-        event_messages, hook_messages, payoff_messages = game._director_parallel_messages(
+        payoff_messages = game._director_payoff_messages(
             state,
             "回家",
             _context(),
-            {"payoff_state": {
+            {**_director(), "payoff_state": {
                 "desc": "获得破庙机缘",
                 "trigger": "检查石像后遗骨",
                 "status": "pending",
             }},
             [{"id": "m1", "type": "plot", "text": "已知事实"}],
         )
+        pacing_messages = game._director_pacing_messages(state, "回家", _director())
 
-        self.assertEqual([m["role"] for m in event_messages], ["system", "user"])
-        self.assertEqual([m["role"] for m in hook_messages], ["system", "user"])
         self.assertEqual([m["role"] for m in payoff_messages], ["system", "system", "user"])
-        self.assertNotIn("updated_at", event_messages[-1]["content"])
         self.assertNotIn("updated_at", payoff_messages[-1]["content"])
         self.assertIn("当前待触发爽点", payoff_messages[-1]["content"])
         self.assertIn("前两轮正文", payoff_messages[-1]["content"])
-        self.assertIn("上一轮已展示钩子", hook_messages[-1]["content"])
-        self.assertTrue(event_messages[-1]["content"].rstrip().endswith("【玩家本轮行动】\n回家"))
-        self.assertTrue(hook_messages[-1]["content"].rstrip().endswith("【玩家本轮行动】\n回家"))
         self.assertTrue(payoff_messages[-1]["content"].rstrip().endswith("【玩家本轮行动】\n回家"))
+        self.assertTrue(pacing_messages[-1]["content"].rstrip().endswith("【玩家本轮行动】\n回家"))
 
-    def test_event_hook_and_payoff_agents_run_in_parallel_before_pacing(self):
+    def test_payoff_and_pacing_run_in_parallel_before_skeleton(self):
         payoff_started = asyncio.Event()
         calls = []
 
         async def fake_complete(*args, **kwargs):
             request_type = kwargs["request_type"]
             calls.append(request_type)
-            if request_type == "director_event":
+            if request_type == "director_pacing":
                 await asyncio.wait_for(payoff_started.wait(), 0.2)
                 return json.dumps({
                     "event_action": "start",
-                    "event_core": "解决山匪威胁",
                     "turn_mode": "progress",
                     "route_key": "engage",
                     "intent": {"key": "迎战山匪", "same_as_previous": False},
+                    "stage": "山匪封路",
+                    "progress": "玩家角色正式介入山路冲突",
+                    "reveal_boundary": "玩家确认赵横是拦路者",
                 }, ensure_ascii=False)
             if request_type == "director_payoff":
                 payoff_started.set()
@@ -301,12 +320,7 @@ class DirectorPlanTests(unittest.TestCase):
                     "desc": "通过「破庙道人遗骨」获得「引气诀」",
                     "trigger": "玩家亲自检查破庙道人遗骨中的旧物",
                 }, ensure_ascii=False)
-            if request_type == "director_hook":
-                return json.dumps({
-                    "desc": "村口药农说破庙附近有人失踪",
-                    "goal": "前往破庙询查失踪者踪迹",
-                }, ensure_ascii=False)
-            self.assertEqual(request_type, "director_pacing")
+            self.assertEqual(request_type, "director_skeleton")
             return json.dumps({
                 "turn_objective": "本轮完成一次明确攻防",
                 "beats": ["山匪进逼", "主角应对并产生战果"],
@@ -317,34 +331,30 @@ class DirectorPlanTests(unittest.TestCase):
             "turns": 0,
             "transcript": [],
             "character_state": {},
-            "director_state": {},
+            "director_state": _director(),
         }
         with patch.object(game, "complete_chat", fake_complete):
             planned = asyncio.run(game._plan_director_turn(state, "迎战山匪", _context()))
 
-        self.assertEqual(set(calls[:3]), {"director_event", "director_hook", "director_payoff"})
-        self.assertEqual(calls[3], "director_pacing")
+        self.assertEqual(set(calls[:2]), {"director_pacing", "director_payoff"})
+        self.assertEqual(calls[2], "director_skeleton")
         self.assertEqual(planned["current_plan"]["turn_objective"], "本轮完成一次明确攻防")
         self.assertEqual(
             planned["current_plan"]["payoff"]["binding"]["reward_id"], "yin_qi_jue"
         )
         self.assertNotIn("current_goal", planned["current_plan"])
-        self.assertEqual(planned["current_plan"]["hook"]["goal"], "前往破庙询查失踪者踪迹")
-        self.assertEqual(planned["agent_outputs"]["event"]["output"]["event_core"], "解决山匪威胁")
+        self.assertEqual(planned["event"]["id"], "event-1")
+        self.assertEqual(planned["current_plan"]["stage"], "山匪封路")
 
-    def test_new_hook_cannot_be_engaged_in_its_creation_turn(self):
-        planned = game._apply_director_plan({}, {
-            **_plan(),
-            "hook_engaged": True,
-        }, "前往破庙", _context(), 1, advance_scene=False)
-        hook, last = game._reconcile_hook_state({}, {
-            "desc": "药农请人查看破庙异动",
-            "goal": "前往破庙查看异动",
-        }, planned["current_plan"]["hook_engaged"], 1)
+    def test_new_event_cannot_start_in_creation_turn(self):
+        planned = game._apply_director_plan(
+            _director(), _plan(), "前往破庙", _context(), 1,
+            advance_scene=False, event_just_created=True,
+        )
 
-        self.assertFalse(planned["current_plan"]["hook_engaged"])
-        self.assertEqual(hook["status"], "offered")
-        self.assertIsNone(last)
+        self.assertEqual(planned["current_plan"]["event_action"], "none")
+        self.assertEqual(planned["event"]["status"], "offered")
+        self.assertEqual(planned["event"]["turns"], 0)
 
     def test_previous_hook_is_cleared_when_event_agent_engages_it(self):
         previous = {
@@ -365,18 +375,77 @@ class DirectorPlanTests(unittest.TestCase):
         self.assertEqual(last["status"], "engaged")
         self.assertEqual(last["engaged_turn"], 3)
 
-    def test_pacing_receives_backend_forced_resolution(self):
-        first = game._apply_director_plan({}, _plan(intent="查明黑牌"), "查看黑牌", _context(), 1)
+    def test_skeleton_receives_backend_forced_resolution(self):
+        first = game._apply_director_plan(
+            _director(), _plan(intent="查明黑牌"), "查看黑牌", _context(), 1
+        )
         raw = _plan(action="continue", intent="查明黑牌", same=True, route="investigate")
         second = game._apply_director_plan(
             first, raw, "继续查看黑牌", _context(), 2, advance_scene=False
         )
         state = {"transcript": [{"role": "narration", "text": "黑牌微微发亮。"}]}
 
-        messages = game._director_pacing_messages(state, "继续查看黑牌", second)
+        messages = game._director_skeleton_messages(state, "继续查看黑牌", second)
 
         self.assertIn('"event_action":"resolve"', messages[-1]["content"])
         self.assertIn("同一意图已连续尝试 2 次", messages[-1]["content"])
+
+    def test_foundation_agents_run_once_in_strict_order(self):
+        calls = []
+
+        async def fake_complete(*args, **kwargs):
+            request_type = kwargs["request_type"]
+            calls.append(request_type)
+            outputs = {
+                "director_event": json.dumps({
+                    "title": "白石村采药客失踪",
+                    "core": "采药客周济川没有按约定返回白石村",
+                    "premise": "白石村采药客周济川进入青屏山采集紫苏叶后失踪",
+                }, ensure_ascii=False),
+                "director_causal": "# 幕后事实\n\n白石村采药客周济川因寻找紫苏叶进入青屏山北坡。",
+                "director_cognition": "# 主角认知\n\n玩家角色知道白石村采药客周济川昨日进入青屏山。",
+                "director_hook": json.dumps({
+                    "desc": "白石村药铺掌柜陈守仁正在寻找未归的周济川。",
+                    "goal": "向白石村药铺掌柜陈守仁询问周济川的进山路线",
+                }, ensure_ascii=False),
+            }
+            return outputs[request_type]
+
+        state = {
+            "session_id": "foundation-test",
+            "turns": 0,
+            "transcript": [],
+            "character_state": {},
+            "director_state": {},
+        }
+        with patch.object(game, "complete_chat", fake_complete):
+            first = asyncio.run(game._ensure_event_foundation(
+                state, "（开场）", _context(), [], opening=True
+            ))
+            state["director_state"] = first
+            second = asyncio.run(game._ensure_event_foundation(
+                state, "观察四周", _context(), []
+            ))
+
+        self.assertEqual(calls, [
+            "director_event", "director_causal", "director_cognition", "director_hook",
+        ])
+        self.assertEqual(second["event"]["id"], first["event"]["id"])
+        self.assertEqual(second["event"]["causal_model"], first["event"]["causal_model"])
+        self.assertEqual(second["event"]["cognition_model"], first["event"]["cognition_model"])
+
+    def test_vague_causal_markdown_is_rejected(self):
+        async def fake_complete(*args, **kwargs):
+            return "老者因为某件事物进入白石村。"
+
+        with patch.object(game, "complete_chat", fake_complete):
+            result, meta = asyncio.run(game._call_director_text_agent(
+                [{"role": "user", "content": "test"}],
+                "director_causal", 100, "vague-test", reject_vague=True,
+            ))
+
+        self.assertIsNone(result)
+        self.assertEqual(meta["fallback_reason"], "vague_reference")
 
     def test_narrative_plan_is_appended_after_history(self):
         sid = "cache-prefix-test"
@@ -395,15 +464,20 @@ class DirectorPlanTests(unittest.TestCase):
             "director_state": {},
             "_injected": [],
         }
-        planned = game._apply_director_plan({}, _plan(), "迎战", _context(), 2)
+        planned = game._apply_director_plan(_director(), _plan(), "迎战", _context(), 2)
 
         async def fake_plan(*args, **kwargs):
             return planned
+
+        async def fake_foundation(*args, **kwargs):
+            return _director()
 
         try:
             with patch.object(game.constraints, "action_constraints", return_value="world"), patch.object(
                 game.constraints, "director_context", return_value=_context()
             ), patch.object(game, "_plan_director_turn", fake_plan), patch.object(
+                game, "_ensure_event_foundation", fake_foundation
+            ), patch.object(
                 game.store, "save_director_state"
             ) as save_director:
                 messages = asyncio.run(game.prepare_action(sid, "迎战"))
@@ -460,6 +534,7 @@ class DirectorPlanTests(unittest.TestCase):
         }
         plan = {
             "plan_id": "plan-4",
+            "event_id": "event-1",
             "turn_mode": "progress",
             "turn_objective": "检查遗骨",
             "payoff": dict(payoff),
@@ -467,7 +542,7 @@ class DirectorPlanTests(unittest.TestCase):
         }
         game._CACHE[sid] = {
             "director_state": {
-                "event": None,
+                "event": _event(status="active", turns=4),
                 "current_plan": plan,
                 "payoff_state": dict(payoff),
             }
@@ -478,6 +553,7 @@ class DirectorPlanTests(unittest.TestCase):
                 "fulfilled": True,
                 "payoff_triggered": True,
                 "evidence": "主角检查遗骨后取得入道机缘。",
+                "cognition_updates": ["玩家角色确认破庙道人遗骨内藏有引气诀。"],
                 "violations": [],
                 "note": "",
             }, ensure_ascii=False)
@@ -494,6 +570,8 @@ class DirectorPlanTests(unittest.TestCase):
             self.assertEqual(director["payoff_state"]["triggered_turn"], 4)
             self.assertEqual(director["last_payoff"]["id"], "payoff-1")
             self.assertTrue(director["last_audit"]["payoff_triggered"])
+            self.assertIn("第 4 回合", director["event"]["cognition_model"])
+            self.assertIn("引气诀", director["event"]["cognition_model"])
             self.assertEqual(
                 director["agent_outputs"]["audit"]["output"]["evidence"],
                 "主角检查遗骨后取得入道机缘。",

@@ -98,7 +98,7 @@ def _narrate(messages: list[dict], sid: str, user_content: str | None):
         _done,
         request_type=request_type,
         session_id=sid,
-        on_error=(lambda: game.rollback_prepared_action(sid)) if user_content is not None else None,
+        on_error=lambda: game.rollback_prepared_action(sid),
     )
 
 
@@ -185,11 +185,23 @@ async def delete(body: SidBody):
 async def opening(sid: str):
     if not game.exists(sid):
         raise HTTPException(404, "会话不存在，请重新开始")
-    messages = game.messages_for_opening(sid)
     return StreamingResponse(
-        _narrate(messages, sid, None),
+        _opening_stream(sid),
         media_type="text/event-stream",
     )
+
+
+async def _opening_stream(sid: str):
+    """Create the initial event foundation before streaming opening prose."""
+    yield _sse("stage", {"key": "director", "label": "正在建立事件、因果、认知与钩子"})
+    try:
+        messages = await game.prepare_opening(sid)
+    except Exception as e:  # noqa: BLE001
+        yield _sse("error", {"message": str(e)})
+        return
+    yield _sse("stage", {"key": "narrative", "label": "导演骨架已校验，正在生成开场"})
+    async for chunk in _narrate(messages, sid, None):
+        yield chunk
 
 
 async def _action_stream(sid: str, text: str):
