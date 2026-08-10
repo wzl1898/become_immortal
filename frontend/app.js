@@ -59,6 +59,7 @@ const LLM_REQUEST_LABELS = {
   opening: "开场生成",
   director_plan: "导演规划",
   director_event: "事件 Agent",
+  director_hook: "钩子 Agent",
   director_payoff: "爽点 Agent",
   director_pacing: "节奏 Agent",
   narrative: "剧情生成",
@@ -692,10 +693,47 @@ function field(label, value, valClass) {
   return wrap;
 }
 
+function renderAgentOutputs(outputs) {
+  if (!outputs || typeof outputs !== "object" || !Object.keys(outputs).length) return;
+  const labels = {
+    event: "Event Agent",
+    hook: "Hook Agent",
+    payoff: "Payoff Agent",
+    pacing: "Pacing Agent",
+    audit: "Audit Agent",
+  };
+  const head = document.createElement("div");
+  head.className = "dir-section-head";
+  head.textContent = "AGENT 原始输出";
+  directorBodyEl.appendChild(head);
+
+  for (const key of ["event", "hook", "payoff", "pacing", "audit"]) {
+    const entry = outputs[key];
+    if (!entry || typeof entry !== "object") continue;
+    const details = document.createElement("details");
+    details.className = "dir-agent-output";
+    details.open = true;
+    const summary = document.createElement("summary");
+    const name = document.createElement("span");
+    name.textContent = labels[key] || key;
+    const meta = document.createElement("span");
+    meta.className = `dir-agent-source ${entry.source === "fallback" ? "fallback" : ""}`;
+    meta.textContent = entry.source === "fallback"
+      ? `fallback${entry.fallback_reason ? ` · ${entry.fallback_reason}` : ""}`
+      : entry.model || "LLM";
+    summary.append(name, meta);
+    const pre = document.createElement("pre");
+    pre.textContent = JSON.stringify(entry.output ?? null, null, 2);
+    details.append(summary, pre);
+    directorBodyEl.appendChild(details);
+  }
+}
+
 function renderDynamicDirector(state) {
   const event = state.event || null;
   const plan = state.current_plan || null;
   const intent = state.intent || null;
+  const hook = state.hook_state || null;
 
   const phaseWrap = document.createElement("div");
   phaseWrap.className = "dir-phase";
@@ -751,6 +789,19 @@ function renderDynamicDirector(state) {
     directorBodyEl.appendChild(intentMeta);
   }
 
+  if (hook?.desc) {
+    const hookCard = document.createElement("div");
+    hookCard.className = "dir-hook";
+    hookCard.appendChild(field("当前钩子", hook.desc, "desc"));
+    hookCard.appendChild(field("可选目标", hook.goal));
+    const hookMeta = document.createElement("div");
+    hookMeta.className = "dir-meta";
+    hookMeta.innerHTML = `<span class="item">状态 <b>${hook.status || "offered"}</b></span>` +
+      `<span class="item">展示于第 <b>${Number(hook.created_turn) || "—"}</b> 回合</span>`;
+    hookCard.appendChild(hookMeta);
+    directorBodyEl.appendChild(hookCard);
+  }
+
   if (plan) {
     const card = document.createElement("div");
     card.className = "dir-payoff" + (plan.turn_mode === "resolve" ? " armed" : "");
@@ -759,6 +810,10 @@ function renderDynamicDirector(state) {
     tag.textContent = `${plan.turn_mode || "progress"} · ${plan.event_action || "none"}`;
     card.appendChild(tag);
     card.appendChild(field("本轮目标", plan.turn_objective || plan.current_goal));
+    if (plan.hook?.desc) {
+      card.appendChild(field("本轮呈现钩子", plan.hook.desc, "desc"));
+      card.appendChild(field("对应灵光方向", plan.hook.goal));
+    }
     if (plan.payoff?.desc) {
       card.appendChild(field("待触发爽点", plan.payoff.desc, "desc"));
       card.appendChild(field("触发条件", plan.payoff.trigger, "trigger"));
@@ -802,11 +857,12 @@ function renderDynamicDirector(state) {
     }
     directorBodyEl.appendChild(audit);
   }
+  renderAgentOutputs(state.agent_outputs || state.planner?.agents);
 }
 
 function renderDirector(state, turns) {
   directorBodyEl.innerHTML = "";
-  const hasContent = state && (state.current_plan || state.event || state.phase || state.payoff || state.last_fired);
+  const hasContent = state && (state.current_plan || state.event || state.hook_state || state.agent_outputs || state.phase || state.payoff || state.last_fired);
   directorEmptyEl.classList.toggle("hidden", !!hasContent);
   if (!hasContent) return;
 
