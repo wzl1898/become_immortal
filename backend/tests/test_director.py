@@ -53,7 +53,6 @@ def _event(*, status="offered", turns=0):
         "id": "event-1",
         "title": "山路劫掠",
         "core": "山匪正在截断白石村通往县城的山路",
-        "premise": "黑风寨山匪赵横带领三名山匪拦截白石村行人",
         "status": status,
         "created_turn": 1,
         "turns": turns,
@@ -240,6 +239,14 @@ class DirectorPlanTests(unittest.TestCase):
 
         self.assertIsNone(state["payoff_state"])
 
+    def test_legacy_premise_is_removed_from_normalized_event(self):
+        state = game._dynamic_director_state({
+            "event": {"id": "legacy", "core": "当前局面", "premise": "旧事件前提"},
+            "current_plan": None,
+        })
+
+        self.assertNotIn("premise", state["event"])
+
     def test_unbound_long_lived_payoff_is_retired_on_migration(self):
         state = game._dynamic_director_state({
             "event": None,
@@ -400,7 +407,6 @@ class DirectorPlanTests(unittest.TestCase):
                 "director_event": json.dumps({
                     "title": "白石村采药客失踪",
                     "core": "采药客周济川没有按约定返回白石村",
-                    "premise": "白石村采药客周济川进入青屏山采集紫苏叶后失踪",
                 }, ensure_ascii=False),
                 "director_causal": "# 幕后事实\n\n白石村采药客周济川因寻找紫苏叶进入青屏山北坡。",
                 "director_cognition": "# 主角认知\n\n玩家角色知道白石村采药客周济川昨日进入青屏山。",
@@ -431,6 +437,8 @@ class DirectorPlanTests(unittest.TestCase):
             "director_event", "director_causal", "director_cognition", "director_hook",
         ])
         self.assertEqual(second["event"]["id"], first["event"]["id"])
+        self.assertNotIn("premise", first["event"])
+        self.assertNotIn("premise", first["agent_outputs"]["event"]["output"])
         self.assertEqual(second["event"]["causal_model"], first["event"]["causal_model"])
         self.assertEqual(second["event"]["cognition_model"], first["event"]["cognition_model"])
 

@@ -1079,6 +1079,9 @@ def _dynamic_director_state(raw: dict | None) -> dict:
     raw = raw if isinstance(raw, dict) else {}
     if "current_plan" in raw or "event" in raw:
         normalized = dict(raw)
+        if isinstance(normalized.get("event"), dict):
+            normalized["event"] = dict(normalized["event"])
+            normalized["event"].pop("premise", None)
         # Old immediate payoff objects used type/outcome/proof and must not be
         # mistaken for the new long-lived desc/trigger contract.
         payoff = normalized.get("payoff_state")
@@ -1238,7 +1241,6 @@ async def _ensure_event_foundation(
         event_result = {
             "title": existing.get("title") or existing.get("core") or "当前事件",
             "core": existing.get("core") or "当前事件",
-            "premise": existing.get("premise") or existing.get("core") or "当前事件",
         }
         event_meta = {"source": "existing", "model": "stored", "fallback_reason": ""}
     else:
@@ -1291,7 +1293,6 @@ async def _ensure_event_foundation(
         "id": existing.get("id") if reuse_existing else uuid.uuid4().hex,
         "title": event_seed["title"],
         "core": event_seed["core"],
-        "premise": event_seed["premise"],
         "status": existing.get("status") if reuse_existing else "offered",
         "created_turn": (
             int(existing.get("created_turn") or existing.get("start_turn") or state["turns"] + 1)
@@ -1549,7 +1550,6 @@ def _fallback_event_creation(world_context: dict) -> dict:
     return {
         "title": f"{location}当前事件",
         "core": f"{location}正在出现一项玩家角色可以观察和介入的现实变化",
-        "premise": f"玩家角色位于{location}，{location}中的既有人员与环境正在产生一项可验证的变化",
     }
 
 
@@ -1629,7 +1629,6 @@ def _sanitize_event_creation(result: dict, world_context: dict) -> dict:
     return {
         "title": _clean_text(result.get("title"), 100) or fallback["title"],
         "core": _clean_text(result.get("core"), 300) or fallback["core"],
-        "premise": _clean_text(result.get("premise"), 600) or fallback["premise"],
     }
 
 
@@ -1637,8 +1636,8 @@ def _fallback_causal_model(event_seed: dict, world_context: dict) -> str:
     location = (world_context.get("location") or {}).get("location_name") or "当前地点"
     return (
         f"# {event_seed['title']}幕后事实\n\n"
-        f"玩家角色位于{location}。{event_seed['premise']}。\n\n"
-        f"{event_seed['core']}。稳定世界层尚未提供更多可以确认的人物、物件与历史，"
+        f"玩家角色位于{location}。当前事件核心为：{event_seed['core']}。\n\n"
+        "稳定世界层尚未提供更多可以确认的人物、物件与历史，"
         "后续 Agent不得为当前事件补造未记录的固定世界事实。"
     )
 
@@ -2588,7 +2587,7 @@ def get_world_memory(session_id: str) -> list[dict] | None:
 def get_director_state(session_id: str) -> dict | None:
     """返回导演状态（供前端调试/展示）；存档不存在返回 None。"""
     state = _get(session_id)
-    return None if state is None else (state.get("director_state") or {})
+    return None if state is None else _dynamic_director_state(state.get("director_state"))
 
 
 def get_world_state(session_id: str) -> dict | None:
