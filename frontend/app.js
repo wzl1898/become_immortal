@@ -696,37 +696,58 @@ function field(label, value, valClass) {
 function renderAgentOutputs(outputs) {
   if (!outputs || typeof outputs !== "object" || !Object.keys(outputs).length) return;
   const labels = {
-    event: "Event Agent",
-    hook: "Hook Agent",
-    payoff: "Payoff Agent",
-    pacing: "Pacing Agent",
-    audit: "Audit Agent",
+    event: "事件",
+    hook: "钩子",
+    payoff: "爽点",
+    pacing: "节奏",
+    audit: "审计",
   };
+  const available = ["event", "hook", "payoff", "pacing", "audit"]
+    .filter((key) => outputs[key] && typeof outputs[key] === "object");
+  if (!available.length) return;
+
+  const section = document.createElement("section");
+  section.className = "dir-agent-section";
   const head = document.createElement("div");
   head.className = "dir-section-head";
   head.textContent = "AGENT 原始输出";
-  directorBodyEl.appendChild(head);
+  const tabs = document.createElement("div");
+  tabs.className = "dir-agent-tabs";
+  tabs.setAttribute("role", "tablist");
+  const panel = document.createElement("div");
+  panel.className = "dir-agent-panel";
+  const panelMeta = document.createElement("div");
+  panelMeta.className = "dir-agent-panel-meta";
+  const pre = document.createElement("pre");
 
-  for (const key of ["event", "hook", "payoff", "pacing", "audit"]) {
+  function selectAgent(key) {
     const entry = outputs[key];
-    if (!entry || typeof entry !== "object") continue;
-    const details = document.createElement("details");
-    details.className = "dir-agent-output";
-    details.open = true;
-    const summary = document.createElement("summary");
-    const name = document.createElement("span");
-    name.textContent = labels[key] || key;
-    const meta = document.createElement("span");
-    meta.className = `dir-agent-source ${entry.source === "fallback" ? "fallback" : ""}`;
-    meta.textContent = entry.source === "fallback"
+    for (const button of tabs.querySelectorAll("button")) {
+      const selected = button.dataset.agent === key;
+      button.classList.toggle("active", selected);
+      button.setAttribute("aria-selected", String(selected));
+    }
+    panelMeta.className = `dir-agent-panel-meta ${entry.source === "fallback" ? "fallback" : ""}`;
+    panelMeta.textContent = entry.source === "fallback"
       ? `fallback${entry.fallback_reason ? ` · ${entry.fallback_reason}` : ""}`
       : entry.model || "LLM";
-    summary.append(name, meta);
-    const pre = document.createElement("pre");
     pre.textContent = JSON.stringify(entry.output ?? null, null, 2);
-    details.append(summary, pre);
-    directorBodyEl.appendChild(details);
   }
+
+  for (const key of available) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "dir-agent-tab";
+    button.dataset.agent = key;
+    button.setAttribute("role", "tab");
+    button.textContent = labels[key] || key;
+    button.addEventListener("click", () => selectAgent(key));
+    tabs.appendChild(button);
+  }
+  panel.append(panelMeta, pre);
+  section.append(head, tabs, panel);
+  directorBodyEl.appendChild(section);
+  selectAgent(available[0]);
 }
 
 function renderDynamicDirector(state) {
@@ -755,6 +776,7 @@ function renderDynamicDirector(state) {
   note.textContent = event?.core || "当前没有正式事件";
   phaseWrap.appendChild(note);
   directorBodyEl.appendChild(phaseWrap);
+  renderAgentOutputs(state.agent_outputs || state.planner?.agents);
 
   if (event) {
     const meta = document.createElement("div");
@@ -857,7 +879,6 @@ function renderDynamicDirector(state) {
     }
     directorBodyEl.appendChild(audit);
   }
-  renderAgentOutputs(state.agent_outputs || state.planner?.agents);
 }
 
 function renderDirector(state, turns) {

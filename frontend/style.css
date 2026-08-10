@@ -375,20 +375,27 @@ html, body {
   color: var(--accent-soft); font-size: 12px; letter-spacing: 0.15em;
   border-bottom: 1px solid #23272f; padding-bottom: 6px;
 }
-.dir-agent-output {
-  border: 1px solid #2a2f38; border-radius: 8px; background: #0e1116;
-  overflow: hidden;
+.dir-agent-section { display: flex; flex-direction: column; gap: 9px; }
+.dir-agent-tabs {
+  display: grid; grid-template-columns: repeat(5, minmax(0, 1fr));
+  border: 1px solid #333842; border-radius: 6px; overflow: hidden;
 }
-.dir-agent-output summary {
-  min-height: 40px; padding: 0 12px; display: flex; align-items: center; gap: 10px;
-  color: var(--ink); font-size: 13px; cursor: pointer;
+.dir-agent-tab {
+  min-width: 0; min-height: 34px; padding: 4px 2px; border: 0; border-right: 1px solid #333842;
+  background: #12151b; color: var(--muted); font-size: 12px; cursor: pointer;
 }
-.dir-agent-source {
-  margin-left: auto; color: var(--muted); font-size: 11px; font-family: monospace;
+.dir-agent-tab:last-child { border-right: 0; }
+.dir-agent-tab.active { background: var(--accent); color: #130f07; font-weight: 700; }
+.dir-agent-panel {
+  border: 1px solid #2a2f38; border-radius: 8px; background: #0e1116; overflow: hidden;
 }
-.dir-agent-source.fallback { color: var(--danger); }
-.dir-agent-output pre {
-  margin: 0; padding: 12px; border-top: 1px solid #23272f; overflow-x: auto;
+.dir-agent-panel-meta {
+  min-height: 32px; padding: 0 12px; display: flex; align-items: center;
+  color: var(--muted); font: 11px/1.4 monospace;
+}
+.dir-agent-panel-meta.fallback { color: var(--danger); }
+.dir-agent-panel pre {
+  max-height: 260px; margin: 0; padding: 12px; border-top: 1px solid #23272f; overflow: auto;
   color: #cbd3de; background: #0a0c10; font: 12px/1.6 monospace;
   white-space: pre-wrap; overflow-wrap: anywhere;
 }
