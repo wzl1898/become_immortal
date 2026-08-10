@@ -100,10 +100,6 @@ DIRECTOR_PACING_MAX_TOKENS = int(os.getenv(
 DIRECTOR_SKELETON_MAX_TOKENS = int(os.getenv("DIRECTOR_SKELETON_MAX_TOKENS", "600"))
 DIRECTOR_LLM_CONFIG = config_from_env("DIRECTOR_LLM")
 
-_CAUSAL_VAGUE_RE = re.compile(
-    r"(?:他们|她们|(?<!其)他|她|故人|老者|少年|某人|某物|某件事|此物|那个人|背后势力|真正秘密)"
-)
-
 # ---- 旧导演状态机常量（只用于读取历史状态，新的预规划链路不再维护）----
 # 连续偏离多少轮就弃掉当前爽点、改跟玩家的路（实测微调）。
 DIRECTOR_DRIFT_K = 3
@@ -1265,7 +1261,6 @@ async def _ensure_event_foundation(
                 {"role": "user", "content": "【事件】\n" + _stable_json(event_seed) + "\n\n" + base_context},
             ],
             "director_causal", DIRECTOR_CAUSAL_MAX_TOKENS, state.get("session_id"),
-            reject_vague=True,
         )
         if not causal_model:
             causal_model = _fallback_causal_model(event_seed, world_context)
@@ -1283,7 +1278,6 @@ async def _ensure_event_foundation(
                 )},
             ],
             "director_cognition", DIRECTOR_COGNITION_MAX_TOKENS, state.get("session_id"),
-            reject_vague=True,
         )
         if not cognition_model:
             cognition_model = _fallback_cognition_model(event_seed, world_context)
@@ -1387,8 +1381,6 @@ async def _call_director_text_agent(
     request_type: str,
     max_tokens: int,
     session_id: str | None,
-    *,
-    reject_vague: bool = False,
 ) -> tuple[str | None, dict]:
     result = None
     reason = ""
@@ -1407,9 +1399,6 @@ async def _call_director_text_agent(
         result = _clean_markdown(raw)
         if not result:
             reason = "empty_markdown"
-            result = None
-        elif reject_vague and _CAUSAL_VAGUE_RE.search(result):
-            reason = "vague_reference"
             result = None
     except asyncio.TimeoutError:
         reason = "timeout"
@@ -2153,12 +2142,9 @@ async def _run_director_audit(
             "evidence": _clean_text(result.get("evidence"), 360),
             "violations": _clean_string_list(result.get("violations"), limit=8),
             "note": _clean_text(result.get("note"), 360),
-            "cognition_updates": [
-                item for item in _clean_string_list(
-                    result.get("cognition_updates"), limit=8, item_limit=360
-                )
-                if not _CAUSAL_VAGUE_RE.search(item)
-            ],
+            "cognition_updates": _clean_string_list(
+                result.get("cognition_updates"), limit=8, item_limit=360
+            ),
         }
         state = _CACHE.get(session_id)
         if not state:

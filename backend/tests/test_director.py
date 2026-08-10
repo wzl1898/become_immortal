@@ -442,18 +442,19 @@ class DirectorPlanTests(unittest.TestCase):
         self.assertEqual(second["event"]["causal_model"], first["event"]["causal_model"])
         self.assertEqual(second["event"]["cognition_model"], first["event"]["cognition_model"])
 
-    def test_vague_causal_markdown_is_rejected(self):
+    def test_causal_markdown_is_not_rejected_by_word_matching(self):
         async def fake_complete(*args, **kwargs):
             return "老者因为某件事物进入白石村。"
 
         with patch.object(game, "complete_chat", fake_complete):
             result, meta = asyncio.run(game._call_director_text_agent(
                 [{"role": "user", "content": "test"}],
-                "director_causal", 100, "vague-test", reject_vague=True,
+                "director_causal", 100, "vague-test",
             ))
 
-        self.assertIsNone(result)
-        self.assertEqual(meta["fallback_reason"], "vague_reference")
+        self.assertEqual(result, "老者因为某件事物进入白石村。")
+        self.assertEqual(meta["source"], "llm")
+        self.assertEqual(meta["fallback_reason"], "")
 
     def test_narrative_plan_is_appended_after_history(self):
         sid = "cache-prefix-test"
