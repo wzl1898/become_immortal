@@ -27,7 +27,7 @@ from llm import complete_chat, config_from_env
 from prompts import (
     DIRECTOR_AUDIT_SYSTEM_PROMPT,
     DIRECTOR_CAUSAL_SYSTEM_PROMPT,
-    DIRECTOR_COGNITION_SYSTEM_PROMPT,
+    DIRECTOR_VIEWPOINT_SYSTEM_PROMPT,
     DIRECTOR_EVENT_SYSTEM_PROMPT,
     DIRECTOR_HOOK_SYSTEM_PROMPT,
     DIRECTOR_PACING_SYSTEM_PROMPT,
@@ -94,7 +94,9 @@ DIRECTOR_HOOK_MAX_TOKENS = int(os.getenv(
     "DIRECTOR_HOOK_MAX_TOKENS", _DIRECTOR_LEGACY_MAX_TOKENS or "220"
 ))
 DIRECTOR_CAUSAL_MAX_TOKENS = int(os.getenv("DIRECTOR_CAUSAL_MAX_TOKENS", "1200"))
-DIRECTOR_COGNITION_MAX_TOKENS = int(os.getenv("DIRECTOR_COGNITION_MAX_TOKENS", "500"))
+DIRECTOR_VIEWPOINT_MAX_TOKENS = int(os.getenv(
+    "DIRECTOR_VIEWPOINT_MAX_TOKENS", os.getenv("DIRECTOR_COGNITION_MAX_TOKENS", "500")
+))
 DIRECTOR_PACING_MAX_TOKENS = int(os.getenv(
     "DIRECTOR_PACING_MAX_TOKENS", _DIRECTOR_LEGACY_MAX_TOKENS or "450"
 ))
@@ -1081,6 +1083,18 @@ def _dynamic_director_state(raw: dict | None) -> dict:
         if isinstance(normalized.get("event"), dict):
             normalized["event"] = dict(normalized["event"])
             normalized["event"].pop("premise", None)
+            if not normalized["event"].get("viewpoint_model"):
+                normalized["event"]["viewpoint_model"] = _clean_markdown(
+                    normalized["event"].get("cognition_model")
+                )
+            normalized["event"].pop("cognition_model", None)
+        outputs = normalized.get("agent_outputs")
+        if isinstance(outputs, dict):
+            outputs = dict(outputs)
+            if "viewpoint" not in outputs and "cognition" in outputs:
+                outputs["viewpoint"] = outputs["cognition"]
+            outputs.pop("cognition", None)
+            normalized["agent_outputs"] = outputs
         # Old immediate payoff objects used type/outcome/proof and must not be
         # mistaken for the new long-lived desc/trigger contract.
         payoff = normalized.get("payoff_state")
@@ -1177,7 +1191,7 @@ async def _plan_director_turn(
     planned = _apply_director_pacing(planned, skeleton_result, prev)
     foundation_outputs = {
         key: value for key, value in (prev.get("agent_outputs") or {}).items()
-        if key in {"event", "causal", "cognition", "hook"}
+        if key in {"event", "causal", "viewpoint", "hook"}
     }
     metas = {
         **foundation_outputs,
@@ -1223,7 +1237,7 @@ def _event_needs_foundation(prev: dict) -> bool:
     event = prev.get("event") if isinstance(prev.get("event"), dict) else None
     return bool(
         _event_requires_new(prev)
-        or not _clean_text((event or {}).get("cognition_model"), 12000)
+        or not _clean_text((event or {}).get("viewpoint_model"), 12000)
     )
 
 
@@ -1291,8 +1305,11 @@ async def _ensure_event_foundation(
         "turns": int(existing.get("turns") or 0) if reuse_existing else 0,
         "max_turns": DIRECTOR_EVENT_MAX_TURNS,
         "causal_model": _clean_markdown((existing or {}).get("causal_model")),
-        "cognition_model": _clean_markdown((existing or {}).get("cognition_model")),
+        "viewpoint_model": _clean_markdown(
+            (existing or {}).get("viewpoint_model") or (existing or {}).get("cognition_model")
+        ),
     }
+    event.pop("cognition_model", None)
     causal_output = (
         {"source": "existing", "model": "stored", "fallback_reason": "", "output": event["causal_model"]}
         if event["causal_model"] else
@@ -1311,21 +1328,25 @@ async def _ensure_event_foundation(
             state, event["id"], event_seed, action, world_context, memories
         )
 
-    cognition_model = event["cognition_model"]
-    if cognition_model:
-        cognition_meta = {"source": "existing", "model": "stored", "fallback_reason": ""}
+    viewpoint_model = event["viewpoint_model"]
+    if viewpoint_model:
+        viewpoint_meta = {"source": "existing", "model": "stored", "fallback_reason": ""}
     else:
-        cognition_model, cognition_meta = await _call_director_text_agent(
+        viewpoint_model, viewpoint_meta = await _call_director_text_agent(
             [
-                {"role": "system", "content": DIRECTOR_COGNITION_SYSTEM_PROMPT},
-                {"role": "user", "content": "【事件 core】\n" + event_seed["core"]},
+                {"role": "system", "content": DIRECTOR_VIEWPOINT_SYSTEM_PROMPT},
+                {"role": "user", "content": (
+                    "【事件 core】\n" + event_seed["core"]
+                    + "\n\n【当前主角位置约束】\n"
+                    + _stable_json(world_context.get("location") or {})
+                )},
             ],
-            "director_cognition", DIRECTOR_COGNITION_MAX_TOKENS, state.get("session_id"),
+            "director_viewpoint", DIRECTOR_VIEWPOINT_MAX_TOKENS, state.get("session_id"),
         )
-        if not cognition_model:
-            cognition_model = _fallback_cognition_model(event_seed, world_context)
+        if not viewpoint_model:
+            viewpoint_model = _fallback_viewpoint_model(event_seed, world_context)
 
-    event["cognition_model"] = cognition_model
+    event["viewpoint_model"] = viewpoint_model
 
     hook_state = prev.get("hook_state") if _is_maintained_hook(prev.get("hook_state")) else None
     hook_meta = {"source": "existing", "model": "stored", "fallback_reason": ""}
@@ -1336,7 +1357,7 @@ async def _ensure_event_foundation(
                 {"role": "system", "content": DIRECTOR_HOOK_SYSTEM_PROMPT},
                 {"role": "user", "content": (
                     "【事件 core】\n" + event_seed["core"]
-                    + "\n\n【主角认知模型】\n" + cognition_model
+                    + "\n\n【主角视角模型】\n" + viewpoint_model
                 )},
             ],
             "director_hook", DIRECTOR_HOOK_MAX_TOKENS, state.get("session_id"),
@@ -1363,7 +1384,7 @@ async def _ensure_event_foundation(
     outputs = {
         "event": {**event_meta, "output": event_result},
         "causal": causal_output,
-        "cognition": {**cognition_meta, "output": cognition_model},
+        "viewpoint": {**viewpoint_meta, "output": viewpoint_model},
     }
     if hook_state:
         outputs["hook"] = {**hook_meta, "output": hook_result}
@@ -1610,7 +1631,7 @@ def _director_pacing_messages(
             for key in ("id", "title", "core", "status", "turns", "max_turns", "created_turn")
         }),
         "【幕后因果模型】\n" + _clean_markdown(event.get("causal_model")),
-        "【主角认知模型】\n" + _clean_markdown(event.get("cognition_model")),
+        "【主角视角模型】\n" + _clean_markdown(event.get("viewpoint_model")),
         "【入口钩子】\n" + _stable_json(prev.get("hook_state")),
         f"【事件是否本轮刚创建】\n{event_just_created}",
         "【上一轮状态】\n" + _stable_json(_compact_director_state(prev)),
@@ -1637,7 +1658,7 @@ def _director_skeleton_messages(state: dict, action: str, planned: dict) -> list
             for key in ("id", "title", "core", "status", "turns", "max_turns")
         }),
         "【幕后因果模型】\n" + _clean_markdown(event.get("causal_model")),
-        "【主角认知模型】\n" + _clean_markdown(event.get("cognition_model")),
+        "【主角视角模型】\n" + _clean_markdown(event.get("viewpoint_model")),
         "【节奏 Agent结果】\n" + _stable_json({
             key: plan.get(key)
             for key in (
@@ -1697,7 +1718,7 @@ def _fallback_director_pacing(
         "intent": {"key": action[:80], "same_as_previous": False},
         "stage": "事件入口" if status == "offered" else "事件推进",
         "progress": "让玩家行动产生一个可验证的直接结果",
-        "reveal_boundary": "只呈现主角认知模型允许确认的信息",
+        "reveal_boundary": "只呈现主角视角模型允许确认的信息",
         "note": "节奏 Agent不可用，已采用保守推进。",
     }
 
@@ -1755,12 +1776,16 @@ def _fallback_causal_model(event_seed: dict, world_context: dict) -> str:
     )
 
 
-def _fallback_cognition_model(event_seed: dict, world_context: dict) -> str:
+def _fallback_viewpoint_model(event_seed: dict, world_context: dict) -> str:
     location = (world_context.get("location") or {}).get("location_name") or "当前地点"
+    site = (world_context.get("location") or {}).get("site_name")
+    position = f"{location}的{site}" if site else location
     return (
-        f"# {event_seed['title']}主角认知\n\n"
-        f"玩家角色知道玩家角色当前位于{location}。玩家角色能够观察{location}中直接发生的变化。\n\n"
-        "玩家角色不知道尚未通过角色背景、世界记忆或正文明确呈现的幕后原因。"
+        f"# {event_seed['title']}主角视角\n\n"
+        f"## 主角位置\n玩家角色当前位于{position}。\n\n"
+        "## 与事件的接触关系\n玩家角色尚未确认事件现场与当前位置的具体关系。\n\n"
+        "## 当前可感知事实\n玩家角色只能确认当前位置直接发生的变化，"
+        "不知道尚未通过正文呈现的事件事实与幕后原因。"
     )
 
 
@@ -2134,7 +2159,7 @@ def _render_director_plan(state: dict, world_context: dict) -> str:
         f"本轮模式：{plan.get('turn_mode')}；事件动作：{plan.get('event_action')}",
         f"事实阶段：{plan.get('stage') or '未标注'}",
         f"因果推进边界：{plan.get('progress') or '只呈现入口钩子，不推进正式事件'}",
-        f"信息揭示边界：{plan.get('reveal_boundary') or '不得超出主角认知模型'}",
+        f"信息揭示边界：{plan.get('reveal_boundary') or '不得超出主角视角模型'}",
         f"本轮目标：{plan.get('turn_objective') or plan.get('current_goal') or '直接回应玩家行动'}",
     ]
     payoff = plan.get("payoff") if _is_maintained_payoff(plan.get("payoff")) else None
@@ -2181,7 +2206,7 @@ def _render_event_models(state: dict) -> str:
     if not isinstance(event, dict):
         return ""
     causal = _clean_markdown(event.get("causal_model"))
-    cognition = _clean_markdown(event.get("cognition_model"))
+    viewpoint = _clean_markdown(event.get("viewpoint_model") or event.get("cognition_model"))
     parts = []
     if causal:
         parts.append(
@@ -2189,12 +2214,13 @@ def _render_event_models(state: dict) -> str:
             + causal
             + "\n【/当前事件幕后因果模型】"
         )
-    if cognition:
+    if viewpoint:
         parts.append(
-            "【当前事件主角认知模型（信息边界）】\n"
-            + cognition
+            "【当前事件主角视角模型（位置与信息边界）】\n"
+            + viewpoint
             + "\n若玩家的选择依赖主角已知但现实玩家尚未从正文获知的信息，必须先在正文中自然呈现该信息。"
-            + "\n【/当前事件主角认知模型】"
+            + "\n剧情必须保持主角位置与接触关系一致，除非玩家行动明确完成了合理移动。"
+            + "\n【/当前事件主角视角模型】"
         )
     return "\n\n".join(parts)
 
@@ -2266,8 +2292,10 @@ async def _run_director_audit(
             "evidence": _clean_text(result.get("evidence"), 360),
             "violations": _clean_string_list(result.get("violations"), limit=8),
             "note": _clean_text(result.get("note"), 360),
-            "cognition_updates": _clean_string_list(
-                result.get("cognition_updates"), limit=8, item_limit=360
+            "viewpoint_updates": _clean_string_list(
+                result.get("viewpoint_updates", result.get("cognition_updates")),
+                limit=8,
+                item_limit=360,
             ),
         }
         state = _CACHE.get(session_id)
@@ -2290,18 +2318,20 @@ async def _run_director_audit(
         }
         director["needs_repair"] = not audit["fulfilled"]
         event = director.get("event") if isinstance(director.get("event"), dict) else None
-        if event and event.get("id") == plan.get("event_id") and audit["cognition_updates"]:
-            cognition = _clean_markdown(event.get("cognition_model"))
+        if event and event.get("id") == plan.get("event_id") and audit["viewpoint_updates"]:
+            viewpoint = _clean_markdown(
+                event.get("viewpoint_model") or event.get("cognition_model")
+            )
             additions = []
-            for item in audit["cognition_updates"]:
+            for item in audit["viewpoint_updates"]:
                 line = f"- 第 {turn} 回合：{item}"
-                if item not in cognition:
+                if item not in viewpoint:
                     additions.append(line)
             if additions:
                 heading = "## 正文后新增认知"
-                separator = "\n\n" if heading not in cognition else "\n"
-                event["cognition_model"] = _clean_markdown(
-                    cognition + separator + (heading + "\n" if heading not in cognition else "")
+                separator = "\n\n" if heading not in viewpoint else "\n"
+                event["viewpoint_model"] = _clean_markdown(
+                    viewpoint + separator + (heading + "\n" if heading not in viewpoint else "")
                     + "\n".join(additions)
                 )
                 director["event"] = event

@@ -9,6 +9,15 @@ import llm
 
 def _context():
     return {
+        "location": {
+            "region_id": "qingwu_county",
+            "region_name": "青梧郡",
+            "location_id": "baishi_village",
+            "location_name": "白石村",
+            "site_name": "村口老槐树",
+            "location_state": "village",
+            "lost_risk": "none",
+        },
         "allowed_reference_ids": [
             "opportunity:ruined_temple_bones",
             "ruined_temple_bones",
@@ -58,7 +67,7 @@ def _event(*, status="offered", turns=0):
         "turns": turns,
         "max_turns": 5,
         "causal_model": "# 幕后事实\n\n黑风寨山匪赵横因缺少粮食拦截白石村行人。",
-        "cognition_model": "# 主角认知\n\n玩家角色知道白石村通往县城的山路近期不安全。",
+        "viewpoint_model": "# 主角视角\n\n主角位于白石村村口，知道通往县城的山路近期不安全。",
     }
 
 
@@ -241,11 +250,21 @@ class DirectorPlanTests(unittest.TestCase):
 
     def test_legacy_premise_is_removed_from_normalized_event(self):
         state = game._dynamic_director_state({
-            "event": {"id": "legacy", "core": "当前局面", "premise": "旧事件前提"},
+            "event": {
+                "id": "legacy",
+                "core": "当前局面",
+                "premise": "旧事件前提",
+                "cognition_model": "# 旧主角认知",
+            },
             "current_plan": None,
+            "agent_outputs": {"cognition": {"source": "llm", "output": "# 旧主角认知"}},
         })
 
         self.assertNotIn("premise", state["event"])
+        self.assertNotIn("cognition_model", state["event"])
+        self.assertEqual(state["event"]["viewpoint_model"], "# 旧主角认知")
+        self.assertNotIn("cognition", state["agent_outputs"])
+        self.assertIn("viewpoint", state["agent_outputs"])
 
     def test_unbound_long_lived_payoff_is_retired_on_migration(self):
         state = game._dynamic_director_state({
@@ -397,7 +416,7 @@ class DirectorPlanTests(unittest.TestCase):
         self.assertIn('"event_action":"resolve"', messages[-1]["content"])
         self.assertIn("同一意图已连续尝试 2 次", messages[-1]["content"])
 
-    def test_cognition_uses_only_core_while_causal_runs_without_planner_timeout(self):
+    def test_viewpoint_uses_core_and_location_while_causal_runs_without_planner_timeout(self):
         async def scenario():
             calls = []
             causal_started = asyncio.Event()
@@ -409,9 +428,20 @@ class DirectorPlanTests(unittest.TestCase):
                 calls.append(request_type)
                 if request_type == "director_event":
                     return json.dumps({"title": "白石村采药客失踪", "core": core}, ensure_ascii=False)
-                if request_type == "director_cognition":
-                    self.assertEqual(messages[-1]["content"], "【事件 core】\n" + core)
-                    return "# 主角感知\n\n玩家角色看见周济川没有出现在约定地点。"
+                if request_type == "director_viewpoint":
+                    self.assertEqual(messages[-1]["content"], (
+                        "【事件 core】\n" + core
+                        + "\n\n【当前主角位置约束】\n"
+                        + '{"location_id":"baishi_village","location_name":"白石村",'
+                        + '"location_state":"village","lost_risk":"none",'
+                        + '"region_id":"qingwu_county","region_name":"青梧郡",'
+                        + '"site_name":"村口老槐树"}'
+                    ))
+                    return (
+                        "# 主角视角\n\n## 主角位置\n主角位于白石村村口老槐树。\n\n"
+                        "## 与事件的接触关系\n主角在约定地点发现周济川没有返回。\n\n"
+                        "## 当前可感知事实\n约定地点没有周济川的踪影。"
+                    )
                 if request_type == "director_hook":
                     self.assertNotIn("幕后因果模型", messages[-1]["content"])
                     return json.dumps({
@@ -439,7 +469,7 @@ class DirectorPlanTests(unittest.TestCase):
                     first = await game._ensure_event_foundation(state, "（开场）", _context(), [])
                     self.assertEqual(calls[0], "director_event")
                     self.assertLess(calls.index("director_causal"), calls.index("director_hook"))
-                    self.assertIn("director_cognition", calls)
+                    self.assertIn("director_viewpoint", calls)
                     self.assertEqual(first["agent_outputs"]["causal"]["source"], "pending")
                     await causal_started.wait()
                     await asyncio.sleep(0.01)
@@ -447,7 +477,7 @@ class DirectorPlanTests(unittest.TestCase):
                     await game._CAUSAL_TASKS[first["event"]["id"]]
                     second = await game._ensure_event_foundation(state, "观察四周", _context(), [])
                 self.assertEqual(set(calls), {
-                    "director_event", "director_cognition", "director_hook", "director_causal",
+                    "director_event", "director_viewpoint", "director_hook", "director_causal",
                 })
                 self.assertEqual(len(calls), 4)
                 self.assertEqual(second["event"]["id"], first["event"]["id"])
@@ -579,7 +609,7 @@ class DirectorPlanTests(unittest.TestCase):
                 "fulfilled": True,
                 "payoff_triggered": True,
                 "evidence": "主角检查遗骨后取得入道机缘。",
-                "cognition_updates": ["玩家角色确认破庙道人遗骨内藏有引气诀。"],
+                "viewpoint_updates": ["玩家角色确认破庙道人遗骨内藏有引气诀。"],
                 "violations": [],
                 "note": "",
             }, ensure_ascii=False)
@@ -596,8 +626,8 @@ class DirectorPlanTests(unittest.TestCase):
             self.assertEqual(director["payoff_state"]["triggered_turn"], 4)
             self.assertEqual(director["last_payoff"]["id"], "payoff-1")
             self.assertTrue(director["last_audit"]["payoff_triggered"])
-            self.assertIn("第 4 回合", director["event"]["cognition_model"])
-            self.assertIn("引气诀", director["event"]["cognition_model"])
+            self.assertIn("第 4 回合", director["event"]["viewpoint_model"])
+            self.assertIn("引气诀", director["event"]["viewpoint_model"])
             self.assertEqual(
                 director["agent_outputs"]["audit"]["output"]["evidence"],
                 "主角检查遗骨后取得入道机缘。",
