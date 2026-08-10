@@ -193,7 +193,7 @@ async def opening(sid: str):
 
 async def _opening_stream(sid: str):
     """Create the initial event foundation before streaming opening prose."""
-    yield _sse("stage", {"key": "director", "label": "正在建立事件、因果、认知与钩子"})
+    yield _sse("stage", {"key": "director", "label": "正在建立事件、主角感知与钩子；因果模型将在后台生成"})
     try:
         messages = await game.prepare_opening(sid)
     except Exception as e:  # noqa: BLE001

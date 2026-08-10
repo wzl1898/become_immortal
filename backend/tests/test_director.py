@@ -397,50 +397,67 @@ class DirectorPlanTests(unittest.TestCase):
         self.assertIn('"event_action":"resolve"', messages[-1]["content"])
         self.assertIn("同一意图已连续尝试 2 次", messages[-1]["content"])
 
-    def test_foundation_agents_run_once_in_strict_order(self):
-        calls = []
+    def test_cognition_uses_only_core_while_causal_runs_without_planner_timeout(self):
+        async def scenario():
+            calls = []
+            causal_started = asyncio.Event()
+            causal_release = asyncio.Event()
+            core = "采药客周济川没有按约定返回白石村"
 
-        async def fake_complete(*args, **kwargs):
-            request_type = kwargs["request_type"]
-            calls.append(request_type)
-            outputs = {
-                "director_event": json.dumps({
-                    "title": "白石村采药客失踪",
-                    "core": "采药客周济川没有按约定返回白石村",
-                }, ensure_ascii=False),
-                "director_causal": "# 幕后事实\n\n白石村采药客周济川因寻找紫苏叶进入青屏山北坡。",
-                "director_cognition": "# 主角认知\n\n玩家角色知道白石村采药客周济川昨日进入青屏山。",
-                "director_hook": json.dumps({
-                    "desc": "白石村药铺掌柜陈守仁正在寻找未归的周济川。",
-                    "goal": "向白石村药铺掌柜陈守仁询问周济川的进山路线",
-                }, ensure_ascii=False),
+            async def fake_complete(messages, *args, **kwargs):
+                request_type = kwargs["request_type"]
+                calls.append(request_type)
+                if request_type == "director_event":
+                    return json.dumps({"title": "白石村采药客失踪", "core": core}, ensure_ascii=False)
+                if request_type == "director_cognition":
+                    self.assertEqual(messages[-1]["content"], "【事件 core】\n" + core)
+                    return "# 主角感知\n\n玩家角色看见周济川没有出现在约定地点。"
+                if request_type == "director_hook":
+                    self.assertNotIn("幕后因果模型", messages[-1]["content"])
+                    return json.dumps({
+                        "desc": "约定地点没有周济川的踪影。",
+                        "goal": "查看周济川原定返回的道路",
+                    }, ensure_ascii=False)
+                self.assertEqual(request_type, "director_causal")
+                causal_started.set()
+                await causal_release.wait()
+                return "# 幕后事实\n\n周济川因山路塌方滞留青屏山北坡。"
+
+            sid = "foundation-test"
+            state = {
+                "session_id": sid,
+                "turns": 0,
+                "transcript": [],
+                "character_state": {},
+                "director_state": {},
             }
-            return outputs[request_type]
+            game._CACHE[sid] = state
+            try:
+                with patch.object(game, "DIRECTOR_PLANNER_TIMEOUT_SECONDS", 0.001), patch.object(
+                    game, "complete_chat", fake_complete
+                ), patch.object(game.store, "save_director_state"):
+                    first = await game._ensure_event_foundation(state, "（开场）", _context(), [])
+                    self.assertEqual(calls[0], "director_event")
+                    self.assertLess(calls.index("director_causal"), calls.index("director_hook"))
+                    self.assertIn("director_cognition", calls)
+                    self.assertEqual(first["agent_outputs"]["causal"]["source"], "pending")
+                    await causal_started.wait()
+                    await asyncio.sleep(0.01)
+                    causal_release.set()
+                    await game._CAUSAL_TASKS[first["event"]["id"]]
+                    second = await game._ensure_event_foundation(state, "观察四周", _context(), [])
+                self.assertEqual(set(calls), {
+                    "director_event", "director_cognition", "director_hook", "director_causal",
+                })
+                self.assertEqual(len(calls), 4)
+                self.assertEqual(second["event"]["id"], first["event"]["id"])
+                self.assertIn("山路塌方", second["event"]["causal_model"])
+                self.assertEqual(second["agent_outputs"]["causal"]["source"], "llm")
+                self.assertNotIn("premise", first["event"])
+            finally:
+                game._CACHE.pop(sid, None)
 
-        state = {
-            "session_id": "foundation-test",
-            "turns": 0,
-            "transcript": [],
-            "character_state": {},
-            "director_state": {},
-        }
-        with patch.object(game, "complete_chat", fake_complete):
-            first = asyncio.run(game._ensure_event_foundation(
-                state, "（开场）", _context(), [], opening=True
-            ))
-            state["director_state"] = first
-            second = asyncio.run(game._ensure_event_foundation(
-                state, "观察四周", _context(), []
-            ))
-
-        self.assertEqual(calls, [
-            "director_event", "director_causal", "director_cognition", "director_hook",
-        ])
-        self.assertEqual(second["event"]["id"], first["event"]["id"])
-        self.assertNotIn("premise", first["event"])
-        self.assertNotIn("premise", first["agent_outputs"]["event"]["output"])
-        self.assertEqual(second["event"]["causal_model"], first["event"]["causal_model"])
-        self.assertEqual(second["event"]["cognition_model"], first["event"]["cognition_model"])
+        asyncio.run(scenario())
 
     def test_causal_markdown_is_not_rejected_by_word_matching(self):
         async def fake_complete(*args, **kwargs):

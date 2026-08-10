@@ -34,7 +34,7 @@ class LLMConfig:
     base_url: str
     api_key: str
     model: str
-    timeout_seconds: float = 120.0
+    timeout_seconds: float | None = 120.0
 
 
 DEFAULT_CONFIG = LLMConfig(PROTOCOL, BASE_URL, API_KEY, MODEL)
@@ -247,7 +247,7 @@ async def _complete_openai(
         "stream": False,
     }
 
-    timeout = httpx.Timeout(config.timeout_seconds, connect=min(15.0, config.timeout_seconds))
+    timeout = _completion_timeout(config.timeout_seconds)
     async with httpx.AsyncClient(timeout=timeout) as client:
         for attempt in range(len(CONNECT_RETRY_DELAYS) + 1):
             try:
@@ -347,7 +347,7 @@ async def _complete_anthropic(
     if system:
         payload["system"] = system
 
-    timeout = httpx.Timeout(config.timeout_seconds, connect=min(15.0, config.timeout_seconds))
+    timeout = _completion_timeout(config.timeout_seconds)
     async with httpx.AsyncClient(timeout=timeout) as client:
         for attempt in range(len(CONNECT_RETRY_DELAYS) + 1):
             try:
@@ -364,6 +364,13 @@ async def _complete_anthropic(
         if block.get("type") == "text" and block.get("text"):
             parts.append(block["text"])
     return "".join(parts).strip(), body.get("usage") or {}
+
+
+def _completion_timeout(timeout_seconds: float | None) -> httpx.Timeout:
+    """Allow background agents to wait indefinitely for response bytes."""
+    if timeout_seconds is None:
+        return httpx.Timeout(None, connect=15.0)
+    return httpx.Timeout(timeout_seconds, connect=min(15.0, timeout_seconds))
 
 
 async def _raise_for_status(resp: httpx.Response) -> None:

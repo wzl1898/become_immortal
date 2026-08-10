@@ -734,7 +734,9 @@ function renderAgentOutputs(outputs) {
       button.setAttribute("aria-selected", String(selected));
     }
     panelMeta.className = `dir-agent-panel-meta ${entry.source === "fallback" ? "fallback" : ""}`;
-    panelMeta.textContent = entry.source === "fallback"
+    panelMeta.textContent = entry.source === "pending"
+      ? `pending · ${entry.model || "LLM"}`
+      : entry.source === "fallback"
       ? `fallback${entry.fallback_reason ? ` · ${entry.fallback_reason}` : ""}`
       : entry.model || "LLM";
     pre.textContent = typeof entry.output === "string"

@@ -19,9 +19,10 @@ class _Response:
 
 class _RetryClient:
     attempts = 0
+    timeout = None
 
     def __init__(self, **kwargs):
-        pass
+        type(self).timeout = kwargs.get("timeout")
 
     async def __aenter__(self):
         return self
@@ -48,6 +49,16 @@ class LLMRetryTests(unittest.TestCase):
         self.assertEqual(text, "ok")
         self.assertEqual(usage["completion_tokens"], 1)
         self.assertEqual(_RetryClient.attempts, 3)
+
+    def test_complete_openai_can_disable_response_timeout(self):
+        _RetryClient.attempts = 2
+        config = llm.LLMConfig("openai", "https://example.test/v1", "key", "model", None)
+        with patch.object(llm.httpx, "AsyncClient", _RetryClient):
+            text, _ = asyncio.run(llm._complete_openai([], 0.1, 10, config))
+
+        self.assertEqual(text, "ok")
+        self.assertIsNone(_RetryClient.timeout.read)
+        self.assertEqual(_RetryClient.timeout.connect, 15.0)
 
 
 if __name__ == "__main__":

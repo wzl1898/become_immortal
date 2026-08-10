@@ -18,6 +18,7 @@ import os
 import re
 import time
 import uuid
+from dataclasses import replace
 
 import constraints
 import embed
@@ -93,12 +94,14 @@ DIRECTOR_HOOK_MAX_TOKENS = int(os.getenv(
     "DIRECTOR_HOOK_MAX_TOKENS", _DIRECTOR_LEGACY_MAX_TOKENS or "220"
 ))
 DIRECTOR_CAUSAL_MAX_TOKENS = int(os.getenv("DIRECTOR_CAUSAL_MAX_TOKENS", "1200"))
-DIRECTOR_COGNITION_MAX_TOKENS = int(os.getenv("DIRECTOR_COGNITION_MAX_TOKENS", "900"))
+DIRECTOR_COGNITION_MAX_TOKENS = int(os.getenv("DIRECTOR_COGNITION_MAX_TOKENS", "500"))
 DIRECTOR_PACING_MAX_TOKENS = int(os.getenv(
     "DIRECTOR_PACING_MAX_TOKENS", _DIRECTOR_LEGACY_MAX_TOKENS or "450"
 ))
 DIRECTOR_SKELETON_MAX_TOKENS = int(os.getenv("DIRECTOR_SKELETON_MAX_TOKENS", "600"))
 DIRECTOR_LLM_CONFIG = config_from_env("DIRECTOR_LLM")
+DIRECTOR_CAUSAL_LLM_CONFIG = replace(DIRECTOR_LLM_CONFIG, timeout_seconds=None)
+_CAUSAL_TASKS: dict[str, asyncio.Task] = {}
 
 # ---- 旧导演状态机常量（只用于读取历史状态，新的预规划链路不再维护）----
 # 连续偏离多少轮就弃掉当前爽点、改跟玩家的路（实测微调）。
@@ -189,7 +192,7 @@ async def prepare_opening(session_id: str) -> list[dict]:
         world_context = constraints.director_context(session_id, "")
         recalled_memories = _compact_memories(state.get("world_memory") or [])
         foundation = await _ensure_event_foundation(
-            state, "（新存档开场）", world_context, recalled_memories, opening=True
+            state, "（新存档开场）", world_context, recalled_memories
         )
         state["director_state"] = foundation
         director_state = await _plan_director_turn(
@@ -1190,7 +1193,25 @@ async def _plan_director_turn(
         "agents": metas,
     }
     planned["agent_outputs"] = metas
+    _merge_completed_causal(planned, state.get("director_state"))
     return planned
+
+
+def _merge_completed_causal(planned: dict, latest_raw: dict | None) -> None:
+    """Keep a causal result that completed while the current turn was being planned."""
+    latest = _dynamic_director_state(latest_raw)
+    planned_event = planned.get("event") if isinstance(planned.get("event"), dict) else None
+    latest_event = latest.get("event") if isinstance(latest.get("event"), dict) else None
+    if not planned_event or not latest_event or planned_event.get("id") != latest_event.get("id"):
+        return
+    causal_model = _clean_markdown(latest_event.get("causal_model"))
+    if not causal_model:
+        return
+    planned_event["causal_model"] = causal_model
+    latest_causal = (latest.get("agent_outputs") or {}).get("causal")
+    if isinstance(latest_causal, dict):
+        planned["agent_outputs"]["causal"] = latest_causal
+        planned["planner"]["agents"]["causal"] = latest_causal
 
 
 def _event_requires_new(prev: dict) -> bool:
@@ -1202,7 +1223,6 @@ def _event_needs_foundation(prev: dict) -> bool:
     event = prev.get("event") if isinstance(prev.get("event"), dict) else None
     return bool(
         _event_requires_new(prev)
-        or not _clean_text((event or {}).get("causal_model"), 12000)
         or not _clean_text((event or {}).get("cognition_model"), 12000)
     )
 
@@ -1212,14 +1232,21 @@ async def _ensure_event_foundation(
     action: str,
     world_context: dict,
     memories: list[dict],
-    *,
-    opening: bool = False,
 ) -> dict:
     prev = _dynamic_director_state(state.get("director_state"))
+    existing = prev.get("event") if isinstance(prev.get("event"), dict) else None
     if not _event_needs_foundation(prev):
+        if existing and not _clean_markdown(existing.get("causal_model")):
+            _schedule_causal_foundation(
+                state,
+                existing["id"],
+                _sanitize_event_creation(existing, world_context),
+                action,
+                world_context,
+                memories,
+            )
         return prev
 
-    existing = prev.get("event") if isinstance(prev.get("event"), dict) else None
     reuse_existing = bool(existing and existing.get("status") not in {"resolved", "abandoned"})
     character = {
         key: value for key, value in (state.get("character_state") or {}).items()
@@ -1251,37 +1278,6 @@ async def _ensure_event_foundation(
             event_result = _fallback_event_creation(world_context)
     event_seed = _sanitize_event_creation(event_result, world_context)
 
-    causal_model = _clean_markdown((existing or {}).get("causal_model"))
-    if causal_model:
-        causal_meta = {"source": "existing", "model": "stored", "fallback_reason": ""}
-    else:
-        causal_model, causal_meta = await _call_director_text_agent(
-            [
-                {"role": "system", "content": DIRECTOR_CAUSAL_SYSTEM_PROMPT},
-                {"role": "user", "content": "【事件】\n" + _stable_json(event_seed) + "\n\n" + base_context},
-            ],
-            "director_causal", DIRECTOR_CAUSAL_MAX_TOKENS, state.get("session_id"),
-        )
-        if not causal_model:
-            causal_model = _fallback_causal_model(event_seed, world_context)
-
-    cognition_model = _clean_markdown((existing or {}).get("cognition_model"))
-    if cognition_model:
-        cognition_meta = {"source": "existing", "model": "stored", "fallback_reason": ""}
-    else:
-        cognition_model, cognition_meta = await _call_director_text_agent(
-            [
-                {"role": "system", "content": DIRECTOR_COGNITION_SYSTEM_PROMPT},
-                {"role": "user", "content": (
-                    "【幕后因果模型】\n" + causal_model + "\n\n" + base_context
-                    + f"\n\n【是否为新存档开场】\n{opening}"
-                )},
-            ],
-            "director_cognition", DIRECTOR_COGNITION_MAX_TOKENS, state.get("session_id"),
-        )
-        if not cognition_model:
-            cognition_model = _fallback_cognition_model(event_seed, world_context)
-
     event = {
         **(existing if reuse_existing else {}),
         "id": existing.get("id") if reuse_existing else uuid.uuid4().hex,
@@ -1294,9 +1290,42 @@ async def _ensure_event_foundation(
         ),
         "turns": int(existing.get("turns") or 0) if reuse_existing else 0,
         "max_turns": DIRECTOR_EVENT_MAX_TURNS,
-        "causal_model": causal_model,
-        "cognition_model": cognition_model,
+        "causal_model": _clean_markdown((existing or {}).get("causal_model")),
+        "cognition_model": _clean_markdown((existing or {}).get("cognition_model")),
     }
+    causal_output = (
+        {"source": "existing", "model": "stored", "fallback_reason": "", "output": event["causal_model"]}
+        if event["causal_model"] else
+        {"source": "pending", "model": DIRECTOR_LLM_CONFIG.model, "fallback_reason": "", "output": None}
+    )
+    state["director_state"] = {
+        **prev,
+        "event": event,
+        "agent_outputs": {
+            "event": {**event_meta, "output": event_result},
+            "causal": causal_output,
+        },
+    }
+    if not event["causal_model"]:
+        _schedule_causal_foundation(
+            state, event["id"], event_seed, action, world_context, memories
+        )
+
+    cognition_model = event["cognition_model"]
+    if cognition_model:
+        cognition_meta = {"source": "existing", "model": "stored", "fallback_reason": ""}
+    else:
+        cognition_model, cognition_meta = await _call_director_text_agent(
+            [
+                {"role": "system", "content": DIRECTOR_COGNITION_SYSTEM_PROMPT},
+                {"role": "user", "content": "【事件 core】\n" + event_seed["core"]},
+            ],
+            "director_cognition", DIRECTOR_COGNITION_MAX_TOKENS, state.get("session_id"),
+        )
+        if not cognition_model:
+            cognition_model = _fallback_cognition_model(event_seed, world_context)
+
+    event["cognition_model"] = cognition_model
 
     hook_state = prev.get("hook_state") if _is_maintained_hook(prev.get("hook_state")) else None
     hook_meta = {"source": "existing", "model": "stored", "fallback_reason": ""}
@@ -1306,8 +1335,7 @@ async def _ensure_event_foundation(
             [
                 {"role": "system", "content": DIRECTOR_HOOK_SYSTEM_PROMPT},
                 {"role": "user", "content": (
-                    "【事件】\n" + _stable_json(event_seed)
-                    + "\n\n【幕后因果模型】\n" + causal_model
+                    "【事件 core】\n" + event_seed["core"]
                     + "\n\n【主角认知模型】\n" + cognition_model
                 )},
             ],
@@ -1325,14 +1353,21 @@ async def _ensure_event_foundation(
                 "created_turn": state["turns"] + 1,
             }
 
+    latest = _dynamic_director_state(state.get("director_state"))
+    latest_event = latest.get("event") if isinstance(latest.get("event"), dict) else None
+    if latest_event and latest_event.get("id") == event["id"]:
+        completed_causal = _clean_markdown(latest_event.get("causal_model"))
+        if completed_causal:
+            event["causal_model"] = completed_causal
+            causal_output = (latest.get("agent_outputs") or {}).get("causal") or causal_output
     outputs = {
         "event": {**event_meta, "output": event_result},
-        "causal": {**causal_meta, "output": causal_model},
+        "causal": causal_output,
         "cognition": {**cognition_meta, "output": cognition_model},
     }
     if hook_state:
         outputs["hook"] = {**hook_meta, "output": hook_result}
-    return {
+    foundation = {
         **prev,
         "event": event,
         "intent": None if not reuse_existing else prev.get("intent"),
@@ -1341,6 +1376,95 @@ async def _ensure_event_foundation(
         "agent_outputs": outputs,
         "needs_repair": False,
     }
+    state["director_state"] = foundation
+    return foundation
+
+
+def _schedule_causal_foundation(
+    state: dict,
+    event_id: str,
+    event_seed: dict,
+    action: str,
+    world_context: dict,
+    memories: list[dict],
+) -> None:
+    current = _CAUSAL_TASKS.get(event_id)
+    if current and not current.done():
+        return
+    character = {
+        key: value for key, value in (state.get("character_state") or {}).items()
+        if key != "updated_at"
+    }
+    context = "\n\n".join([
+        "【稳定世界与记忆】\n" + _stable_json({
+            "world_slice": world_context, "protagonist_memories": memories,
+        }),
+        "【主角状态】\n" + _stable_json(character),
+        "【最近剧情】\n" + (_recent_scene(state.get("transcript") or []) or "（新存档尚无正文）"),
+        "【当前输入】\n" + action,
+    ])
+    task = asyncio.create_task(_run_causal_foundation(
+        state.get("session_id"), event_id, event_seed, context, world_context
+    ))
+    _CAUSAL_TASKS[event_id] = task
+    task.add_done_callback(lambda done, key=event_id: (
+        _CAUSAL_TASKS.pop(key, None) if _CAUSAL_TASKS.get(key) is done else None
+    ))
+
+
+async def _run_causal_foundation(
+    session_id: str,
+    event_id: str,
+    event_seed: dict,
+    context: str,
+    world_context: dict,
+) -> None:
+    source = "llm"
+    model = DIRECTOR_LLM_CONFIG.model
+    reason = ""
+    try:
+        raw = await complete_chat(
+            [
+                {"role": "system", "content": DIRECTOR_CAUSAL_SYSTEM_PROMPT},
+                {"role": "user", "content": "【事件】\n" + _stable_json(event_seed) + "\n\n" + context},
+            ],
+            temperature=0.2,
+            max_tokens=DIRECTOR_CAUSAL_MAX_TOKENS,
+            config=DIRECTOR_CAUSAL_LLM_CONFIG,
+            request_type="director_causal",
+            session_id=session_id,
+        )
+        causal_model = _clean_markdown(raw)
+        if not causal_model:
+            raise ValueError("empty_markdown")
+    except Exception as exc:  # noqa: BLE001
+        source = "fallback"
+        model = "local"
+        reason = "empty_markdown" if str(exc) == "empty_markdown" else type(exc).__name__
+        causal_model = _fallback_causal_model(event_seed, world_context)
+        _LOG.exception("director_causal failed asynchronously for event %s", event_id)
+
+    state = _CACHE.get(session_id)
+    if not state:
+        return
+    director = _dynamic_director_state(state.get("director_state"))
+    event = director.get("event") if isinstance(director.get("event"), dict) else None
+    if not event or event.get("id") != event_id:
+        return
+    event["causal_model"] = causal_model
+    director["event"] = event
+    outputs = director.get("agent_outputs") if isinstance(director.get("agent_outputs"), dict) else {}
+    director["agent_outputs"] = {
+        **outputs,
+        "causal": {
+            "source": source,
+            "model": model,
+            "fallback_reason": reason,
+            "output": causal_model,
+        },
+    }
+    state["director_state"] = director
+    store.save_director_state(session_id, director)
 
 
 async def _call_director_agent(
