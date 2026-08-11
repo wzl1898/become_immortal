@@ -346,6 +346,10 @@ class DirectorPlanTests(unittest.TestCase):
                     "desc": "通过「破庙道人遗骨」获得「引气诀」",
                     "trigger": "玩家亲自检查破庙道人遗骨中的旧物",
                 }, ensure_ascii=False)
+            if request_type == "director_hook":
+                return json.dumps({
+                    "goal": "沿山路追查赵横留下的粮袋痕迹",
+                }, ensure_ascii=False)
             self.assertEqual(request_type, "director_skeleton")
             return json.dumps({
                 "turn_objective": "本轮完成一次明确攻防",
@@ -363,8 +367,15 @@ class DirectorPlanTests(unittest.TestCase):
             planned = asyncio.run(game._plan_director_turn(state, "迎战山匪", _context()))
 
         self.assertEqual(set(calls[:2]), {"director_pacing", "director_payoff"})
-        self.assertEqual(calls[2], "director_skeleton")
+        self.assertEqual(calls[2:], ["director_hook", "director_skeleton"])
         self.assertEqual(planned["current_plan"]["turn_objective"], "本轮完成一次明确攻防")
+        self.assertEqual(
+            planned["current_plan"]["action_goal"],
+            "沿山路追查赵横留下的粮袋痕迹",
+        )
+        self.assertEqual(planned["agent_outputs"]["director"]["output"]["action_goal"], (
+            "沿山路追查赵横留下的粮袋痕迹"
+        ))
         self.assertEqual(
             planned["current_plan"]["payoff"]["binding"]["reward_id"], "yin_qi_jue"
         )

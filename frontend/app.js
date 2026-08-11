@@ -843,8 +843,8 @@ function renderDynamicDirector(state) {
     tag.textContent = `${plan.turn_mode || "progress"} · ${plan.event_action || "none"}`;
     card.appendChild(tag);
     card.appendChild(field("本轮目标", plan.turn_objective || plan.current_goal));
-    if (plan.hook?.goal) {
-      card.appendChild(field("钩子行动方向", plan.hook.goal, "desc"));
+    if (plan.action_goal) {
+      card.appendChild(field("下一步行动方向", plan.action_goal, "desc"));
     }
     if (plan.payoff?.desc) {
       card.appendChild(field("待触发爽点", plan.payoff.desc, "desc"));

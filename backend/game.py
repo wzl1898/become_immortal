@@ -1179,12 +1179,39 @@ async def _plan_director_turn(
     planned["current_plan"]["selected_facts"] = _payoff_selected_facts(
         planned["current_plan"]["payoff"], world_context
     )
-    hook_state = prev.get("hook_state") if _is_maintained_hook(prev.get("hook_state")) else None
-    if planned["current_plan"].get("event_action") == "start" and hook_state:
+    previous_hook = _normalize_hook_state(prev.get("hook_state"))
+    if previous_hook and not event_just_created:
+        hook_status = (
+            "engaged" if planned["current_plan"].get("event_action") == "start"
+            else "superseded"
+        )
         planned["last_hook"] = {
-            **hook_state, "status": "engaged", "engaged_turn": state["turns"] + 1,
+            **previous_hook,
+            "status": hook_status,
+            "ended_turn": state["turns"] + 1,
         }
-        hook_state = None
+    if event_just_created and previous_hook:
+        hook_state = previous_hook
+        hook_result = _hook_text(previous_hook) or {"goal": ""}
+        hook_meta = ((prev.get("agent_outputs") or {}).get("hook") or {
+            "source": "existing", "model": "stored", "fallback_reason": "",
+        })
+    else:
+        hook_result, hook_meta = await _call_director_agent(
+            _director_hook_messages(state, action, planned, previous_hook, world_context),
+            "director_hook", DIRECTOR_HOOK_MAX_TOKENS, state.get("session_id"),
+        )
+        if hook_result is None:
+            hook_result = _fallback_hook_creation(planned.get("event") or {}, world_context)
+        hook_text = _hook_text(hook_result)
+        hook_result = hook_text or _fallback_hook_creation(planned.get("event") or {}, world_context)
+        hook_state = {
+            **hook_result,
+            "id": uuid.uuid4().hex,
+            "event_id": (planned.get("event") or {}).get("id"),
+            "status": "offered",
+            "created_turn": state["turns"] + 1,
+        }
     planned["hook_state"] = hook_state
     planned["current_plan"]["hook"] = dict(hook_state) if hook_state else None
 
@@ -1196,6 +1223,10 @@ async def _plan_director_turn(
     )
     if skeleton_result is None:
         skeleton_result = _fallback_director_skeleton(planned, action)
+    skeleton_result = {
+        **skeleton_result,
+        "action_goal": (hook_state or {}).get("goal", ""),
+    }
     planned = _apply_director_pacing(planned, skeleton_result, prev)
     foundation_outputs = {
         key: value for key, value in (prev.get("agent_outputs") or {}).items()
@@ -1203,6 +1234,7 @@ async def _plan_director_turn(
     }
     metas = {
         **foundation_outputs,
+        "hook": {**hook_meta, "output": hook_result},
         "payoff": {**payoff_meta, "output": payoff_result},
         "pacing": {**pacing_meta, "output": pacing_result},
         "director": {**skeleton_meta, "output": skeleton_result},
@@ -1356,7 +1388,13 @@ async def _ensure_event_foundation(
 
     event["viewpoint_model"] = viewpoint_model
 
-    hook_state = prev.get("hook_state") if _is_maintained_hook(prev.get("hook_state")) else None
+    hook_state = (
+        prev.get("hook_state")
+        if reuse_existing
+        and (prev.get("hook_state") or {}).get("event_id") == event["id"]
+        and _is_maintained_hook(prev.get("hook_state"))
+        else None
+    )
     hook_meta = {"source": "existing", "model": "stored", "fallback_reason": ""}
     hook_result = _hook_text(hook_state) or {"goal": ""}
     if event.get("status") == "offered" and hook_state is None:
@@ -1658,6 +1696,40 @@ def _director_pacing_messages(
     ]
 
 
+def _director_hook_messages(
+    state: dict,
+    action: str,
+    planned: dict,
+    previous_hook: dict | None,
+    world_context: dict,
+) -> list[dict]:
+    event = planned.get("event") or {}
+    plan = planned.get("current_plan") or {}
+    content = "\n\n".join([
+        "【事件】\n" + _stable_json({
+            key: event.get(key)
+            for key in ("id", "title", "core", "status", "turns", "max_turns")
+        }),
+        "【幕后因果模型】\n" + _clean_markdown(event.get("causal_model")),
+        "【主角视角模型】\n" + _clean_markdown(event.get("viewpoint_model")),
+        "【当前主角位置约束】\n" + _stable_json(world_context.get("location") or {}),
+        "【上一轮钩子】\n" + _stable_json(_hook_text(previous_hook)),
+        "【本轮节奏结果】\n" + _stable_json({
+            key: plan.get(key)
+            for key in (
+                "event_action", "turn_mode", "route_key", "intent", "stage",
+                "progress", "reveal_boundary",
+            )
+        }),
+        "【最近一轮正文】\n" + (_latest_scene(state.get("transcript") or []) or "（暂无）"),
+        "【玩家本轮行动】\n" + action,
+    ])
+    return [
+        {"role": "system", "content": DIRECTOR_HOOK_SYSTEM_PROMPT},
+        {"role": "user", "content": content},
+    ]
+
+
 def _director_skeleton_messages(state: dict, action: str, planned: dict) -> list[dict]:
     event = planned.get("event") or {}
     plan = planned.get("current_plan") or {}
@@ -1742,6 +1814,9 @@ def _fallback_director_skeleton(planned: dict, action: str) -> dict:
     return {
         "turn_objective": f"让玩家行动产生明确进展：{action[:80]}",
         "beats": ["直接落实玩家行动", "给出可以验证的结果或代价"],
+        "action_goal": _clean_text(
+            ((planned.get("current_plan") or {}).get("hook") or {}).get("goal"), 240
+        ),
         "state_changes": {},
         "must_not": ["只增加模糊感受或新悬念", "生成固定世界库之外的重大设定"],
         "scene": planned.get("scene") or "",
@@ -2000,6 +2075,7 @@ def _sanitize_director_plan(
         "payoff": None,
         "turn_objective": "",
         "beats": [],
+        "action_goal": "",
         "state_changes": {},
         "must_not": [],
         "scene": "",
@@ -2018,6 +2094,7 @@ def _sanitize_pacing_result(result: dict, allow_reward_state: bool = False) -> d
             result.get("turn_objective") or result.get("current_goal"), 280
         ),
         "beats": _clean_string_list(result.get("beats"), limit=3, item_limit=120),
+        "action_goal": _clean_text(result.get("action_goal"), 240),
         "state_changes": {
             key: _clean_text(value, 180)
             for key, value in state_changes.items()
@@ -2172,6 +2249,7 @@ def _render_director_plan(state: dict, world_context: dict) -> str:
         f"因果推进边界：{plan.get('progress') or '只呈现入口钩子，不推进正式事件'}",
         f"信息揭示边界：{plan.get('reveal_boundary') or '不得超出主角视角模型'}",
         f"本轮目标：{plan.get('turn_objective') or plan.get('current_goal') or '直接回应玩家行动'}",
+        f"正文结束后的行动方向：{plan.get('action_goal') or ((plan.get('hook') or {}).get('goal')) or '无'}",
     ]
     payoff = plan.get("payoff") if _is_maintained_payoff(plan.get("payoff")) else None
     if payoff:
