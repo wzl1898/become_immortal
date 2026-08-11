@@ -377,6 +377,13 @@ class DirectorPlanTests(unittest.TestCase):
             "沿山路追查赵横留下的粮袋痕迹"
         ))
         self.assertEqual(
+            planned["agent_outputs"]["director"]["output"]["must_not"][0],
+            "不得在本轮正文中替玩家执行下一步行动方向：沿山路追查赵横留下的粮袋痕迹",
+        )
+        self.assertIn("不得在本轮正文中替玩家执行", (
+            planned["current_plan"]["must_not"][0]
+        ))
+        self.assertEqual(
             planned["current_plan"]["payoff"]["binding"]["reward_id"], "yin_qi_jue"
         )
         self.assertNotIn("current_goal", planned["current_plan"])

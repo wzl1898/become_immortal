@@ -1223,9 +1223,17 @@ async def _plan_director_turn(
     )
     if skeleton_result is None:
         skeleton_result = _fallback_director_skeleton(planned, action)
+    action_goal = (hook_state or {}).get("goal", "")
+    existing_must_not = (
+        skeleton_result.get("must_not")
+        if isinstance(skeleton_result.get("must_not"), list)
+        else []
+    )
+    hook_guard = f"不得在本轮正文中替玩家执行下一步行动方向：{action_goal}"
     skeleton_result = {
         **skeleton_result,
-        "action_goal": (hook_state or {}).get("goal", ""),
+        "action_goal": action_goal,
+        "must_not": ([hook_guard, *existing_must_not] if action_goal else existing_must_not),
     }
     planned = _apply_director_pacing(planned, skeleton_result, prev)
     foundation_outputs = {
@@ -1714,7 +1722,7 @@ def _director_hook_messages(
         "【主角视角模型】\n" + _clean_markdown(event.get("viewpoint_model")),
         "【当前主角位置约束】\n" + _stable_json(world_context.get("location") or {}),
         "【上一轮钩子】\n" + _stable_json(_hook_text(previous_hook)),
-        "【本轮节奏结果】\n" + _stable_json({
+        "【视为已经完成的本轮结果】\n" + _stable_json({
             key: plan.get(key)
             for key in (
                 "event_action", "turn_mode", "route_key", "intent", "stage",
