@@ -59,6 +59,7 @@ const LLM_REQUEST_LABELS = {
   opening: "开场生成",
   director_plan: "导演规划",
   director_event: "事件 Agent",
+  director_progression: "推进 Agent",
   director_causal: "因果 Agent",
   director_viewpoint: "视角 Agent",
   director_cognition: "视角 Agent（旧版）",
@@ -701,6 +702,7 @@ function renderAgentOutputs(outputs) {
   if (!outputs || typeof outputs !== "object" || !Object.keys(outputs).length) return;
   const labels = {
     event: "事件",
+    progression: "推进",
     causal: "因果",
     viewpoint: "视角",
     cognition: "视角（旧版）",
@@ -710,7 +712,7 @@ function renderAgentOutputs(outputs) {
     director: "骨架",
     audit: "审计",
   };
-  const available = ["event", "causal", "viewpoint", "cognition", "hook", "payoff", "pacing", "director", "audit"]
+  const available = ["event", "causal", "viewpoint", "cognition", "progression", "hook", "payoff", "pacing", "director", "audit"]
     .filter((key) => outputs[key] && typeof outputs[key] === "object");
   if (!available.length) return;
 
@@ -806,6 +808,9 @@ function renderDynamicDirector(state) {
     if (event.benefit) {
       directorBodyEl.appendChild(field("事件可获好处", event.benefit, "desc"));
     }
+    if (event.end_condition) {
+      directorBodyEl.appendChild(field("事件结束条件", event.end_condition, "trigger"));
+    }
   }
 
   if (intent) {
@@ -844,6 +849,9 @@ function renderDynamicDirector(state) {
     tag.className = "dir-armed-tag" + (plan.intent_resolved ? "" : " off");
     tag.textContent = `意图${plan.intent_resolved ? "已结算" : "未结算"} · 事件${plan.event_ended ? "已结束" : "进行中"}`;
     card.appendChild(tag);
+    if (plan.progression_direction) {
+      card.appendChild(field("事件推进方向", plan.progression_direction, "desc"));
+    }
     card.appendChild(field("本轮目标", plan.turn_objective || plan.current_goal));
     if (plan.action_goal) {
       card.appendChild(field("下一步行动方向", plan.action_goal, "desc"));

@@ -27,7 +27,7 @@ from llm import complete_chat, config_from_env
 from prompts import (
     DIRECTOR_AUDIT_SYSTEM_PROMPT,
     DIRECTOR_CAUSAL_SYSTEM_PROMPT,
-    DIRECTOR_EVENT_UPDATE_SYSTEM_PROMPT,
+    DIRECTOR_PROGRESSION_SYSTEM_PROMPT,
     DIRECTOR_VIEWPOINT_SYSTEM_PROMPT,
     DIRECTOR_EVENT_SYSTEM_PROMPT,
     DIRECTOR_HOOK_SYSTEM_PROMPT,
@@ -86,8 +86,9 @@ _DIRECTOR_LEGACY_MAX_TOKENS = os.getenv("DIRECTOR_LLM_MAX_TOKENS")
 DIRECTOR_EVENT_MAX_TOKENS = int(os.getenv(
     "DIRECTOR_EVENT_MAX_TOKENS", _DIRECTOR_LEGACY_MAX_TOKENS or "350"
 ))
-DIRECTOR_EVENT_UPDATE_MAX_TOKENS = int(os.getenv(
-    "DIRECTOR_EVENT_UPDATE_MAX_TOKENS", _DIRECTOR_LEGACY_MAX_TOKENS or "450"
+DIRECTOR_PROGRESSION_MAX_TOKENS = int(os.getenv(
+    "DIRECTOR_PROGRESSION_MAX_TOKENS",
+    os.getenv("DIRECTOR_EVENT_UPDATE_MAX_TOKENS", _DIRECTOR_LEGACY_MAX_TOKENS or "450"),
 ))
 DIRECTOR_PAYOFF_MAX_TOKENS = int(os.getenv(
     "DIRECTOR_PAYOFF_MAX_TOKENS", _DIRECTOR_LEGACY_MAX_TOKENS or "250"
@@ -704,7 +705,7 @@ async def prepare_action(session_id: str, action: str) -> list[dict]:
         latest_scene = _latest_scene(state.get("transcript") or [])
         recall_query = "\n\n".join(part for part in (event_core, latest_scene, action) if part)
         recalled_memories = _recall_world_memory(state, recall_query)
-        event_just_created = _event_needs_foundation(previous)
+        event_just_created = _event_requires_new(previous)
         foundation = await _ensure_event_foundation(
             state, action, world_context, _compact_memories(recalled_memories)
         )
@@ -1085,6 +1086,10 @@ def _dynamic_director_state(raw: dict | None) -> dict:
         if isinstance(normalized.get("event"), dict):
             normalized["event"] = dict(normalized["event"])
             normalized["event"].pop("premise", None)
+            if not normalized["event"].get("end_condition"):
+                normalized["event"]["end_condition"] = (
+                    "当前事件 core 中的主要问题得到明确结果，或当前事件确定无法继续"
+                )
             if not normalized["event"].get("viewpoint_model"):
                 normalized["event"]["viewpoint_model"] = _clean_markdown(
                     normalized["event"].get("cognition_model")
@@ -1143,13 +1148,28 @@ async def _plan_director_turn(
 ) -> dict:
     prev = _dynamic_director_state(state.get("director_state"))
     compact_memories = _compact_memories(recalled_memories or [])
+
+    progression_result, progression_meta = await _call_director_agent(
+        _director_progression_messages(state, action, prev),
+        "director_progression", DIRECTOR_PROGRESSION_MAX_TOKENS, state.get("session_id"),
+    )
+    progression_decision = _sanitize_progression_decision(
+        progression_result, prev.get("event") or {}
+    )
+    if event_just_created:
+        progression_decision["ended"] = False
+    progression_output = dict(progression_decision)
+
     payoff_call, pacing_call = await asyncio.gather(
         _call_director_agent(
             _director_payoff_messages(state, action, world_context, prev, compact_memories),
             "director_payoff", DIRECTOR_PAYOFF_MAX_TOKENS, state.get("session_id")
         ),
         _call_director_agent(
-            _director_pacing_messages(state, action, prev, event_just_created),
+            _director_pacing_messages(
+                state, action, prev, progression_decision,
+                event_just_created=event_just_created,
+            ),
             "director_pacing", DIRECTOR_PACING_MAX_TOKENS, state.get("session_id")
         ),
     )
@@ -1161,44 +1181,21 @@ async def _plan_director_turn(
         pacing_result = _fallback_director_pacing(prev, action)
 
     pacing_decision = _sanitize_pacing_decision(pacing_result, prev, action)
-    if event_just_created:
-        event_update = {
-            "core": _clean_text((prev.get("event") or {}).get("core"), 300),
-            "benefit": _clean_text((prev.get("event") or {}).get("benefit"), 240),
-            "ended": False,
-        }
-        event_meta = ((prev.get("agent_outputs") or {}).get("event") or {
-            "source": "existing", "model": "stored", "fallback_reason": "",
-        })
-        event_output = event_meta.get("output") or event_update
-    else:
-        event_result, event_meta = await _call_director_agent(
-            _director_event_update_messages(state, action, prev, pacing_decision),
-            "director_event", DIRECTOR_EVENT_UPDATE_MAX_TOKENS, state.get("session_id"),
-        )
-        event_update = _sanitize_event_update(event_result, prev.get("event") or {})
-        event_output = event_update
-
-    event_for_plan = copy.deepcopy(prev.get("event") or {})
-    event_for_plan.update({
-        "core": event_update["core"],
-        "benefit": event_update["benefit"],
-    })
-    prev_for_plan = {**prev, "event": event_for_plan}
     previous_status = (prev.get("event") or {}).get("status")
     event_action = (
-        "resolve" if event_update["ended"]
+        "resolve" if progression_decision["ended"]
         else "none" if event_just_created
         else "start" if previous_status == "offered"
         else "continue"
     )
     combined_plan = {
         "event_action": event_action,
-        "turn_mode": "resolve" if event_update["ended"] else "setup" if event_just_created else "progress",
+        "turn_mode": "resolve" if progression_decision["ended"] else "setup" if event_just_created else "progress",
         "route_key": "none",
         "intent": pacing_decision["intent"],
         "intent_resolved": pacing_decision["resolved"],
-        "event_ended": event_update["ended"],
+        "progression_direction": progression_decision["direction"],
+        "event_ended": progression_decision["ended"],
         "stage": "",
         "progress": "",
         "reveal_boundary": "",
@@ -1206,7 +1203,7 @@ async def _plan_director_turn(
     }
 
     planned = _apply_director_plan(
-        prev_for_plan,
+        prev,
         combined_plan,
         action,
         world_context,
@@ -1237,28 +1234,21 @@ async def _plan_director_turn(
             "status": hook_status,
             "ended_turn": state["turns"] + 1,
         }
-    if event_just_created and previous_hook:
-        hook_state = previous_hook
-        hook_result = _hook_text(previous_hook) or {"goal": ""}
-        hook_meta = ((prev.get("agent_outputs") or {}).get("hook") or {
-            "source": "existing", "model": "stored", "fallback_reason": "",
-        })
-    else:
-        hook_result, hook_meta = await _call_director_agent(
-            _director_hook_messages(state, action, planned, previous_hook, world_context),
-            "director_hook", DIRECTOR_HOOK_MAX_TOKENS, state.get("session_id"),
-        )
-        if hook_result is None:
-            hook_result = _fallback_hook_creation(planned.get("event") or {}, world_context)
-        hook_text = _hook_text(hook_result)
-        hook_result = hook_text or _fallback_hook_creation(planned.get("event") or {}, world_context)
-        hook_state = {
-            **hook_result,
-            "id": uuid.uuid4().hex,
-            "event_id": (planned.get("event") or {}).get("id"),
-            "status": "offered",
-            "created_turn": state["turns"] + 1,
-        }
+    hook_result, hook_meta = await _call_director_agent(
+        _director_hook_messages(state, action, planned, previous_hook, world_context),
+        "director_hook", DIRECTOR_HOOK_MAX_TOKENS, state.get("session_id"),
+    )
+    if hook_result is None:
+        hook_result = _fallback_hook_creation(planned.get("event") or {}, world_context)
+    hook_text = _hook_text(hook_result)
+    hook_result = hook_text or _fallback_hook_creation(planned.get("event") or {}, world_context)
+    hook_state = {
+        **hook_result,
+        "id": uuid.uuid4().hex,
+        "event_id": (planned.get("event") or {}).get("id"),
+        "status": "offered",
+        "created_turn": state["turns"] + 1,
+    }
     planned["hook_state"] = hook_state
     planned["current_plan"]["hook"] = dict(hook_state) if hook_state else None
 
@@ -1289,7 +1279,7 @@ async def _plan_director_turn(
     }
     metas = {
         **foundation_outputs,
-        "event": {**event_meta, "output": event_output},
+        "progression": {**progression_meta, "output": progression_output},
         "hook": {**hook_meta, "output": hook_result},
         "payoff": {**payoff_meta, "output": payoff_result},
         "pacing": {**pacing_meta, "output": pacing_result},
@@ -1375,7 +1365,9 @@ async def _ensure_event_foundation(
             "title": existing.get("title") or existing.get("core") or "当前事件",
             "core": existing.get("core") or "当前事件",
             "benefit": existing.get("benefit") or "",
-            "ended": False,
+            "end_condition": existing.get("end_condition") or (
+                "当前事件 core 中的主要问题得到明确结果，或当前事件确定无法继续"
+            ),
         }
         event_meta = {"source": "existing", "model": "stored", "fallback_reason": ""}
     else:
@@ -1396,6 +1388,7 @@ async def _ensure_event_foundation(
         "title": event_seed["title"],
         "core": event_seed["core"],
         "benefit": event_seed["benefit"],
+        "end_condition": event_seed["end_condition"],
         "status": existing.get("status") if reuse_existing else "offered",
         "created_turn": (
             int(existing.get("created_turn") or existing.get("start_turn") or state["turns"] + 1)
@@ -1455,29 +1448,6 @@ async def _ensure_event_foundation(
     )
     hook_meta = {"source": "existing", "model": "stored", "fallback_reason": ""}
     hook_result = _hook_text(hook_state) or {"goal": ""}
-    if event.get("status") == "offered" and hook_state is None:
-        hook_result, hook_meta = await _call_director_agent(
-            [
-                {"role": "system", "content": DIRECTOR_HOOK_SYSTEM_PROMPT},
-                {"role": "user", "content": (
-                    "【事件 core】\n" + event_seed["core"]
-                    + "\n\n【主角视角模型】\n" + viewpoint_model
-                )},
-            ],
-            "director_hook", DIRECTOR_HOOK_MAX_TOKENS, state.get("session_id"),
-        )
-        if hook_result is None:
-            hook_result = _fallback_hook_creation(event_seed, world_context)
-        hook_text = _hook_text(hook_result)
-        hook_result = hook_text or {"goal": ""}
-        if hook_text:
-            hook_state = {
-                **hook_text,
-                "id": uuid.uuid4().hex,
-                "event_id": event["id"],
-                "status": "offered",
-                "created_turn": state["turns"] + 1,
-            }
 
     latest = _dynamic_director_state(state.get("director_state"))
     latest_event = latest.get("event") if isinstance(latest.get("event"), dict) else None
@@ -1672,6 +1642,7 @@ def _compact_director_state(prev: dict) -> dict:
             "id": event.get("id"),
             "core": event.get("core"),
             "benefit": event.get("benefit"),
+            "end_condition": event.get("end_condition"),
             "start_turn": event.get("start_turn"),
             "status": event.get("status"),
             "turns": event.get("turns"),
@@ -1728,14 +1699,20 @@ def _director_pacing_messages(
     state: dict,
     action: str,
     prev: dict,
+    progression: dict | None = None,
+    *,
     event_just_created: bool = False,
 ) -> list[dict]:
     event = prev.get("event") or {}
     content = "\n\n".join([
         "【事件】\n" + _stable_json({
             key: event.get(key)
-            for key in ("id", "title", "core", "benefit", "status", "turns", "created_turn")
+            for key in (
+                "id", "title", "core", "benefit", "end_condition",
+                "status", "turns", "created_turn",
+            )
         }),
+        "【推进 Agent结果】\n" + _stable_json(progression or {}),
         "【幕后因果模型】\n" + _clean_markdown(event.get("causal_model")),
         "【主角视角模型】\n" + _clean_markdown(event.get("viewpoint_model")),
         "【入口钩子】\n" + _stable_json(prev.get("hook_state")),
@@ -1755,26 +1732,28 @@ def _director_pacing_messages(
     ]
 
 
-def _director_event_update_messages(
+def _director_progression_messages(
     state: dict,
     action: str,
     prev: dict,
-    pacing_decision: dict,
 ) -> list[dict]:
     event = prev.get("event") or {}
     content = "\n\n".join([
         "【当前事件】\n" + _stable_json({
             key: event.get(key)
-            for key in ("id", "title", "core", "benefit", "status", "turns", "created_turn")
+            for key in (
+                "id", "title", "core", "benefit", "end_condition",
+                "status", "turns", "created_turn",
+            )
         }),
         "【幕后因果模型】\n" + _clean_markdown(event.get("causal_model")),
         "【主角视角模型】\n" + _clean_markdown(event.get("viewpoint_model")),
-        "【玩家意图是否结算】\n" + _stable_json(pacing_decision),
+        "【上一轮状态】\n" + _stable_json(_compact_director_state(prev)),
         "【最近一轮正文】\n" + (_latest_scene(state.get("transcript") or []) or "（暂无）"),
         "【玩家本轮行动】\n" + action,
     ])
     return [
-        {"role": "system", "content": DIRECTOR_EVENT_UPDATE_SYSTEM_PROMPT},
+        {"role": "system", "content": DIRECTOR_PROGRESSION_SYSTEM_PROMPT},
         {"role": "user", "content": content},
     ]
 
@@ -1791,7 +1770,7 @@ def _director_hook_messages(
     content = "\n\n".join([
         "【事件】\n" + _stable_json({
             key: event.get(key)
-            for key in ("id", "title", "core", "benefit", "status", "turns")
+            for key in ("id", "title", "core", "benefit", "end_condition", "status", "turns")
         }),
         "【幕后因果模型】\n" + _clean_markdown(event.get("causal_model")),
         "【主角视角模型】\n" + _clean_markdown(event.get("viewpoint_model")),
@@ -1801,9 +1780,8 @@ def _director_hook_messages(
             "intent": plan.get("intent"),
             "resolved": plan.get("intent_resolved"),
         }),
-        "【事件 Agent维护结果】\n" + _stable_json({
-            "core": event.get("core"),
-            "benefit": event.get("benefit"),
+        "【推进 Agent结果】\n" + _stable_json({
+            "direction": plan.get("progression_direction"),
             "ended": plan.get("event_ended"),
         }),
         "【最近一轮正文】\n" + (_latest_scene(state.get("transcript") or []) or "（暂无）"),
@@ -1821,7 +1799,7 @@ def _director_skeleton_messages(state: dict, action: str, planned: dict) -> list
     content = "\n\n".join([
         "【事件】\n" + _stable_json({
             key: event.get(key)
-            for key in ("id", "title", "core", "benefit", "status", "turns")
+            for key in ("id", "title", "core", "benefit", "end_condition", "status", "turns")
         }),
         "【幕后因果模型】\n" + _clean_markdown(event.get("causal_model")),
         "【主角视角模型】\n" + _clean_markdown(event.get("viewpoint_model")),
@@ -1830,9 +1808,8 @@ def _director_skeleton_messages(state: dict, action: str, planned: dict) -> list
             "resolved": plan.get("intent_resolved"),
             "forced_reasons": plan.get("forced_reasons"),
         }),
-        "【事件 Agent结果】\n" + _stable_json({
-            "core": event.get("core"),
-            "benefit": event.get("benefit"),
+        "【推进 Agent结果】\n" + _stable_json({
+            "direction": plan.get("progression_direction"),
             "ended": plan.get("event_ended"),
         }),
         "【入口钩子】\n" + _stable_json(plan.get("hook")),
@@ -1854,7 +1831,7 @@ def _fallback_event_creation(world_context: dict) -> dict:
         "title": f"{location}当前事件",
         "core": f"{location}正在出现一项玩家角色可以观察和介入的现实变化",
         "benefit": f"通过介入{location}的变化获得可以确认的新信息",
-        "ended": False,
+        "end_condition": f"{location}的当前变化得到明确结果或确定无法继续",
     }
 
 
@@ -1882,17 +1859,15 @@ def _sanitize_pacing_decision(result: dict | None, prev: dict, action: str) -> d
     }
 
 
-def _sanitize_event_update(result: dict | None, existing: dict) -> dict:
-    core = _clean_text(existing.get("core"), 300) or "当前事件仍在持续"
-    benefit = _clean_text(existing.get("benefit"), 240)
+def _sanitize_progression_decision(result: dict | None, event: dict) -> dict:
+    fallback_direction = (
+        f"让玩家行动对“{_clean_text(event.get('core'), 160) or '当前事件'}”产生一个明确变化，"
+        f"并接近“{_clean_text(event.get('benefit'), 120) or '事件可获好处'}”"
+    )
     if not isinstance(result, dict):
-        return {"core": core, "benefit": benefit, "ended": False}
+        return {"direction": fallback_direction, "ended": False}
     return {
-        "core": _clean_text(result.get("core"), 300) or core,
-        "benefit": (
-            _clean_text(result.get("benefit"), 240)
-            if "benefit" in result else benefit
-        ),
+        "direction": _clean_text(result.get("direction"), 360) or fallback_direction,
         "ended": bool(result.get("ended")),
     }
 
@@ -1936,7 +1911,9 @@ def _sanitize_event_creation(result: dict, world_context: dict) -> dict:
         "title": _clean_text(result.get("title"), 100) or fallback["title"],
         "core": _clean_text(result.get("core"), 300) or fallback["core"],
         "benefit": _clean_text(result.get("benefit"), 240) or fallback["benefit"],
-        "ended": False,
+        "end_condition": (
+            _clean_text(result.get("end_condition"), 300) or fallback["end_condition"]
+        ),
     }
 
 
@@ -2161,6 +2138,7 @@ def _sanitize_director_plan(
             "same_as_previous": bool(intent.get("same_as_previous")),
         },
         "intent_resolved": bool(result.get("intent_resolved")),
+        "progression_direction": _clean_text(result.get("progression_direction"), 360),
         "event_ended": bool(result.get("event_ended")),
         "stage": _clean_text(result.get("stage"), 180),
         "progress": _clean_text(result.get("progress"), 360),
@@ -2317,9 +2295,11 @@ def _render_director_plan(state: dict, world_context: dict) -> str:
         "【本轮导演骨架（高优先级；你负责丰满，不得改变结果）】",
         f"事件：{event.get('core') or '无正式事件'}",
         f"事件中仍可获得的好处：{event.get('benefit') or '无'}",
+        f"事件结束条件：{event.get('end_condition') or '当前核心问题得到明确结果'}",
         f"玩家意图：{(state.get('intent') or {}).get('key') or '未归类'}（第 {(state.get('intent') or {}).get('attempts', 1)} 次）",
         f"玩家意图本轮结算：{'是' if plan.get('intent_resolved') else '否'}",
         f"事件本轮结束：{'是' if plan.get('event_ended') else '否'}",
+        f"事件推进方向：{plan.get('progression_direction') or '让玩家行动产生明确的事件变化'}",
         "信息边界：不得超出主角视角模型",
         f"本轮目标：{plan.get('turn_objective') or plan.get('current_goal') or '直接回应玩家行动'}",
         f"正文结束后的行动方向：{plan.get('action_goal') or ((plan.get('hook') or {}).get('goal')) or '无'}",
