@@ -794,16 +794,18 @@ function renderDynamicDirector(state) {
     const meta = document.createElement("div");
     meta.className = "dir-meta";
     const turns = Number(event.turns) || 0;
-    const maxTurns = Number(event.max_turns) || 5;
     const startTurn = Number(event.start_turn) || 0;
     const endedTurn = Number(event.ended_turn) || 0;
     const isFinished = status === "resolved" || status === "abandoned";
     meta.innerHTML = isFinished
       ? `<span class="item">事件历时 <b>${turns}</b> 轮</span>` +
         `<span class="item">第 <b>${startTurn}</b> 至 <b>${endedTurn || startTurn}</b> 回合</span>`
-      : `<span class="item${turns >= maxTurns ? " warn" : ""}">事件轮数 <b>${turns}/${maxTurns}</b></span>` +
+      : `<span class="item">事件已持续 <b>${turns}</b> 轮</span>` +
         `<span class="item">开始于第 <b>${startTurn}</b> 回合</span>`;
     directorBodyEl.appendChild(meta);
+    if (event.benefit) {
+      directorBodyEl.appendChild(field("事件可获好处", event.benefit, "desc"));
+    }
   }
 
   if (intent) {
@@ -837,10 +839,10 @@ function renderDynamicDirector(state) {
 
   if (plan) {
     const card = document.createElement("div");
-    card.className = "dir-payoff" + (plan.turn_mode === "resolve" ? " armed" : "");
+    card.className = "dir-payoff" + (plan.intent_resolved ? " armed" : "");
     const tag = document.createElement("span");
-    tag.className = "dir-armed-tag" + (plan.turn_mode === "resolve" ? "" : " off");
-    tag.textContent = `${plan.turn_mode || "progress"} · ${plan.event_action || "none"}`;
+    tag.className = "dir-armed-tag" + (plan.intent_resolved ? "" : " off");
+    tag.textContent = `意图${plan.intent_resolved ? "已结算" : "未结算"} · 事件${plan.event_ended ? "已结束" : "进行中"}`;
     card.appendChild(tag);
     card.appendChild(field("本轮目标", plan.turn_objective || plan.current_goal));
     if (plan.action_goal) {

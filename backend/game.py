@@ -27,6 +27,7 @@ from llm import complete_chat, config_from_env
 from prompts import (
     DIRECTOR_AUDIT_SYSTEM_PROMPT,
     DIRECTOR_CAUSAL_SYSTEM_PROMPT,
+    DIRECTOR_EVENT_UPDATE_SYSTEM_PROMPT,
     DIRECTOR_VIEWPOINT_SYSTEM_PROMPT,
     DIRECTOR_EVENT_SYSTEM_PROMPT,
     DIRECTOR_HOOK_SYSTEM_PROMPT,
@@ -72,8 +73,6 @@ RECALL_THRESHOLD = 0.35
 DEFAULT_NAME = "无名修士"
 
 # ---- 导演模块（实时事件骨架）----
-# 正式事件最多占用多少次玩家行动。
-DIRECTOR_EVENT_MAX_TURNS = 5
 # 同一语义意图第二次必须结算。
 DIRECTOR_INTENT_MAX_ATTEMPTS = 2
 # 同一场景黏多少轮就要求导演切换节拍或场景。
@@ -86,6 +85,9 @@ DIRECTOR_PLANNER_TIMEOUT_SECONDS = float(os.getenv("DIRECTOR_LLM_TIMEOUT", "35")
 _DIRECTOR_LEGACY_MAX_TOKENS = os.getenv("DIRECTOR_LLM_MAX_TOKENS")
 DIRECTOR_EVENT_MAX_TOKENS = int(os.getenv(
     "DIRECTOR_EVENT_MAX_TOKENS", _DIRECTOR_LEGACY_MAX_TOKENS or "350"
+))
+DIRECTOR_EVENT_UPDATE_MAX_TOKENS = int(os.getenv(
+    "DIRECTOR_EVENT_UPDATE_MAX_TOKENS", _DIRECTOR_LEGACY_MAX_TOKENS or "450"
 ))
 DIRECTOR_PAYOFF_MAX_TOKENS = int(os.getenv(
     "DIRECTOR_PAYOFF_MAX_TOKENS", _DIRECTOR_LEGACY_MAX_TOKENS or "250"
@@ -1156,11 +1158,56 @@ async def _plan_director_turn(
     if payoff_result is None:
         payoff_result = _fallback_director_payoff(prev)
     if pacing_result is None:
-        pacing_result = _fallback_director_pacing(prev, action, event_just_created)
+        pacing_result = _fallback_director_pacing(prev, action)
+
+    pacing_decision = _sanitize_pacing_decision(pacing_result, prev, action)
+    if event_just_created:
+        event_update = {
+            "core": _clean_text((prev.get("event") or {}).get("core"), 300),
+            "benefit": _clean_text((prev.get("event") or {}).get("benefit"), 240),
+            "ended": False,
+        }
+        event_meta = ((prev.get("agent_outputs") or {}).get("event") or {
+            "source": "existing", "model": "stored", "fallback_reason": "",
+        })
+        event_output = event_meta.get("output") or event_update
+    else:
+        event_result, event_meta = await _call_director_agent(
+            _director_event_update_messages(state, action, prev, pacing_decision),
+            "director_event", DIRECTOR_EVENT_UPDATE_MAX_TOKENS, state.get("session_id"),
+        )
+        event_update = _sanitize_event_update(event_result, prev.get("event") or {})
+        event_output = event_update
+
+    event_for_plan = copy.deepcopy(prev.get("event") or {})
+    event_for_plan.update({
+        "core": event_update["core"],
+        "benefit": event_update["benefit"],
+    })
+    prev_for_plan = {**prev, "event": event_for_plan}
+    previous_status = (prev.get("event") or {}).get("status")
+    event_action = (
+        "resolve" if event_update["ended"]
+        else "none" if event_just_created
+        else "start" if previous_status == "offered"
+        else "continue"
+    )
+    combined_plan = {
+        "event_action": event_action,
+        "turn_mode": "resolve" if event_update["ended"] else "setup" if event_just_created else "progress",
+        "route_key": "none",
+        "intent": pacing_decision["intent"],
+        "intent_resolved": pacing_decision["resolved"],
+        "event_ended": event_update["ended"],
+        "stage": "",
+        "progress": "",
+        "reveal_boundary": "",
+        "note": "",
+    }
 
     planned = _apply_director_plan(
-        prev,
-        pacing_result,
+        prev_for_plan,
+        combined_plan,
         action,
         world_context,
         state["turns"] + 1,
@@ -1242,6 +1289,7 @@ async def _plan_director_turn(
     }
     metas = {
         **foundation_outputs,
+        "event": {**event_meta, "output": event_output},
         "hook": {**hook_meta, "output": hook_result},
         "payoff": {**payoff_meta, "output": payoff_result},
         "pacing": {**pacing_meta, "output": pacing_result},
@@ -1326,6 +1374,8 @@ async def _ensure_event_foundation(
         event_result = {
             "title": existing.get("title") or existing.get("core") or "当前事件",
             "core": existing.get("core") or "当前事件",
+            "benefit": existing.get("benefit") or "",
+            "ended": False,
         }
         event_meta = {"source": "existing", "model": "stored", "fallback_reason": ""}
     else:
@@ -1345,13 +1395,13 @@ async def _ensure_event_foundation(
         "id": existing.get("id") if reuse_existing else uuid.uuid4().hex,
         "title": event_seed["title"],
         "core": event_seed["core"],
+        "benefit": event_seed["benefit"],
         "status": existing.get("status") if reuse_existing else "offered",
         "created_turn": (
             int(existing.get("created_turn") or existing.get("start_turn") or state["turns"] + 1)
             if reuse_existing else state["turns"] + 1
         ),
         "turns": int(existing.get("turns") or 0) if reuse_existing else 0,
-        "max_turns": DIRECTOR_EVENT_MAX_TURNS,
         "causal_model": _clean_markdown((existing or {}).get("causal_model")),
         "viewpoint_model": _clean_markdown(
             (existing or {}).get("viewpoint_model") or (existing or {}).get("cognition_model")
@@ -1621,16 +1671,17 @@ def _compact_director_state(prev: dict) -> dict:
         "event": ({
             "id": event.get("id"),
             "core": event.get("core"),
+            "benefit": event.get("benefit"),
             "start_turn": event.get("start_turn"),
             "status": event.get("status"),
             "turns": event.get("turns"),
-            "max_turns": event.get("max_turns"),
         } if event else None),
         "intent": prev.get("intent"),
         "previous_hook": _hook_text(prev.get("hook_state")),
         "previous_result": {
             "turn_objective": plan.get("turn_objective") or plan.get("current_goal"),
-            "turn_mode": plan.get("turn_mode"),
+            "intent_resolved": plan.get("intent_resolved"),
+            "event_ended": plan.get("event_ended"),
             "audit": {
                 "fulfilled": audit.get("fulfilled"),
                 "payoff_triggered": audit.get("payoff_triggered"),
@@ -1683,7 +1734,7 @@ def _director_pacing_messages(
     content = "\n\n".join([
         "【事件】\n" + _stable_json({
             key: event.get(key)
-            for key in ("id", "title", "core", "status", "turns", "max_turns", "created_turn")
+            for key in ("id", "title", "core", "benefit", "status", "turns", "created_turn")
         }),
         "【幕后因果模型】\n" + _clean_markdown(event.get("causal_model")),
         "【主角视角模型】\n" + _clean_markdown(event.get("viewpoint_model")),
@@ -1704,6 +1755,30 @@ def _director_pacing_messages(
     ]
 
 
+def _director_event_update_messages(
+    state: dict,
+    action: str,
+    prev: dict,
+    pacing_decision: dict,
+) -> list[dict]:
+    event = prev.get("event") or {}
+    content = "\n\n".join([
+        "【当前事件】\n" + _stable_json({
+            key: event.get(key)
+            for key in ("id", "title", "core", "benefit", "status", "turns", "created_turn")
+        }),
+        "【幕后因果模型】\n" + _clean_markdown(event.get("causal_model")),
+        "【主角视角模型】\n" + _clean_markdown(event.get("viewpoint_model")),
+        "【玩家意图是否结算】\n" + _stable_json(pacing_decision),
+        "【最近一轮正文】\n" + (_latest_scene(state.get("transcript") or []) or "（暂无）"),
+        "【玩家本轮行动】\n" + action,
+    ])
+    return [
+        {"role": "system", "content": DIRECTOR_EVENT_UPDATE_SYSTEM_PROMPT},
+        {"role": "user", "content": content},
+    ]
+
+
 def _director_hook_messages(
     state: dict,
     action: str,
@@ -1716,18 +1791,20 @@ def _director_hook_messages(
     content = "\n\n".join([
         "【事件】\n" + _stable_json({
             key: event.get(key)
-            for key in ("id", "title", "core", "status", "turns", "max_turns")
+            for key in ("id", "title", "core", "benefit", "status", "turns")
         }),
         "【幕后因果模型】\n" + _clean_markdown(event.get("causal_model")),
         "【主角视角模型】\n" + _clean_markdown(event.get("viewpoint_model")),
         "【当前主角位置约束】\n" + _stable_json(world_context.get("location") or {}),
         "【上一轮钩子】\n" + _stable_json(_hook_text(previous_hook)),
-        "【视为已经完成的本轮结果】\n" + _stable_json({
-            key: plan.get(key)
-            for key in (
-                "event_action", "turn_mode", "route_key", "intent", "stage",
-                "progress", "reveal_boundary",
-            )
+        "【玩家意图是否结算】\n" + _stable_json({
+            "intent": plan.get("intent"),
+            "resolved": plan.get("intent_resolved"),
+        }),
+        "【事件 Agent维护结果】\n" + _stable_json({
+            "core": event.get("core"),
+            "benefit": event.get("benefit"),
+            "ended": plan.get("event_ended"),
         }),
         "【最近一轮正文】\n" + (_latest_scene(state.get("transcript") or []) or "（暂无）"),
         "【玩家本轮行动】\n" + action,
@@ -1744,16 +1821,19 @@ def _director_skeleton_messages(state: dict, action: str, planned: dict) -> list
     content = "\n\n".join([
         "【事件】\n" + _stable_json({
             key: event.get(key)
-            for key in ("id", "title", "core", "status", "turns", "max_turns")
+            for key in ("id", "title", "core", "benefit", "status", "turns")
         }),
         "【幕后因果模型】\n" + _clean_markdown(event.get("causal_model")),
         "【主角视角模型】\n" + _clean_markdown(event.get("viewpoint_model")),
         "【节奏 Agent结果】\n" + _stable_json({
-            key: plan.get(key)
-            for key in (
-                "event_action", "turn_mode", "route_key", "intent", "stage",
-                "progress", "reveal_boundary", "forced_reasons",
-            )
+            "intent": plan.get("intent"),
+            "resolved": plan.get("intent_resolved"),
+            "forced_reasons": plan.get("forced_reasons"),
+        }),
+        "【事件 Agent结果】\n" + _stable_json({
+            "core": event.get("core"),
+            "benefit": event.get("benefit"),
+            "ended": plan.get("event_ended"),
         }),
         "【入口钩子】\n" + _stable_json(plan.get("hook")),
         "【爽点】\n" + _stable_json({
@@ -1773,42 +1853,47 @@ def _fallback_event_creation(world_context: dict) -> dict:
     return {
         "title": f"{location}当前事件",
         "core": f"{location}正在出现一项玩家角色可以观察和介入的现实变化",
+        "benefit": f"通过介入{location}的变化获得可以确认的新信息",
+        "ended": False,
     }
 
 
-def _fallback_director_pacing(
-    prev: dict, action: str, event_just_created: bool = False
-) -> dict:
-    event = prev.get("event") if isinstance(prev.get("event"), dict) else {}
-    status = event.get("status") or "offered"
-    avoid = any(word in action for word in (
-        "避", "躲", "逃", "撤", "绕开", "不打", "不理", "放弃", "回家", "假装没事",
-    ))
-    fight_words = ("打", "战", "杀", "攻", "反击", "迎敌")
-    investigate_words = ("看", "查", "问", "探", "研究", "观察", "细想")
-    fight = any(word in action for word in fight_words) and not _negates_any(action, fight_words)
-    investigate = (
-        any(word in action for word in investigate_words)
-        and not _negates_any(action, investigate_words)
-        and not avoid
-    )
-    route = "escape" if avoid else "engage" if fight else "investigate"
-    if event_just_created:
-        event_action = "none"
-        route = "none"
-    elif status == "offered":
-        event_action = "none" if avoid else "start"
-    else:
-        event_action = "resolve" if avoid else "continue"
+def _fallback_director_pacing(prev: dict, action: str) -> dict:
+    previous_key = _clean_text((prev.get("intent") or {}).get("key"), 120)
+    key = _clean_text(action, 120) or "尚未行动"
+    same = bool(previous_key and "".join(previous_key.split()) == "".join(key.split()))
     return {
-        "event_action": event_action,
-        "turn_mode": "resolve" if event_action == "resolve" else "setup" if status == "offered" else "progress",
-        "route_key": route,
-        "intent": {"key": action[:80], "same_as_previous": False},
-        "stage": "事件入口" if status == "offered" else "事件推进",
-        "progress": "让玩家行动产生一个可验证的直接结果",
-        "reveal_boundary": "只呈现主角视角模型允许确认的信息",
-        "note": "节奏 Agent不可用，已采用保守推进。",
+        "intent": {"key": key, "same_as_previous": same},
+        "resolved": True,
+    }
+
+
+def _sanitize_pacing_decision(result: dict | None, prev: dict, action: str) -> dict:
+    fallback = _fallback_director_pacing(prev, action)
+    if not isinstance(result, dict):
+        return fallback
+    intent = result.get("intent") if isinstance(result.get("intent"), dict) else {}
+    return {
+        "intent": {
+            "key": _clean_text(intent.get("key"), 120) or fallback["intent"]["key"],
+            "same_as_previous": bool(intent.get("same_as_previous")),
+        },
+        "resolved": bool(result.get("resolved")),
+    }
+
+
+def _sanitize_event_update(result: dict | None, existing: dict) -> dict:
+    core = _clean_text(existing.get("core"), 300) or "当前事件仍在持续"
+    benefit = _clean_text(existing.get("benefit"), 240)
+    if not isinstance(result, dict):
+        return {"core": core, "benefit": benefit, "ended": False}
+    return {
+        "core": _clean_text(result.get("core"), 300) or core,
+        "benefit": (
+            _clean_text(result.get("benefit"), 240)
+            if "benefit" in result else benefit
+        ),
+        "ended": bool(result.get("ended")),
     }
 
 
@@ -1833,11 +1918,6 @@ def _fallback_director_skeleton(planned: dict, action: str) -> dict:
     }
 
 
-def _negates_any(action: str, words: tuple[str, ...]) -> bool:
-    prefixes = ("不", "不要", "不再", "别", "停止", "放弃", "无需")
-    return any(f"{prefix}{word}" in action for prefix in prefixes for word in words)
-
-
 def _clean_text(value, limit: int = 240) -> str:
     return str(value or "").strip()[:limit]
 
@@ -1855,6 +1935,8 @@ def _sanitize_event_creation(result: dict, world_context: dict) -> dict:
     return {
         "title": _clean_text(result.get("title"), 100) or fallback["title"],
         "core": _clean_text(result.get("core"), 300) or fallback["core"],
+        "benefit": _clean_text(result.get("benefit"), 240) or fallback["benefit"],
+        "ended": False,
     }
 
 
@@ -1863,6 +1945,7 @@ def _fallback_causal_model(event_seed: dict, world_context: dict) -> str:
     return (
         f"# {event_seed['title']}幕后事实\n\n"
         f"玩家角色位于{location}。当前事件核心为：{event_seed['core']}。\n\n"
+        f"当前事件中玩家角色可能获得的好处为：{event_seed.get('benefit') or '确认事件信息'}。\n\n"
         "稳定世界层尚未提供更多可以确认的人物、物件与历史，"
         "后续 Agent不得为当前事件补造未记录的固定世界事实。"
     )
@@ -2077,6 +2160,8 @@ def _sanitize_director_plan(
             "key": _clean_text(intent.get("key"), 120),
             "same_as_previous": bool(intent.get("same_as_previous")),
         },
+        "intent_resolved": bool(result.get("intent_resolved")),
+        "event_ended": bool(result.get("event_ended")),
         "stage": _clean_text(result.get("stage"), 180),
         "progress": _clean_text(result.get("progress"), 360),
         "reveal_boundary": _clean_text(result.get("reveal_boundary"), 360),
@@ -2123,16 +2208,6 @@ def _same_intent(prev_intent: dict | None, plan_intent: dict) -> bool:
     return bool(plan_intent.get("same_as_previous") or (old and new and old == new))
 
 
-def _player_demands_terminal_escape(action: str, route_key: str) -> bool:
-    if route_key != "escape":
-        return False
-    terminal_phrases = (
-        "撤回", "退回", "逃离", "脱身", "摆脱", "离开这里", "回村",
-        "返回村", "不与", "不交战", "避开战斗", "避战",
-    )
-    return any(phrase in action for phrase in terminal_phrases)
-
-
 def _apply_director_plan(
     prev: dict,
     result: dict,
@@ -2160,7 +2235,7 @@ def _apply_director_plan(
 
     event = copy.deepcopy(prev_event) if prev_event else None
     event_turns = int((event or {}).get("turns") or 0)
-    if event and offered and event_action == "start":
+    if event and offered and event_action in {"start", "resolve"}:
         event_turns = 1
         event.update({"status": "active", "start_turn": turn, "turns": event_turns})
     elif event and active and event_action in {"continue", "resolve", "abandon"}:
@@ -2182,18 +2257,9 @@ def _apply_director_plan(
     }
 
     forced_reasons = []
-    if active and event_turns >= DIRECTOR_EVENT_MAX_TURNS:
-        event_action = "resolve"
-        plan["turn_mode"] = "resolve"
-        forced_reasons.append("事件达到第 5 轮硬上限，本轮必须结算")
     if active and attempts >= DIRECTOR_INTENT_MAX_ATTEMPTS:
-        event_action = "resolve"
-        plan["turn_mode"] = "resolve"
-        forced_reasons.append("同一意图已连续尝试 2 次，本轮必须结算")
-    if active and _player_demands_terminal_escape(action, plan["route_key"]):
-        event_action = "resolve"
-        plan["turn_mode"] = "resolve"
-        forced_reasons.append("玩家明确选择脱离冲突，本轮必须给出完整脱离结果")
+        plan["intent_resolved"] = True
+        forced_reasons.append("同一意图已连续尝试 2 次，本轮必须结算该玩家意图")
     if event_action in {"resolve", "abandon"}:
         plan["turn_mode"] = "resolve" if event_action == "resolve" else "transition"
         event["status"] = "resolving" if event_action == "resolve" else "abandoning"
@@ -2250,12 +2316,11 @@ def _render_director_plan(state: dict, world_context: dict) -> str:
     lines = [
         "【本轮导演骨架（高优先级；你负责丰满，不得改变结果）】",
         f"事件：{event.get('core') or '无正式事件'}",
-        f"事件进度：{event.get('turns', 0)}/{event.get('max_turns', DIRECTOR_EVENT_MAX_TURNS)}",
+        f"事件中仍可获得的好处：{event.get('benefit') or '无'}",
         f"玩家意图：{(state.get('intent') or {}).get('key') or '未归类'}（第 {(state.get('intent') or {}).get('attempts', 1)} 次）",
-        f"本轮模式：{plan.get('turn_mode')}；事件动作：{plan.get('event_action')}",
-        f"事实阶段：{plan.get('stage') or '未标注'}",
-        f"因果推进边界：{plan.get('progress') or '只呈现入口钩子，不推进正式事件'}",
-        f"信息揭示边界：{plan.get('reveal_boundary') or '不得超出主角视角模型'}",
+        f"玩家意图本轮结算：{'是' if plan.get('intent_resolved') else '否'}",
+        f"事件本轮结束：{'是' if plan.get('event_ended') else '否'}",
+        "信息边界：不得超出主角视角模型",
         f"本轮目标：{plan.get('turn_objective') or plan.get('current_goal') or '直接回应玩家行动'}",
         f"正文结束后的行动方向：{plan.get('action_goal') or ((plan.get('hook') or {}).get('goal')) or '无'}",
     ]
@@ -2283,8 +2348,10 @@ def _render_director_plan(state: dict, world_context: dict) -> str:
         lines.append("必须按顺序落实：" + " → ".join(plan["beats"]))
     if plan.get("state_changes"):
         lines.append("必须落实状态变化：" + json.dumps(plan["state_changes"], ensure_ascii=False))
-    if plan.get("turn_mode") == "resolve":
-        lines.append("结算硬约束：本轮正文必须给出完整结果，禁止用新悬念、模糊感受或‘仍待查明’替代。")
+    if plan.get("intent_resolved"):
+        lines.append("意图结算硬约束：本轮正文必须给玩家当前意图明确结果，禁止用新悬念、模糊感受或‘仍待查明’替代。")
+    if plan.get("event_ended"):
+        lines.append("事件结束硬约束：本轮正文必须让当前事件核心得到明确结果。")
     if plan.get("selected_facts"):
         lines.append("爽点绑定的固定世界事实（仅满足 trigger 时可兑现）：")
         lines.extend(f"- [{row['id']}] {row['text']}" for row in plan["selected_facts"])
