@@ -1094,6 +1094,12 @@ def _dynamic_director_state(raw: dict | None) -> dict:
             if "viewpoint" not in outputs and "cognition" in outputs:
                 outputs["viewpoint"] = outputs["cognition"]
             outputs.pop("cognition", None)
+            hook_output = outputs.get("hook")
+            if isinstance(hook_output, dict) and isinstance(hook_output.get("output"), dict):
+                outputs["hook"] = {
+                    **hook_output,
+                    "output": _hook_text(hook_output["output"]) or {"goal": ""},
+                }
             normalized["agent_outputs"] = outputs
         # Old immediate payoff objects used type/outcome/proof and must not be
         # mistaken for the new long-lived desc/trigger contract.
@@ -1104,6 +1110,8 @@ def _dynamic_director_state(raw: dict | None) -> dict:
         normalized.setdefault("last_payoff", None)
         normalized.setdefault("hook_state", None)
         normalized.setdefault("last_hook", None)
+        normalized["hook_state"] = _normalize_hook_state(normalized.get("hook_state"))
+        normalized["last_hook"] = _normalize_hook_state(normalized.get("last_hook"))
         normalized.setdefault("agent_outputs", {})
         return normalized
     return {
@@ -1350,7 +1358,7 @@ async def _ensure_event_foundation(
 
     hook_state = prev.get("hook_state") if _is_maintained_hook(prev.get("hook_state")) else None
     hook_meta = {"source": "existing", "model": "stored", "fallback_reason": ""}
-    hook_result = _hook_text(hook_state) or {"desc": "", "goal": ""}
+    hook_result = _hook_text(hook_state) or {"goal": ""}
     if event.get("status") == "offered" and hook_state is None:
         hook_result, hook_meta = await _call_director_agent(
             [
@@ -1365,6 +1373,7 @@ async def _ensure_event_foundation(
         if hook_result is None:
             hook_result = _fallback_hook_creation(event_seed, world_context)
         hook_text = _hook_text(hook_result)
+        hook_result = hook_text or {"goal": ""}
         if hook_text:
             hook_state = {
                 **hook_text,
@@ -1791,10 +1800,7 @@ def _fallback_viewpoint_model(event_seed: dict, world_context: dict) -> str:
 
 def _fallback_hook_creation(event_seed: dict, world_context: dict) -> dict:
     location = (world_context.get("location") or {}).get("location_name") or "当前地点"
-    return {
-        "desc": f"{location}出现了与平常不同、可以直接观察的变化。",
-        "goal": f"留意{location}的变化并确认发生了什么",
-    }
+    return {"goal": f"留意{location}的变化并确认发生了什么"}
 
 
 def _clean_string_list(value, *, limit: int = 6, item_limit: int = 180) -> list[str]:
@@ -1814,7 +1820,6 @@ def _is_maintained_payoff(value) -> bool:
 def _is_maintained_hook(value) -> bool:
     return bool(
         isinstance(value, dict)
-        and _clean_text(value.get("desc"), 360)
         and _clean_text(value.get("goal"), 240)
     )
 
@@ -1822,10 +1827,16 @@ def _is_maintained_hook(value) -> bool:
 def _hook_text(value: dict | None) -> dict | None:
     if not _is_maintained_hook(value):
         return None
-    return {
-        "desc": _clean_text(value.get("desc"), 360),
-        "goal": _clean_text(value.get("goal"), 240),
-    }
+    return {"goal": _clean_text(value.get("goal"), 240)}
+
+
+def _normalize_hook_state(value: dict | None) -> dict | None:
+    text = _hook_text(value)
+    if text is None:
+        return None
+    normalized = {**value, **text}
+    normalized.pop("desc", None)
+    return normalized
 
 
 def _reconcile_hook_state(
@@ -1834,7 +1845,7 @@ def _reconcile_hook_state(
     engaged: bool,
     turn: int,
 ) -> tuple[dict | None, dict | None]:
-    previous = prev.get("hook_state") if _is_maintained_hook(prev.get("hook_state")) else None
+    previous = _normalize_hook_state(prev.get("hook_state"))
     candidate = _hook_text(result)
     last_hook = prev.get("last_hook") if isinstance(prev.get("last_hook"), dict) else None
 
@@ -1845,7 +1856,7 @@ def _reconcile_hook_state(
             "engaged_turn": turn,
         }
     if previous:
-        same = candidate and all(candidate[key] == previous.get(key) for key in ("desc", "goal"))
+        same = candidate and candidate["goal"] == previous.get("goal")
         if same or candidate is None:
             return previous, last_hook
         age = turn - int(previous.get("created_turn") or turn)
@@ -2177,9 +2188,8 @@ def _render_director_plan(state: dict, world_context: dict) -> str:
     hook = plan.get("hook") if _is_maintained_hook(plan.get("hook")) else None
     if hook:
         lines.extend([
-            f"玩家可见钩子：{hook.get('desc')}",
             f"可选行动目标：{hook.get('goal')}",
-            "钩子呈现硬约束：让该情况作为正文中真实可感知的世界事实出现；末尾至少一个灵光提示直接对应其行动目标。不得替玩家接受，也不得本轮直接转成正式事件。",
+            "钩子呈现硬约束：从主角视角模型中选择能够支撑该目标的真实可感知事实进入正文；末尾至少一个灵光提示直接对应该目标。不得替玩家接受，也不得本轮直接转成正式事件。",
         ])
     if plan.get("forced_reasons"):
         lines.append("后端强制：" + "；".join(plan["forced_reasons"]))

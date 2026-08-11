@@ -390,9 +390,20 @@ class DirectorPlanTests(unittest.TestCase):
             "status": "offered",
             "created_turn": 2,
         }
+        normalized = game._dynamic_director_state({
+            "event": _event(),
+            "current_plan": None,
+            "hook_state": previous,
+            "agent_outputs": {"hook": {"source": "llm", "output": previous}},
+        })
+        self.assertNotIn("desc", normalized["hook_state"])
+        self.assertEqual(normalized["agent_outputs"]["hook"]["output"], {
+            "goal": "前往破庙查看异动",
+        })
+
         hook, last = game._reconcile_hook_state(
             {"hook_state": previous},
-            {"desc": "", "goal": ""},
+            {"goal": ""},
             True,
             3,
         )
@@ -400,6 +411,7 @@ class DirectorPlanTests(unittest.TestCase):
         self.assertIsNone(hook)
         self.assertEqual(last["status"], "engaged")
         self.assertEqual(last["engaged_turn"], 3)
+        self.assertNotIn("desc", last)
 
     def test_skeleton_receives_backend_forced_resolution(self):
         first = game._apply_director_plan(
@@ -445,7 +457,7 @@ class DirectorPlanTests(unittest.TestCase):
                 if request_type == "director_hook":
                     self.assertNotIn("幕后因果模型", messages[-1]["content"])
                     return json.dumps({
-                        "desc": "约定地点没有周济川的踪影。",
+                        "desc": "这个旧字段必须被后端丢弃。",
                         "goal": "查看周济川原定返回的道路",
                     }, ensure_ascii=False)
                 self.assertEqual(request_type, "director_causal")
@@ -483,6 +495,10 @@ class DirectorPlanTests(unittest.TestCase):
                 self.assertEqual(second["event"]["id"], first["event"]["id"])
                 self.assertIn("山路塌方", second["event"]["causal_model"])
                 self.assertEqual(second["agent_outputs"]["causal"]["source"], "llm")
+                self.assertEqual(first["agent_outputs"]["hook"]["output"], {
+                    "goal": "查看周济川原定返回的道路",
+                })
+                self.assertNotIn("desc", first["hook_state"])
                 self.assertNotIn("premise", first["event"])
             finally:
                 game._CACHE.pop(sid, None)

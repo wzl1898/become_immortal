@@ -823,11 +823,10 @@ function renderDynamicDirector(state) {
     directorBodyEl.appendChild(intentMeta);
   }
 
-  if (hook?.desc) {
+  if (hook?.goal) {
     const hookCard = document.createElement("div");
     hookCard.className = "dir-hook";
-    hookCard.appendChild(field("当前钩子", hook.desc, "desc"));
-    hookCard.appendChild(field("可选目标", hook.goal));
+    hookCard.appendChild(field("当前钩子目标", hook.goal, "desc"));
     const hookMeta = document.createElement("div");
     hookMeta.className = "dir-meta";
     hookMeta.innerHTML = `<span class="item">状态 <b>${hook.status || "offered"}</b></span>` +
@@ -844,9 +843,8 @@ function renderDynamicDirector(state) {
     tag.textContent = `${plan.turn_mode || "progress"} · ${plan.event_action || "none"}`;
     card.appendChild(tag);
     card.appendChild(field("本轮目标", plan.turn_objective || plan.current_goal));
-    if (plan.hook?.desc) {
-      card.appendChild(field("本轮呈现钩子", plan.hook.desc, "desc"));
-      card.appendChild(field("对应灵光方向", plan.hook.goal));
+    if (plan.hook?.goal) {
+      card.appendChild(field("钩子行动方向", plan.hook.goal, "desc"));
     }
     if (plan.payoff?.desc) {
       card.appendChild(field("待触发爽点", plan.payoff.desc, "desc"));
