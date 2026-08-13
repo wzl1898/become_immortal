@@ -107,6 +107,7 @@ DIRECTOR_SKELETON_MAX_TOKENS = int(os.getenv("DIRECTOR_SKELETON_MAX_TOKENS", "60
 DIRECTOR_LLM_CONFIG = config_from_env("DIRECTOR_LLM")
 DIRECTOR_CAUSAL_LLM_CONFIG = replace(DIRECTOR_LLM_CONFIG, timeout_seconds=None)
 _CAUSAL_TASKS: dict[str, asyncio.Task] = {}
+_NEXT_EVENT_TASKS: dict[str, asyncio.Task] = {}
 
 # ---- 旧导演状态机常量（只用于读取历史状态，新的预规划链路不再维护）----
 # 连续偏离多少轮就弃掉当前爽点、改跟玩家的路（实测微调）。
@@ -1120,6 +1121,7 @@ def _dynamic_director_state(raw: dict | None) -> dict:
         normalized["hook_state"] = _normalize_hook_state(normalized.get("hook_state"))
         normalized["last_hook"] = _normalize_hook_state(normalized.get("last_hook"))
         normalized.setdefault("agent_outputs", {})
+        normalized.setdefault("next_event_seed", None)
         return normalized
     return {
         "event": None,
@@ -1130,6 +1132,7 @@ def _dynamic_director_state(raw: dict | None) -> dict:
         "hook_state": None,
         "last_hook": None,
         "agent_outputs": {},
+        "next_event_seed": None,
         "last_audit": None,
         "needs_repair": False,
         "scene": raw.get("scene", ""),
@@ -1347,6 +1350,7 @@ async def _ensure_event_foundation(
             )
         return prev
 
+    next_seed = prev.get("next_event_seed") if isinstance(prev.get("next_event_seed"), dict) else None
     reuse_existing = bool(existing and existing.get("status") not in {"resolved", "abandoned"})
     character = {
         key: value for key, value in (state.get("character_state") or {}).items()
@@ -1360,7 +1364,14 @@ async def _ensure_event_foundation(
         "【当前输入】\n" + action,
     ])
 
-    if reuse_existing:
+    if next_seed:
+        event_result = next_seed
+        event_meta = (
+            (prev.get("agent_outputs") or {}).get("next_event")
+            or {"source": "llm", "model": DIRECTOR_LLM_CONFIG.model, "fallback_reason": ""}
+        )
+        reuse_existing = False
+    elif reuse_existing:
         event_result = {
             "title": existing.get("title") or existing.get("core") or "当前事件",
             "core": existing.get("core") or "当前事件",
@@ -1465,6 +1476,7 @@ async def _ensure_event_foundation(
         outputs["hook"] = {**hook_meta, "output": hook_result}
     foundation = {
         **prev,
+        "next_event_seed": None,
         "event": event,
         "intent": None if not reuse_existing else prev.get("intent"),
         "current_plan": None if not reuse_existing else prev.get("current_plan"),
@@ -1474,6 +1486,63 @@ async def _ensure_event_foundation(
     }
     state["director_state"] = foundation
     return foundation
+
+
+def _schedule_next_event_generation(
+    state: dict,
+    assistant_content: str,
+) -> None:
+    session_id = state.get("session_id")
+    if not session_id:
+        return
+    current = _NEXT_EVENT_TASKS.get(session_id)
+    if current and not current.done():
+        return
+    world_context = constraints.director_context(session_id, "")
+    event = (state.get("director_state") or {}).get("event") or {}
+    context = "\n\n".join([
+        "【已结束事件】\n" + _stable_json({
+            key: event.get(key) for key in ("title", "core", "benefit", "end_condition")
+        }),
+        "【最近正文】\n" + _narration_body(assistant_content),
+        "【稳定世界与当前地点】\n" + _stable_json(world_context),
+        "请创建一个与已结束事件有合理衔接、但独立成立的新事件。",
+    ])
+    task = asyncio.create_task(_run_next_event_generation(session_id, context))
+    _NEXT_EVENT_TASKS[session_id] = task
+    task.add_done_callback(
+        lambda done, key=session_id: _NEXT_EVENT_TASKS.pop(key, None)
+        if _NEXT_EVENT_TASKS.get(key) is done else None
+    )
+
+
+async def _run_next_event_generation(session_id: str, context: str) -> None:
+    result, meta = await _call_director_agent(
+        [
+            {"role": "system", "content": DIRECTOR_EVENT_SYSTEM_PROMPT},
+            {"role": "user", "content": context},
+        ],
+        "director_event", DIRECTOR_EVENT_MAX_TOKENS, session_id,
+    )
+    if result is None:
+        return
+    state = _CACHE.get(session_id)
+    if not state:
+        return
+    director = _dynamic_director_state(state.get("director_state"))
+    event = director.get("event") if isinstance(director.get("event"), dict) else None
+    if not event or event.get("status") not in {"resolved", "abandoned"}:
+        return
+    world_context = constraints.director_context(session_id, "")
+    seed = _sanitize_event_creation(result, world_context)
+    director["next_event_seed"] = seed
+    outputs = director.get("agent_outputs") if isinstance(director.get("agent_outputs"), dict) else {}
+    director["agent_outputs"] = {
+        **outputs,
+        "next_event": {**meta, "output": seed},
+    }
+    state["director_state"] = director
+    store.save_director_state(session_id, director)
 
 
 def _schedule_causal_foundation(
@@ -2384,6 +2453,8 @@ def _finalize_director_state(state: dict, assistant_content: str) -> None:
         event["ended_turn"] = state["turns"]
     director["event"] = event
     state["director_state"] = director
+    if action == "resolve":
+        _schedule_next_event_generation(state, assistant_content)
 
 
 def _schedule_director_audit(

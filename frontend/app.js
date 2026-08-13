@@ -702,6 +702,7 @@ function renderAgentOutputs(outputs) {
   if (!outputs || typeof outputs !== "object" || !Object.keys(outputs).length) return;
   const labels = {
     event: "事件",
+    next_event: "下一事件",
     progression: "推进",
     causal: "因果",
     viewpoint: "视角",
@@ -712,7 +713,7 @@ function renderAgentOutputs(outputs) {
     director: "骨架",
     audit: "审计",
   };
-  const available = ["event", "causal", "viewpoint", "cognition", "progression", "hook", "payoff", "pacing", "director", "audit"]
+  const available = ["event", "next_event", "causal", "viewpoint", "cognition", "progression", "hook", "payoff", "pacing", "director", "audit"]
     .filter((key) => outputs[key] && typeof outputs[key] === "object");
   if (!available.length) return;
 

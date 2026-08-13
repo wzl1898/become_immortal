@@ -173,6 +173,40 @@ class DirectorPlanTests(unittest.TestCase):
         self.assertFalse(game._event_requires_new(_director(status="offered")))
         self.assertTrue(game._event_requires_new(_director(status="resolved")))
 
+    def test_ended_event_async_pre_generates_next_event_seed(self):
+        sid = "next-event-test"
+        state = {
+            "session_id": sid,
+            "director_state": _director(status="resolved"),
+        }
+        game._CACHE[sid] = state
+
+        async def fake_complete(*args, **kwargs):
+            self.assertEqual(kwargs["request_type"], "director_event")
+            return json.dumps({
+                "title": "青溪镇散修传闻",
+                "core": "王满仓提到的背剑散修在青溪镇留下了新的动静",
+                "benefit": "获得引气诀抄本的修行机缘",
+                "end_condition": "背剑散修留下的动静得到明确查证",
+            }, ensure_ascii=False)
+
+        async def scenario():
+            with patch.object(game, "complete_chat", fake_complete), patch.object(
+                game.store, "save_director_state"
+            ):
+                await game._run_next_event_generation(sid, "上一事件已结束")
+
+        try:
+            asyncio.run(scenario())
+            seed = state["director_state"]["next_event_seed"]
+            self.assertEqual(seed["title"], "青溪镇散修传闻")
+            self.assertEqual(
+                state["director_state"]["agent_outputs"]["next_event"]["output"]["benefit"],
+                "获得引气诀抄本的修行机缘",
+            )
+        finally:
+            game._CACHE.pop(sid, None)
+
     def test_missing_viewpoint_does_not_make_active_event_new(self):
         director = _director(status="active")
         director["event"]["viewpoint_model"] = ""
