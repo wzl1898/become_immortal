@@ -1360,6 +1360,10 @@ async def _ensure_event_foundation(
     base_context = "\n\n".join([
         "【稳定世界与记忆】\n" + _stable_json(world_layer),
         "【主角状态】\n" + _stable_json(character),
+        "【已存在事件（若有）】\n" + _stable_json({
+            key: existing.get(key)
+            for key in ("title", "core", "benefit", "end_condition", "status")
+        } if existing else None),
         "【最近剧情】\n" + (_recent_scene(state.get("transcript") or []) or "（新存档尚无正文）"),
         "【当前输入】\n" + action,
     ])
@@ -1498,22 +1502,34 @@ def _schedule_next_event_generation(
     current = _NEXT_EVENT_TASKS.get(session_id)
     if current and not current.done():
         return
-    world_context = constraints.director_context(session_id, "")
-    event = (state.get("director_state") or {}).get("event") or {}
-    context = "\n\n".join([
-        "【已结束事件】\n" + _stable_json({
-            key: event.get(key) for key in ("title", "core", "benefit", "end_condition")
-        }),
-        "【最近正文】\n" + _narration_body(assistant_content),
-        "【稳定世界与当前地点】\n" + _stable_json(world_context),
-        "请创建一个与已结束事件有合理衔接、但独立成立的新事件。",
-    ])
+    context = _next_event_generation_context(state, assistant_content)
     task = asyncio.create_task(_run_next_event_generation(session_id, context))
     _NEXT_EVENT_TASKS[session_id] = task
     task.add_done_callback(
         lambda done, key=session_id: _NEXT_EVENT_TASKS.pop(key, None)
         if _NEXT_EVENT_TASKS.get(key) is done else None
     )
+
+
+def _next_event_generation_context(state: dict, assistant_content: str) -> str:
+    session_id = state.get("session_id")
+    world_context = constraints.director_context(session_id, "")
+    event = (state.get("director_state") or {}).get("event") or {}
+    character = {
+        key: value for key, value in (state.get("character_state") or {}).items()
+        if key != "updated_at"
+    }
+    memories = _compact_memories(state.get("world_memory") or [])
+    return "\n\n".join([
+        "【已结束事件】\n" + _stable_json({
+            key: event.get(key) for key in ("title", "core", "benefit", "end_condition")
+        }),
+        "【最近正文】\n" + _narration_body(assistant_content),
+        "【主角当前状态与成长】\n" + _stable_json(character),
+        "【近期世界记忆】\n" + _stable_json(memories),
+        "【稳定世界与当前地点】\n" + _stable_json(world_context),
+        "请创建一个与已结束事件有合理衔接、但独立成立的新事件。必须在 core 中体现旧事件结束后的推进理由、主角成长带来的新可能，以及当前地点和周边环境为什么承载这个事件。",
+    ])
 
 
 async def _run_next_event_generation(session_id: str, context: str) -> None:

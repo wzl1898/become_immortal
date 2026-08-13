@@ -207,6 +207,26 @@ class DirectorPlanTests(unittest.TestCase):
         finally:
             game._CACHE.pop(sid, None)
 
+    def test_next_event_generation_context_includes_growth_location_and_previous_event(self):
+        sid = "next-event-context-test"
+        state = {
+            "session_id": sid,
+            "character_state": {"realm": "炼气一层", "condition": "刚掌握引气诀"},
+            "world_memory": [{
+                "id": "memory:qingxi-rumor",
+                "type": "plot",
+                "text": "王满仓提到青溪镇散修",
+            }],
+            "director_state": _director(status="resolved"),
+        }
+        content = game._next_event_generation_context(state, "结束正文")
+
+        self.assertIn("【已结束事件】", content)
+        self.assertIn("炼气一层", content)
+        self.assertIn("青溪镇散修", content)
+        self.assertIn("【稳定世界与当前地点】", content)
+        self.assertIn("旧事件结束后的推进理由", content)
+
     def test_missing_viewpoint_does_not_make_active_event_new(self):
         director = _director(status="active")
         director["event"]["viewpoint_model"] = ""
