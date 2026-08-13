@@ -2320,7 +2320,7 @@ def _render_director_plan(state: dict, world_context: dict) -> str:
     if hook:
         lines.extend([
             f"可选行动目标：{hook.get('goal')}",
-            "钩子呈现硬约束：从主角视角模型中选择能够支撑该目标的真实可感知事实进入正文；末尾至少一个灵光提示直接对应该目标。不得替玩家接受，也不得本轮直接转成正式事件。",
+            "钩子呈现硬约束：本轮正文必须自然写出与该目标直接相关的暗示，例如具体对象的异常、相关人物的只言片语、可追查物件或值得介入的现场变化，让玩家理解为什么可以采取该行动；末尾至少一个灵光提示直接对应该目标。只能暗示和引导，不得替玩家接受、提问、调查、取得答案或本轮直接转成正式事件。",
         ])
     if plan.get("forced_reasons"):
         lines.append("后端强制：" + "；".join(plan["forced_reasons"]))
