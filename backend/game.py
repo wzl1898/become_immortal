@@ -707,6 +707,18 @@ async def prepare_action(session_id: str, action: str) -> list[dict]:
         recall_query = "\n\n".join(part for part in (event_core, latest_scene, action) if part)
         recalled_memories = _recall_world_memory(state, recall_query)
         event_just_created = _event_requires_new(previous)
+        # 无事件过渡轮：上一事件"刚结束"（resolved/abandoned）且尚无孵好的
+        # next_event_seed 可消费。此时不同步补生成事件（否则玩家要干等），改走极简
+        # 无事件链路：只跑节奏 Agent 判意图 + 剧情 Agent 写正文，正文只吃「世界约束+
+        # 玩家输入」，不受刚结束事件影响；判完意图后异步孵化下一事件（下一轮生效）。
+        # 注意只认"刚结束的事件"，不含 event=None（新局/迁移）——后者仍走同步冷路径，
+        # 那条路本就以玩家输入建首个事件，不会与旧冲突重合。
+        prev_event = previous.get("event") if isinstance(previous.get("event"), dict) else None
+        event_just_ended = bool(prev_event and prev_event.get("status") in {"resolved", "abandoned"})
+        if event_just_ended and not previous.get("next_event_seed"):
+            return await _prepare_action_eventless(
+                state, action, world_constraints, previous
+            )
         foundation = await _ensure_event_foundation(
             state, action, world_context, _compact_memories(recalled_memories)
         )
@@ -737,6 +749,57 @@ async def prepare_action(session_id: str, action: str) -> list[dict]:
     except Exception:
         rollback_prepared_action(session_id)
         raise
+
+
+async def _prepare_action_eventless(
+    state: dict,
+    action: str,
+    world_constraints: str,
+    previous: dict,
+) -> list[dict]:
+    """无事件过渡轮的极简链路：节奏 Agent 判意图 → 剧情 Agent 写正文。
+
+    - 只跑节奏 Agent（判玩家意图），跳过推进/钩子/骨架 Agent。
+    - 判完意图后，以「玩家输入+意图」为主异步孵化下一事件（下一轮生效）。
+    - 正文只吃「世界约束 + 主角档案 + 玩家输入」，不拼事件模型/导演骨架，
+      不受刚结束事件影响。
+    - current_plan 置 None：使 commit 的 _finalize_director_state / _schedule_director_audit
+      因 plan 缺失安全早退，本轮不误改已结束事件、不跑审计。event 保留原样（已 resolved）。
+    """
+    session_id = state.get("session_id")
+    pacing_result, _pacing_meta = await _call_director_agent(
+        _director_pacing_messages(state, action, previous),
+        "director_pacing", DIRECTOR_PACING_MAX_TOKENS, session_id,
+    )
+    if pacing_result is None:
+        pacing_result = _fallback_director_pacing(previous, action)
+    pacing_decision = _sanitize_pacing_decision(pacing_result, previous, action)
+    intent = pacing_decision.get("intent") or {}
+
+    # 本轮不做事件规划：显式清空 current_plan，让 commit 安全早退。
+    director_state = dict(previous)
+    director_state["current_plan"] = None
+    director_state["intent"] = intent
+    state["director_state"] = director_state
+
+    # 以玩家输入+意图为主，异步孵化下一事件（不阻塞本轮正文）。
+    _schedule_eventless_event_generation(state, action, intent)
+
+    inject = _injection(state, action)
+    parts = [
+        world_constraints.rstrip(),
+        inject.rstrip(),
+        f"【玩家原始行动】\n{action}",
+    ]
+    content = "\n\n".join(part for part in parts if part)
+    messages = list(state["messages"])
+    if state.get("stage_summary"):
+        messages.insert(1, {
+            "role": "system",
+            "content": "【既往阶段摘要】\n" + state["stage_summary"],
+        })
+    messages.append({"role": "user", "content": content})
+    return messages
 
 
 def _recent_scene(transcript: list[dict]) -> str:
@@ -1225,9 +1288,9 @@ async def _plan_director_turn(
     planned["current_plan"]["selected_facts"] = _payoff_selected_facts(
         planned["current_plan"]["payoff"], world_context
     )
-    if planned["current_plan"].get("event_ended"):
-        state["director_state"] = planned
-        _schedule_next_event_generation(state, planned["current_plan"])
+    # 事件判定结束后不再抢在玩家开口前预生成下一事件。改由"无事件过渡轮"里，
+    # 节奏 Agent 判完玩家新意图后，再以玩家输入+意图为主异步孵化新事件
+    # （见 prepare_action 的无事件链路分流与 _schedule_eventless_event_generation）。
     previous_hook = _normalize_hook_state(prev.get("hook_state"))
     if previous_hook and not event_just_created:
         hook_status = (
@@ -1266,16 +1329,13 @@ async def _plan_director_turn(
     if skeleton_result is None:
         skeleton_result = _fallback_director_skeleton(planned, action)
     action_goal = (hook_state or {}).get("goal", "")
-    existing_must_not = (
-        skeleton_result.get("must_not")
-        if isinstance(skeleton_result.get("must_not"), list)
-        else []
-    )
+    # 骨架 Agent 不再输出 must_not；禁止项改为纯后端护栏：钩子护栏（此处）+
+    # 场景停滞提示（_apply_director_pacing）+ 禁止泄密（_render_director_plan）。
     hook_guard = f"不得在本轮正文中替玩家执行下一步行动方向：{action_goal}"
     skeleton_result = {
         **skeleton_result,
         "action_goal": action_goal,
-        "must_not": ([hook_guard, *existing_must_not] if action_goal else existing_must_not),
+        "must_not": [hook_guard] if action_goal else [],
     }
     planned = _apply_director_pacing(planned, skeleton_result, prev)
     foundation_outputs = {
@@ -1494,49 +1554,6 @@ async def _ensure_event_foundation(
     return foundation
 
 
-def _schedule_next_event_generation(
-    state: dict,
-    current_plan: dict,
-) -> None:
-    session_id = state.get("session_id")
-    if not session_id:
-        return
-    current = _NEXT_EVENT_TASKS.get(session_id)
-    if current and not current.done():
-        return
-    context = _next_event_generation_context(state, current_plan)
-    task = asyncio.create_task(_run_next_event_generation(session_id, context))
-    _NEXT_EVENT_TASKS[session_id] = task
-    task.add_done_callback(
-        lambda done, key=session_id: _NEXT_EVENT_TASKS.pop(key, None)
-        if _NEXT_EVENT_TASKS.get(key) is done else None
-    )
-
-
-def _next_event_generation_context(state: dict, current_plan: dict) -> str:
-    session_id = state.get("session_id")
-    world_context = constraints.director_context(session_id, "")
-    event = (state.get("director_state") or {}).get("event") or {}
-    character = {
-        key: value for key, value in (state.get("character_state") or {}).items()
-        if key != "updated_at"
-    }
-    memories = _compact_memories(state.get("world_memory") or [])
-    return "\n\n".join([
-        "【已结束事件】\n" + _stable_json({
-            key: event.get(key) for key in ("title", "core", "benefit", "end_condition")
-        }),
-        "【最近正文】\n" + (_recent_scene(state.get("transcript") or []) or "（新存档尚无正文）"),
-        "【本轮节奏意图】\n" + _stable_json(current_plan.get("intent") or {}),
-        "【本轮推进方向】\n" + _clean_text(current_plan.get("progression_direction"), 1000),
-        "【主角当前状态与成长】\n" + _stable_json(character),
-        "【近期世界记忆】\n" + _stable_json(memories),
-        "【稳定世界与当前地点】\n" + _stable_json(world_context),
-        "硬规则：旧事件的 end_condition、推进 Agent 已判定的 ended=true、以及正文中已经确认的结算结果都不可推翻；新事件不得用同一人物、同一物件、同一地点或等价冲突重启旧事件，必须基于旧事件结束后的新状态与新后果生成。",
-        "请创建一个与已结束事件有合理衔接、但独立成立的新事件。必须在 core 中体现旧事件结束后的推进理由、主角成长带来的新可能，以及当前地点和周边环境为什么承载这个事件。",
-    ])
-
-
 async def _run_next_event_generation(session_id: str, context: str) -> None:
     result, meta = await _call_director_agent(
         [
@@ -1564,6 +1581,58 @@ async def _run_next_event_generation(session_id: str, context: str) -> None:
     }
     state["director_state"] = director
     store.save_director_state(session_id, director)
+
+
+def _schedule_eventless_event_generation(
+    state: dict,
+    action: str,
+    intent: dict,
+) -> None:
+    """无事件过渡轮：节奏 Agent 判完玩家意图后，以玩家输入+意图为主异步孵化新事件。
+
+    以玩家当前输入和刚判出的意图为方向主体，旧事件仅作已结束的背景，避免续写刚结束
+    的冲突。落盘链路（写 next_event_seed）复用 _run_next_event_generation。
+    """
+    session_id = state.get("session_id")
+    if not session_id:
+        return
+    current = _NEXT_EVENT_TASKS.get(session_id)
+    if current and not current.done():
+        return
+    context = _eventless_event_generation_context(state, action, intent)
+    task = asyncio.create_task(_run_next_event_generation(session_id, context))
+    _NEXT_EVENT_TASKS[session_id] = task
+    task.add_done_callback(
+        lambda done, key=session_id: _NEXT_EVENT_TASKS.pop(key, None)
+        if _NEXT_EVENT_TASKS.get(key) is done else None
+    )
+
+
+def _eventless_event_generation_context(state: dict, action: str, intent: dict) -> str:
+    session_id = state.get("session_id")
+    world_context = constraints.director_context(session_id, action)
+    event = (state.get("director_state") or {}).get("event") or {}
+    character = {
+        key: value for key, value in (state.get("character_state") or {}).items()
+        if key != "updated_at"
+    }
+    memories = _compact_memories(state.get("world_memory") or [])
+    return "\n\n".join([
+        "【玩家当前输入】\n" + (action or ""),
+        "【节奏 Agent 判出的玩家意图】\n" + _stable_json(intent or {}),
+        "【最近正文】\n" + (_recent_scene(state.get("transcript") or []) or "（新存档尚无正文）"),
+        "【已结束事件（仅作背景，不得续写）】\n" + _stable_json({
+            key: event.get(key) for key in ("title", "core", "benefit", "end_condition")
+        }),
+        "【主角当前状态与成长】\n" + _stable_json(character),
+        "【近期世界记忆】\n" + _stable_json(memories),
+        "【稳定世界与当前地点】\n" + _stable_json(world_context),
+        "硬规则：新事件必须顺着【玩家当前输入】与【玩家意图】的方向展开，以主角此刻主动选择"
+        "去做的事为核心，而不是延续刚结束事件的冲突。不得用同一人物、同一物件、同一地点或"
+        "等价冲突重启已结束事件；旧事件已确认的结算结果不可推翻。",
+        "请据此创建一个先于玩家下一步介入而存在、独立成立的新事件。core 要说明主角当前意图"
+        "落定后自然引出的新局面，以及当前地点和周边环境为什么承载这个事件。",
+    ])
 
 
 def _schedule_causal_foundation(
@@ -1975,8 +2044,6 @@ def _fallback_director_skeleton(planned: dict, action: str) -> dict:
         "action_goal": _clean_text(
             ((planned.get("current_plan") or {}).get("hook") or {}).get("goal"), 240
         ),
-        "state_changes": {},
-        "must_not": ["只增加模糊感受或新悬念", "生成固定世界库之外的重大设定"],
         "scene": planned.get("scene") or "",
         "scene_change": False,
         "note": "导演 Agent不可用，已采用本地紧凑骨架。",
@@ -2237,7 +2304,6 @@ def _sanitize_director_plan(
         "turn_objective": "",
         "beats": [],
         "action_goal": "",
-        "state_changes": {},
         "must_not": [],
         "scene": "",
         "scene_change": False,
@@ -2246,21 +2312,12 @@ def _sanitize_director_plan(
 
 
 def _sanitize_pacing_result(result: dict, allow_reward_state: bool = False) -> dict:
-    state_changes = result.get("state_changes") if isinstance(result.get("state_changes"), dict) else {}
-    allowed_state_keys = {"health", "spiritual_power", "condition"}
-    if allow_reward_state:
-        allowed_state_keys.update({"realm", "cultivation", "resources", "artifacts"})
     return {
         "turn_objective": _clean_text(
             result.get("turn_objective") or result.get("current_goal"), 280
         ),
         "beats": _clean_string_list(result.get("beats"), limit=3, item_limit=120),
         "action_goal": _clean_text(result.get("action_goal"), 240),
-        "state_changes": {
-            key: _clean_text(value, 180)
-            for key, value in state_changes.items()
-            if key in allowed_state_keys and _clean_text(value, 180)
-        },
         "must_not": _clean_string_list(result.get("must_not"), limit=6),
         "scene": _clean_text(result.get("scene"), 100),
         "scene_change": bool(result.get("scene_change")),
@@ -2417,8 +2474,6 @@ def _render_director_plan(state: dict, world_context: dict) -> str:
         lines.append("后端强制：" + "；".join(plan["forced_reasons"]))
     if plan.get("beats"):
         lines.append("必须按顺序落实：" + " → ".join(plan["beats"]))
-    if plan.get("state_changes"):
-        lines.append("必须落实状态变化：" + json.dumps(plan["state_changes"], ensure_ascii=False))
     if plan.get("intent_resolved"):
         lines.append("意图结算硬约束：本轮正文必须给玩家当前意图明确结果，禁止用新悬念、模糊感受或‘仍待查明’替代。")
     if plan.get("event_ended"):
@@ -2606,7 +2661,6 @@ def _compact_audit_plan(plan: dict) -> dict:
             "trigger": payoff.get("trigger"),
         },
         "beats": plan.get("beats") or [],
-        "state_changes": plan.get("state_changes") or {},
         "selected_fact_ids": [
             row.get("id") for row in (plan.get("selected_facts") or []) if row.get("id")
         ],

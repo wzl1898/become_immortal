@@ -167,7 +167,13 @@ class DirectorPlanTests(unittest.TestCase):
         self.assertEqual(state["director_state"]["event"]["status"], "resolved")
         self.assertEqual(state["director_state"]["event"]["ended_turn"], 3)
 
-    def test_progression_end_starts_next_event_generation_without_blocking_followup_agents(self):
+    def test_progression_end_does_not_pre_generate_next_event(self):
+        """事件判定结束的那一轮，不再抢在玩家开口前预生成下一事件。
+
+        预生成已迁移到"无事件过渡轮"：见 test_eventless_turn_*。
+        这里只验证 _plan_director_turn 结束事件时正确落 resolve 状态机、
+        且 _NEXT_EVENT_TASKS 保持为空。
+        """
         async def fake_complete(messages, *args, **kwargs):
             request_type = kwargs["request_type"]
             if request_type == "director_progression":
@@ -183,20 +189,7 @@ class DirectorPlanTests(unittest.TestCase):
                     "resolved": True,
                 }, ensure_ascii=False)
             if request_type == "director_event":
-                self.assertIn("【最近正文】", messages[-1]["content"])
-                self.assertIn("前一轮正文已经写明山匪开始撤离。", messages[-1]["content"])
-                self.assertIn("【本轮节奏意图】", messages[-1]["content"])
-                self.assertIn("确认山路已经安全", messages[-1]["content"])
-                self.assertIn("【本轮推进方向】", messages[-1]["content"])
-                self.assertIn("让赵横带领山匪撤离山路并恢复白石村通行", messages[-1]["content"])
-                self.assertIn("不可推翻", messages[-1]["content"])
-                await asyncio.sleep(0.01)
-                return json.dumps({
-                    "title": "山路收束后的新动静",
-                    "core": "赵横撤离山路后，白石村村口出现新的脚印线索",
-                    "benefit": "顺着脚印找到下一条可查证的线索",
-                    "end_condition": "脚印线索得到明确查证",
-                }, ensure_ascii=False)
+                raise AssertionError("事件结束轮不应再调用事件 Agent 预生成")
             if request_type == "director_hook":
                 return json.dumps({"goal": "查看村口留下的脚印"}, ensure_ascii=False)
             self.assertEqual(request_type, "director_skeleton")
@@ -225,14 +218,94 @@ class DirectorPlanTests(unittest.TestCase):
                     self.assertTrue(planned["current_plan"]["event_ended"])
                     self.assertEqual(planned["current_plan"]["event_action"], "resolve")
                     self.assertEqual(planned["event"]["status"], "resolving")
-                    await game._NEXT_EVENT_TASKS[state["session_id"]]
+                    # 关键：事件结束轮不预生成，任务表保持空。
+                    self.assertNotIn(state["session_id"], game._NEXT_EVENT_TASKS)
+                    state["director_state"] = planned
                     game._finalize_director_state(state, "山匪威胁已经解除。")
 
                 self.assertEqual(state["director_state"]["event"]["status"], "resolved")
-                self.assertEqual(state["director_state"]["next_event_seed"]["title"], "山路收束后的新动静")
+                self.assertIsNone(state["director_state"].get("next_event_seed"))
             finally:
                 game._CACHE.pop(state["session_id"], None)
                 game._NEXT_EVENT_TASKS.pop(state["session_id"], None)
+
+        asyncio.run(scenario())
+
+    def test_eventless_turn_runs_pacing_only_and_schedules_generation(self):
+        """无事件过渡轮：只跑节奏 Agent，current_plan 置 None，异步孵化下一事件，
+
+        且孵化 context 以玩家输入+意图为主、不续写刚结束的事件。正文 messages 只含
+        世界约束+主角档案+玩家输入，不含事件模型/导演骨架。
+        """
+        sid = "eventless-turn-test"
+        seen_types: list[str] = []
+
+        async def fake_complete(messages, *args, **kwargs):
+            request_type = kwargs["request_type"]
+            seen_types.append(request_type)
+            if request_type == "director_pacing":
+                return json.dumps({
+                    "intent": {"key": "取出引气诀翻看研习", "same_as_previous": False},
+                    "resolved": True,
+                }, ensure_ascii=False)
+            if request_type == "director_event":
+                content = messages[-1]["content"]
+                self.assertIn("【玩家当前输入】", content)
+                self.assertIn("开始练引气决", content)
+                self.assertIn("【节奏 Agent 判出的玩家意图】", content)
+                self.assertIn("取出引气诀翻看研习", content)
+                self.assertIn("而不是延续刚结束事件的冲突", content)
+                return json.dumps({
+                    "title": "坡凹参悟",
+                    "core": "主角伏在坡凹翻看引气诀，初窥引气门径",
+                    "benefit": "对引气入门形成可用的修行认识",
+                    "end_condition": "对引气入门的门径形成明确认识",
+                }, ensure_ascii=False)
+            raise AssertionError(f"无事件轮不应调用 {request_type} Agent")
+
+        state = {
+            "session_id": sid,
+            "turns": 14,
+            "messages": [{"role": "system", "content": "fixed"}],
+            "transcript": [{"role": "narration", "text": "你甩脱追兵，躲进坡凹喘息。"}],
+            "character_state": {"realm": "凡人未入修行"},
+            "world_memory": [],
+            "inventory": [],
+            "director_state": _director(status="resolved", turns=13),
+            "_injected": [],
+        }
+        game._CACHE[sid] = state
+
+        async def scenario():
+            try:
+                with patch.object(game, "complete_chat", fake_complete), patch.object(
+                    game.constraints, "action_constraints", return_value="world"
+                ), patch.object(
+                    game.constraints, "director_context", return_value=_context()
+                ), patch.object(game.store, "save_director_state"):
+                    messages = await game.prepare_action(sid, "开始练引气决")
+                    task = game._NEXT_EVENT_TASKS.get(sid)
+                    self.assertIsNotNone(task)
+                    await task
+
+                # 无事件轮：current_plan 置 None，event 保留 resolved 原样。
+                self.assertIsNone(state["director_state"]["current_plan"])
+                self.assertEqual(state["director_state"]["event"]["status"], "resolved")
+                # 只跑了节奏 + 事件孵化，没有推进/钩子/骨架。
+                self.assertEqual(seen_types.count("director_progression"), 0)
+                self.assertEqual(seen_types.count("director_hook"), 0)
+                self.assertEqual(seen_types.count("director_skeleton"), 0)
+                # 异步孵化落了 seed，且贴合玩家意图方向。
+                self.assertEqual(state["director_state"]["next_event_seed"]["title"], "坡凹参悟")
+                # 正文 messages 不含事件模型/导演骨架标记。
+                content = messages[-1]["content"]
+                self.assertIn("【玩家原始行动】", content)
+                self.assertIn("开始练引气决", content)
+                self.assertNotIn("本轮导演骨架", content)
+                self.assertNotIn("当前事件因果模型", content)
+            finally:
+                game._CACHE.pop(sid, None)
+                game._NEXT_EVENT_TASKS.pop(sid, None)
 
         asyncio.run(scenario())
 
@@ -276,12 +349,12 @@ class DirectorPlanTests(unittest.TestCase):
         finally:
             game._CACHE.pop(sid, None)
 
-    def test_next_event_generation_context_includes_growth_location_and_previous_event(self):
-        sid = "next-event-context-test"
+    def test_eventless_generation_context_centers_player_input_and_intent(self):
+        sid = "eventless-context-test"
         state = {
             "session_id": sid,
-            "transcript": [{"role": "narration", "text": "前一轮正文已经写明山匪开始撤离。"}],
-            "character_state": {"realm": "炼气一层", "condition": "刚掌握引气诀"},
+            "transcript": [{"role": "narration", "text": "你甩脱追兵，躲进坡凹喘息。"}],
+            "character_state": {"realm": "凡人未入修行", "condition": "刚初悟引气门径"},
             "world_memory": [{
                 "id": "memory:qingxi-rumor",
                 "type": "plot",
@@ -289,22 +362,24 @@ class DirectorPlanTests(unittest.TestCase):
             }],
             "director_state": _director(status="resolved"),
         }
-        content = game._next_event_generation_context(state, {
-            "intent": {"key": "确认山路已经安全", "same_as_previous": False},
-            "progression_direction": "让赵横带领山匪撤离山路并恢复白石村通行",
-        })
+        content = game._eventless_event_generation_context(
+            state,
+            "开始练引气决",
+            {"key": "取出引气诀翻看研习", "same_as_previous": False},
+        )
 
-        self.assertIn("【已结束事件】", content)
-        self.assertIn("【最近正文】", content)
-        self.assertIn("前一轮正文已经写明山匪开始撤离。", content)
-        self.assertIn("【本轮节奏意图】", content)
-        self.assertIn("确认山路已经安全", content)
-        self.assertIn("【本轮推进方向】", content)
-        self.assertIn("让赵横带领山匪撤离山路并恢复白石村通行", content)
-        self.assertIn("炼气一层", content)
+        # 主体是玩家输入 + 意图。
+        self.assertIn("【玩家当前输入】", content)
+        self.assertIn("开始练引气决", content)
+        self.assertIn("【节奏 Agent 判出的玩家意图】", content)
+        self.assertIn("取出引气诀翻看研习", content)
+        # 旧事件仅作背景，且明令不得续写。
+        self.assertIn("仅作背景，不得续写", content)
+        self.assertIn("而不是延续刚结束事件的冲突", content)
+        # 仍带主角成长/记忆/世界地点作为约束。
+        self.assertIn("刚初悟引气门径", content)
         self.assertIn("青溪镇散修", content)
         self.assertIn("【稳定世界与当前地点】", content)
-        self.assertIn("不可推翻", content)
 
     def test_missing_viewpoint_does_not_make_active_event_new(self):
         director = _director(status="active")
