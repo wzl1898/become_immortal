@@ -2405,7 +2405,8 @@ def _render_director_plan(state: dict, world_context: dict) -> str:
     if hook:
         lines.extend([
             f"可选行动目标：{hook.get('goal')}",
-            "钩子呈现硬约束：本轮正文必须自然写出与该目标直接相关的暗示，例如具体对象的异常、相关人物的只言片语、可追查物件或值得介入的现场变化，让玩家理解为什么可以采取该行动；末尾至少一个灵光提示直接对应该目标。只能暗示和引导，不得替玩家接受、提问、调查、取得答案或本轮直接转成正式事件。",
+            f"钩子收益方向：该行动必须是玩家接近事件 benefit“{event.get('benefit') or '无'}”的下一步，或补齐获得该 benefit 的必要前提。",
+            "钩子呈现硬约束：本轮正文必须自然写出与该目标及 benefit 路径直接相关的暗示，例如关键对象的反应、必要信息、可追查物件或通往收益的现场变化，让玩家理解为什么这一步能让自己更接近 benefit；末尾至少一个灵光提示直接对应该目标。只能暗示和引导，不得替玩家接受、提问、调查、取得答案或完成该步骤。",
         ])
     if plan.get("forced_reasons"):
         lines.append("后端强制：" + "；".join(plan["forced_reasons"]))

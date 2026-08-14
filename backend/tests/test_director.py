@@ -471,6 +471,30 @@ class DirectorPlanTests(unittest.TestCase):
         self.assertTrue(payoff_messages[-1]["content"].rstrip().endswith("【玩家本轮行动】\n回家"))
         self.assertTrue(pacing_messages[-1]["content"].rstrip().endswith("【玩家本轮行动】\n回家"))
 
+    def test_hook_and_story_are_bound_to_event_benefit_path(self):
+        director = _director()
+        director["current_plan"] = {
+            **_plan(),
+            "hook": {"goal": "向赵横的粮草押运者查明补给路线"},
+            "action_goal": "向赵横的粮草押运者查明补给路线",
+        }
+
+        hook_messages = game._director_hook_messages(
+            {"turns": 1, "transcript": []},
+            "观察山路",
+            director,
+            None,
+            _context(),
+        )
+        rendered = game._render_director_plan(director, _context())
+
+        self.assertIn("通往当前事件 benefit", hook_messages[0]["content"])
+        self.assertIn("恢复白石村通往县城的道路", hook_messages[-1]["content"])
+        self.assertIn("向赵横的粮草押运者查明补给路线", rendered)
+        self.assertIn("钩子收益方向", rendered)
+        self.assertIn("恢复白石村通往县城的道路", rendered)
+        self.assertIn("为什么这一步能让自己更接近 benefit", rendered)
+
     def test_progression_runs_before_parallel_payoff_and_pacing(self):
         payoff_started = asyncio.Event()
         calls = []
