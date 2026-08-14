@@ -167,6 +167,75 @@ class DirectorPlanTests(unittest.TestCase):
         self.assertEqual(state["director_state"]["event"]["status"], "resolved")
         self.assertEqual(state["director_state"]["event"]["ended_turn"], 3)
 
+    def test_progression_end_starts_next_event_generation_without_blocking_followup_agents(self):
+        async def fake_complete(messages, *args, **kwargs):
+            request_type = kwargs["request_type"]
+            if request_type == "director_progression":
+                return json.dumps({
+                    "direction": "让赵横带领山匪撤离山路并恢复白石村通行",
+                    "ended": True,
+                }, ensure_ascii=False)
+            if request_type == "director_payoff":
+                return '{"desc":"","trigger":""}'
+            if request_type == "director_pacing":
+                return json.dumps({
+                    "intent": {"key": "确认山路已经安全", "same_as_previous": False},
+                    "resolved": True,
+                }, ensure_ascii=False)
+            if request_type == "director_event":
+                self.assertIn("【最近正文】", messages[-1]["content"])
+                self.assertIn("前一轮正文已经写明山匪开始撤离。", messages[-1]["content"])
+                self.assertIn("【本轮节奏意图】", messages[-1]["content"])
+                self.assertIn("确认山路已经安全", messages[-1]["content"])
+                self.assertIn("【本轮推进方向】", messages[-1]["content"])
+                self.assertIn("让赵横带领山匪撤离山路并恢复白石村通行", messages[-1]["content"])
+                self.assertIn("不可推翻", messages[-1]["content"])
+                await asyncio.sleep(0.01)
+                return json.dumps({
+                    "title": "山路收束后的新动静",
+                    "core": "赵横撤离山路后，白石村村口出现新的脚印线索",
+                    "benefit": "顺着脚印找到下一条可查证的线索",
+                    "end_condition": "脚印线索得到明确查证",
+                }, ensure_ascii=False)
+            if request_type == "director_hook":
+                return json.dumps({"goal": "查看村口留下的脚印"}, ensure_ascii=False)
+            self.assertEqual(request_type, "director_skeleton")
+            return json.dumps({
+                "turn_objective": "确认山匪撤离并恢复道路通行",
+                "beats": ["赵横下令撤离", "白石村通往县城的道路恢复通行"],
+            }, ensure_ascii=False)
+
+        state = {
+            "session_id": "next-event-chain-test",
+            "turns": 2,
+            "transcript": [{"role": "narration", "text": "前一轮正文已经写明山匪开始撤离。"}],
+            "character_state": {},
+            "director_state": _director(status="active", turns=2),
+        }
+        game._CACHE[state["session_id"]] = state
+
+        async def scenario():
+            try:
+                with patch.object(game, "complete_chat", fake_complete), patch.object(
+                    game.store, "save_director_state"
+                ):
+                    planned = await game._plan_director_turn(
+                        state, "确认山路已经安全", _context()
+                    )
+                    self.assertTrue(planned["current_plan"]["event_ended"])
+                    self.assertEqual(planned["current_plan"]["event_action"], "resolve")
+                    self.assertEqual(planned["event"]["status"], "resolving")
+                    await game._NEXT_EVENT_TASKS[state["session_id"]]
+                    game._finalize_director_state(state, "山匪威胁已经解除。")
+
+                self.assertEqual(state["director_state"]["event"]["status"], "resolved")
+                self.assertEqual(state["director_state"]["next_event_seed"]["title"], "山路收束后的新动静")
+            finally:
+                game._CACHE.pop(state["session_id"], None)
+                game._NEXT_EVENT_TASKS.pop(state["session_id"], None)
+
+        asyncio.run(scenario())
+
     def test_event_agent_is_needed_only_without_event_or_after_end_marker(self):
         self.assertTrue(game._event_requires_new({"event": None}))
         self.assertFalse(game._event_requires_new(_director(status="active")))
@@ -211,6 +280,7 @@ class DirectorPlanTests(unittest.TestCase):
         sid = "next-event-context-test"
         state = {
             "session_id": sid,
+            "transcript": [{"role": "narration", "text": "前一轮正文已经写明山匪开始撤离。"}],
             "character_state": {"realm": "炼气一层", "condition": "刚掌握引气诀"},
             "world_memory": [{
                 "id": "memory:qingxi-rumor",
@@ -219,13 +289,22 @@ class DirectorPlanTests(unittest.TestCase):
             }],
             "director_state": _director(status="resolved"),
         }
-        content = game._next_event_generation_context(state, "结束正文")
+        content = game._next_event_generation_context(state, {
+            "intent": {"key": "确认山路已经安全", "same_as_previous": False},
+            "progression_direction": "让赵横带领山匪撤离山路并恢复白石村通行",
+        })
 
         self.assertIn("【已结束事件】", content)
+        self.assertIn("【最近正文】", content)
+        self.assertIn("前一轮正文已经写明山匪开始撤离。", content)
+        self.assertIn("【本轮节奏意图】", content)
+        self.assertIn("确认山路已经安全", content)
+        self.assertIn("【本轮推进方向】", content)
+        self.assertIn("让赵横带领山匪撤离山路并恢复白石村通行", content)
         self.assertIn("炼气一层", content)
         self.assertIn("青溪镇散修", content)
         self.assertIn("【稳定世界与当前地点】", content)
-        self.assertIn("旧事件结束后的推进理由", content)
+        self.assertIn("不可推翻", content)
 
     def test_missing_viewpoint_does_not_make_active_event_new(self):
         director = _director(status="active")

@@ -1225,6 +1225,9 @@ async def _plan_director_turn(
     planned["current_plan"]["selected_facts"] = _payoff_selected_facts(
         planned["current_plan"]["payoff"], world_context
     )
+    if planned["current_plan"].get("event_ended"):
+        state["director_state"] = planned
+        _schedule_next_event_generation(state, planned["current_plan"])
     previous_hook = _normalize_hook_state(prev.get("hook_state"))
     if previous_hook and not event_just_created:
         hook_status = (
@@ -1493,7 +1496,7 @@ async def _ensure_event_foundation(
 
 def _schedule_next_event_generation(
     state: dict,
-    assistant_content: str,
+    current_plan: dict,
 ) -> None:
     session_id = state.get("session_id")
     if not session_id:
@@ -1501,7 +1504,7 @@ def _schedule_next_event_generation(
     current = _NEXT_EVENT_TASKS.get(session_id)
     if current and not current.done():
         return
-    context = _next_event_generation_context(state, assistant_content)
+    context = _next_event_generation_context(state, current_plan)
     task = asyncio.create_task(_run_next_event_generation(session_id, context))
     _NEXT_EVENT_TASKS[session_id] = task
     task.add_done_callback(
@@ -1510,7 +1513,7 @@ def _schedule_next_event_generation(
     )
 
 
-def _next_event_generation_context(state: dict, assistant_content: str) -> str:
+def _next_event_generation_context(state: dict, current_plan: dict) -> str:
     session_id = state.get("session_id")
     world_context = constraints.director_context(session_id, "")
     event = (state.get("director_state") or {}).get("event") or {}
@@ -1523,10 +1526,13 @@ def _next_event_generation_context(state: dict, assistant_content: str) -> str:
         "【已结束事件】\n" + _stable_json({
             key: event.get(key) for key in ("title", "core", "benefit", "end_condition")
         }),
-        "【最近正文】\n" + _narration_body(assistant_content),
+        "【最近正文】\n" + (_recent_scene(state.get("transcript") or []) or "（新存档尚无正文）"),
+        "【本轮节奏意图】\n" + _stable_json(current_plan.get("intent") or {}),
+        "【本轮推进方向】\n" + _clean_text(current_plan.get("progression_direction"), 1000),
         "【主角当前状态与成长】\n" + _stable_json(character),
         "【近期世界记忆】\n" + _stable_json(memories),
         "【稳定世界与当前地点】\n" + _stable_json(world_context),
+        "硬规则：旧事件的 end_condition、推进 Agent 已判定的 ended=true、以及正文中已经确认的结算结果都不可推翻；新事件不得用同一人物、同一物件、同一地点或等价冲突重启旧事件，必须基于旧事件结束后的新状态与新后果生成。",
         "请创建一个与已结束事件有合理衔接、但独立成立的新事件。必须在 core 中体现旧事件结束后的推进理由、主角成长带来的新可能，以及当前地点和周边环境为什么承载这个事件。",
     ])
 
@@ -1546,7 +1552,7 @@ async def _run_next_event_generation(session_id: str, context: str) -> None:
         return
     director = _dynamic_director_state(state.get("director_state"))
     event = director.get("event") if isinstance(director.get("event"), dict) else None
-    if not event or event.get("status") not in {"resolved", "abandoned"}:
+    if not event or event.get("status") not in {"resolving", "resolved", "abandoned"}:
         return
     world_context = constraints.director_context(session_id, "")
     seed = _sanitize_event_creation(result, world_context)
@@ -2469,8 +2475,6 @@ def _finalize_director_state(state: dict, assistant_content: str) -> None:
         event["ended_turn"] = state["turns"]
     director["event"] = event
     state["director_state"] = director
-    if action == "resolve":
-        _schedule_next_event_generation(state, assistant_content)
 
 
 def _schedule_director_audit(
