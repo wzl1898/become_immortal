@@ -1860,11 +1860,11 @@ def _director_hook_messages(
         "【主角视角模型】\n" + _clean_markdown(event.get("viewpoint_model")),
         "【当前主角位置约束】\n" + _stable_json(world_context.get("location") or {}),
         "【上一轮钩子】\n" + _stable_json(_hook_text(previous_hook)),
-        "【玩家意图是否结算】\n" + _stable_json({
+        "【本轮将完整落实的玩家意图】\n" + _stable_json({
             "intent": plan.get("intent"),
             "resolved": plan.get("intent_resolved"),
         }),
-        "【推进 Agent结果】\n" + _stable_json({
+        "【本轮意图完成后的预计结果】\n" + _stable_json({
             "direction": plan.get("progression_direction"),
             "ended": plan.get("event_ended"),
         }),

@@ -468,6 +468,8 @@ class DirectorPlanTests(unittest.TestCase):
         self.assertNotIn("updated_at", payoff_messages[-1]["content"])
         self.assertIn("当前待触发爽点", payoff_messages[-1]["content"])
         self.assertIn("前两轮正文", payoff_messages[-1]["content"])
+        self.assertIn("不得只复述玩家输入的动作或手段", pacing_messages[0]["content"])
+        self.assertIn("摆脱追兵", pacing_messages[0]["content"])
         self.assertTrue(payoff_messages[-1]["content"].rstrip().endswith("【玩家本轮行动】\n回家"))
         self.assertTrue(pacing_messages[-1]["content"].rstrip().endswith("【玩家本轮行动】\n回家"))
 
@@ -489,6 +491,10 @@ class DirectorPlanTests(unittest.TestCase):
         rendered = game._render_director_plan(director, _context())
 
         self.assertIn("通往当前事件 benefit", hook_messages[0]["content"])
+        self.assertIn("意图完成后的新局面", hook_messages[0]["content"])
+        self.assertIn("不得依据意图执行前的旧位置", hook_messages[0]["content"])
+        self.assertIn("本轮将完整落实的玩家意图", hook_messages[-1]["content"])
+        self.assertIn("本轮意图完成后的预计结果", hook_messages[-1]["content"])
         self.assertIn("恢复白石村通往县城的道路", hook_messages[-1]["content"])
         self.assertIn("向赵横的粮草押运者查明补给路线", rendered)
         self.assertIn("钩子收益方向", rendered)
@@ -505,6 +511,8 @@ class DirectorPlanTests(unittest.TestCase):
             if request_type == "director_progression":
                 self.assertIn("节奏 Agent的玩家意图结算要求", args[0][-1]["content"])
                 self.assertIn('\"resolved\":true', args[0][-1]["content"])
+                self.assertIn("必须先完整落实 intent.key", args[0][0]["content"])
+                self.assertIn("不能只写躲藏成功", args[0][0]["content"])
                 return json.dumps({
                     "direction": "迫使赵横暴露山匪封路所依赖的补给位置",
                     "ended": False,
