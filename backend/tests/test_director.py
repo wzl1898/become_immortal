@@ -495,7 +495,7 @@ class DirectorPlanTests(unittest.TestCase):
         self.assertIn("恢复白石村通往县城的道路", rendered)
         self.assertIn("为什么这一步能让自己更接近 benefit", rendered)
 
-    def test_progression_runs_before_parallel_payoff_and_pacing(self):
+    def test_pacing_runs_before_progression_and_binds_its_direction(self):
         payoff_started = asyncio.Event()
         calls = []
 
@@ -503,12 +503,13 @@ class DirectorPlanTests(unittest.TestCase):
             request_type = kwargs["request_type"]
             calls.append(request_type)
             if request_type == "director_progression":
+                self.assertIn("节奏 Agent的玩家意图结算要求", args[0][-1]["content"])
+                self.assertIn('\"resolved\":true', args[0][-1]["content"])
                 return json.dumps({
                     "direction": "迫使赵横暴露山匪封路所依赖的补给位置",
                     "ended": False,
                 }, ensure_ascii=False)
             if request_type == "director_pacing":
-                self.assertIn("迫使赵横暴露山匪封路所依赖的补给位置", args[0][-1]["content"])
                 await asyncio.wait_for(payoff_started.wait(), 0.2)
                 return json.dumps({
                     "intent": {"key": "迎战山匪", "same_as_previous": False},
@@ -540,8 +541,8 @@ class DirectorPlanTests(unittest.TestCase):
         with patch.object(game, "complete_chat", fake_complete):
             planned = asyncio.run(game._plan_director_turn(state, "迎战山匪", _context()))
 
-        self.assertEqual(calls[0], "director_progression")
-        self.assertEqual(set(calls[1:3]), {"director_pacing", "director_payoff"})
+        self.assertEqual(set(calls[:2]), {"director_pacing", "director_payoff"})
+        self.assertEqual(calls[2], "director_progression")
         self.assertEqual(calls[3:], ["director_hook", "director_skeleton"])
         self.assertEqual(planned["current_plan"]["turn_objective"], "本轮完成一次明确攻防")
         self.assertEqual(

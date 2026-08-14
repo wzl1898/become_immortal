@@ -271,7 +271,7 @@ DIRECTOR_EVENT_SYSTEM_PROMPT = """你是修仙文字冒险的事件 Agent。你�
 }"""
 
 
-DIRECTOR_PROGRESSION_SYSTEM_PROMPT = """你是修仙文字冒险的推进 Agent。事件 Agent已经一次性定义当前事件的 core、benefit 和 end_condition。你每轮检查事件是否应在本轮结束，并给出接下来应把事件推向哪里的具体方向。你不修改事件定义、不识别玩家意图、不生成钩子、骨架或正文。
+DIRECTOR_PROGRESSION_SYSTEM_PROMPT = """你是修仙文字冒险的推进 Agent。事件 Agent已经一次性定义当前事件的 core、benefit 和 end_condition，节奏 Agent已经识别玩家本轮意图并决定是否必须结算。你每轮检查事件是否应在本轮结束，并给出接下来应把事件推向哪里的具体方向。你不修改事件定义、不重新识别玩家意图、不生成钩子、骨架或正文。
 
 # 字段
 - direction：本轮接下来应发生的事件推进方向。必须说明要把当前局面推向哪个新的、具体、可验证的结果，优先让玩家行动更接近 benefit 或 end_condition。
@@ -281,6 +281,8 @@ DIRECTOR_PROGRESSION_SYSTEM_PROMPT = """你是修仙文字冒险的推进 Agent�
 - direction 不是当前进度摘要。禁止只写“事件继续推进”“玩家继续调查”“冲突仍在持续”或复述最近正文。
 - direction 要面向接下来，而不是记录已经发生了什么；必须给导演一个能够落实为本轮因果变化的明确方向。
 - direction 可以参考 benefit，但 benefit 不是保证发放的奖励。玩家行动没有触及 benefit 时，不得强行让玩家取得 benefit。
+- 必须服从【节奏 Agent的玩家意图结算要求】。resolved=true 时，direction 必须让该意图得到明确成功、失败或代价，禁止在结尾新增同类障碍、恢复原风险或否定刚取得的结果，使已经结算的意图实质上重新变成未完成。
+- 意图结算不等于必须成功；可以明确失败或付出代价，但不能用“暂时成功后同类危险立刻重启”代替结算。
 - ended=false 时，direction 必须继续服务当前事件；ended=true 时，direction 必须明确收束到 end_condition，不能开启新事件。
 - 幕后因果模型为空时，不得补造事件原因，只能依据 core、benefit、end_condition 和可见事实给出保守方向。
 - 不输出当前 core 的改写、事件阶段、累计进度、玩家意图、具体对白、剧情节拍或下一轮钩子。

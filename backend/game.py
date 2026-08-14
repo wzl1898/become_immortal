@@ -1152,17 +1152,6 @@ async def _plan_director_turn(
     prev = _dynamic_director_state(state.get("director_state"))
     compact_memories = _compact_memories(recalled_memories or [])
 
-    progression_result, progression_meta = await _call_director_agent(
-        _director_progression_messages(state, action, prev),
-        "director_progression", DIRECTOR_PROGRESSION_MAX_TOKENS, state.get("session_id"),
-    )
-    progression_decision = _sanitize_progression_decision(
-        progression_result, prev.get("event") or {}
-    )
-    if event_just_created:
-        progression_decision["ended"] = False
-    progression_output = dict(progression_decision)
-
     payoff_call, pacing_call = await asyncio.gather(
         _call_director_agent(
             _director_payoff_messages(state, action, world_context, prev, compact_memories),
@@ -1170,8 +1159,7 @@ async def _plan_director_turn(
         ),
         _call_director_agent(
             _director_pacing_messages(
-                state, action, prev, progression_decision,
-                event_just_created=event_just_created,
+                state, action, prev, event_just_created=event_just_created,
             ),
             "director_pacing", DIRECTOR_PACING_MAX_TOKENS, state.get("session_id")
         ),
@@ -1184,6 +1172,17 @@ async def _plan_director_turn(
         pacing_result = _fallback_director_pacing(prev, action)
 
     pacing_decision = _sanitize_pacing_decision(pacing_result, prev, action)
+    progression_result, progression_meta = await _call_director_agent(
+        _director_progression_messages(state, action, prev, pacing_decision),
+        "director_progression", DIRECTOR_PROGRESSION_MAX_TOKENS, state.get("session_id"),
+    )
+    progression_decision = _sanitize_progression_decision(
+        progression_result, prev.get("event") or {}
+    )
+    if event_just_created:
+        progression_decision["ended"] = False
+    progression_output = dict(progression_decision)
+
     previous_status = (prev.get("event") or {}).get("status")
     event_action = (
         "resolve" if progression_decision["ended"]
@@ -1784,7 +1783,6 @@ def _director_pacing_messages(
     state: dict,
     action: str,
     prev: dict,
-    progression: dict | None = None,
     *,
     event_just_created: bool = False,
 ) -> list[dict]:
@@ -1797,7 +1795,6 @@ def _director_pacing_messages(
                 "status", "turns", "created_turn",
             )
         }),
-        "【推进 Agent结果】\n" + _stable_json(progression or {}),
         "【幕后因果模型】\n" + _clean_markdown(event.get("causal_model")),
         "【主角视角模型】\n" + _clean_markdown(event.get("viewpoint_model")),
         "【入口钩子】\n" + _stable_json(prev.get("hook_state")),
@@ -1821,6 +1818,7 @@ def _director_progression_messages(
     state: dict,
     action: str,
     prev: dict,
+    pacing: dict,
 ) -> list[dict]:
     event = prev.get("event") or {}
     content = "\n\n".join([
@@ -1833,6 +1831,7 @@ def _director_progression_messages(
         }),
         "【幕后因果模型】\n" + _clean_markdown(event.get("causal_model")),
         "【主角视角模型】\n" + _clean_markdown(event.get("viewpoint_model")),
+        "【节奏 Agent的玩家意图结算要求】\n" + _stable_json(pacing),
         "【上一轮状态】\n" + _stable_json(_compact_director_state(prev)),
         "【最近一轮正文】\n" + (_latest_scene(state.get("transcript") or []) or "（暂无）"),
         "【玩家本轮行动】\n" + action,
