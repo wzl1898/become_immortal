@@ -53,13 +53,28 @@ review:
     - id: prose-quality
       enabled: false
     - id: escape-plot-progress
-      enabled: true
-      severity: blocking
-      description: 每轮逃跑剧情必须产生可识别的实质推进，例如改变主角与追兵的距离或视线、获得或失去遮蔽、进入新路线或位置、改变追兵部署、风险升级或缓解、推进明确的脱离条件。若只是重复奔跑、躲藏、追逐或危险描述，而逃跑态势与上一轮实质相同，则判定不通过。
+      enabled: false
     - id: escape-plot-scope
-      enabled: true
-      severity: blocking
-      description: 从追逐或逃跑事件开始，直到正文给出客观脱险结果前，每轮核心内容必须继续服务于逃跑主线。允许观察追兵、选择路线、隐蔽、短暂喘息、制造障碍和反制追踪；不得在尚未脱险时切换到修炼、闲聊、寻宝、日常活动或其他与脱险无直接关系的剧情。客观脱险后结束此项持续约束，不要求继续逃跑。
+      enabled: false
+
+followup_checks:
+  - id: post-escape-regression
+    enabled: true
+    trigger: objective_escape
+    required_passes: 1
+    input:
+      source: fixed
+      kind: non_escape_or_stationary
+      action: 我留在原地，取出引气诀仔细查看，并尝试按上面的口诀开始引气。
+      policy:
+        - 输入必须是非逃跑行动或原地不动类活动。
+        - 不主动接近、寻找、联络或挑衅已经甩脱的追兵。
+        - 不制造声响、踪迹、消息或其他足以让旧追兵重新锁定主角的新因果触发。
+    rules:
+      - id: no-resolved-pursuit-regression
+        enabled: true
+        severity: blocking
+        description: 在正文和持久化状态已经确认主角客观脱离追兵后，下一回合执行非逃跑行动或原地不动类活动时，同一批追兵、同一追逐事件或迫使主角再次逃跑的局面不得在缺少新且可观察的因果触发时重新出现。仅回忆、担忧或背景提及不算回归；追兵重新现身、逼近、搜到主角、恢复追踪，或剧情重新要求逃跑均判定不通过。若玩家主动接近、联络、挑衅追兵，或制造了明确可追踪的新线索，则可视为新事件，不按无因回归判定。
 
 stop:
   on_first_fail: true
