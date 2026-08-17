@@ -1,0 +1,84 @@
+service:
+  base_url: http://127.0.0.1:8888
+  health_path: /api/saves
+  health_timeout_seconds: 8
+  generation_timeout_seconds: 180
+  start_command: cd backend && ../.venv/bin/python -m uvicorn main:app --reload --port 8888 --timeout-graceful-shutdown 3
+  proxy_bypass: 127.0.0.1,localhost
+
+session:
+  strategy: dedicated
+  save_name: 自动剧情验收
+
+input:
+  mode: auto
+  auto:
+    source: reviewer
+    max_chars: 160
+    policy:
+      - 顺着已通过审查的场景和角色既定目标行动。
+      - 优先选择可观察、可逆、风险适中的行动。
+      - 不假定角色拥有尚未获得的知识、物品、能力或他人同意。
+      - 未获玩家授权时，不作出叛宗、投靠、婚契、生死处置等不可逆重大选择。
+  user:
+    show_suggestions: true
+
+review:
+  timeout_seconds: 180
+  invalid_report_retries: 1
+  code_trace_on_fail: true
+  require_regression_tests: true
+  verdict_policy:
+    fail_on_any_blocking_rule: true
+    advisory_failure_is_blocking: false
+  rules:
+    - id: player-action-alignment
+      enabled: true
+      severity: blocking
+      description: 必须响应玩家本轮明确行动，不得擅自替换、否定或偏离行动目标。
+    - id: player-agency
+      enabled: true
+      severity: blocking
+      description: 不得替玩家作出未经授权的下一步行动、重大选择或不可逆决定。
+    - id: director-contract
+      enabled: true
+      severity: blocking
+      description: 必须符合本轮导演目标、beats、action_goal 边界和全部 must_not。
+    - id: causal-continuity
+      enabled: true
+      severity: blocking
+      description: 事件、位置、知识、关系与结果必须能从前态和本轮行动中推出。
+    - id: progression-grounding
+      enabled: true
+      severity: blocking
+      description: 境界、修为、能力和伤势变化必须有充分条件，不得无铺垫跨越阶段。
+    - id: item-provenance
+      enabled: true
+      severity: blocking
+      description: 关键物品新增或转移必须有明确来源与获取事件，并区分他人物品和玩家背包。
+    - id: persisted-state-consistency
+      enabled: true
+      severity: blocking
+      description: 正文、状态块、物件块、存档状态、物品归属、世界状态和位置必须一致。
+    - id: knowledge-boundary
+      enabled: true
+      severity: blocking
+      description: 主角只能使用当前可观察或此前已获知的信息。
+    - id: suggestion-boundary
+      enabled: true
+      severity: blocking
+      description: 灵光建议必须保持可选，不得在正文中被当作已经执行。
+    - id: prose-quality
+      enabled: true
+      severity: advisory
+      description: 避免实质重复、因果跳跃、突兀转场和明显破坏沉浸感的表达。
+
+stop:
+  on_first_fail: true
+  on_review_error: true
+  on_generation_error: true
+  max_accepted_turns: null
+
+artifacts:
+  directory: /tmp/story-review-loop
+  keep: false
