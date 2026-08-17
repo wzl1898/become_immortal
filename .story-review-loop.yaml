@@ -70,3 +70,10 @@ stop:
 artifacts:
   directory: /tmp/story-review-loop
   keep: false
+
+report:
+  enabled: true
+  directory: ./story-review-reports
+  filename: null
+  include_full_reviewer_report: true
+  keep_ledger: false
