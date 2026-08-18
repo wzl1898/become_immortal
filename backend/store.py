@@ -18,6 +18,8 @@ import uuid
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 DB_PATH = os.path.join(DATA_DIR, "saves.db")
+DEFAULT_WORLD_SEASON = "\u6df1\u79cb"
+DEFAULT_CALENDAR_LABEL = "\u4ed9\u5386"
 
 
 def _conn() -> sqlite3.Connection:
@@ -478,6 +480,18 @@ def _init_world_tables(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS save_world_time (
+            save_id TEXT PRIMARY KEY,
+            day INTEGER NOT NULL DEFAULT 1,
+            minute_of_day INTEGER NOT NULL DEFAULT 930,
+            season TEXT NOT NULL DEFAULT '',
+            calendar_label TEXT NOT NULL DEFAULT '',
+            updated_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS save_player_knowledge (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             save_id TEXT NOT NULL,
@@ -570,6 +584,17 @@ def _ensure_default_save_world_state(conn: sqlite3.Connection, sid: str) -> None
         """,
         (sid, now),
     )
+    save_row = conn.execute("SELECT turns FROM saves WHERE id=?", (sid,)).fetchone()
+    elapsed_turns = max(0, int(save_row["turns"] or 0) - 1) if save_row else 0
+    initial_minute = min(1439, 930 + elapsed_turns * 15)
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO save_world_time
+        (save_id, day, minute_of_day, season, calendar_label, updated_at)
+        VALUES (?, 1, ?, ?, ?, ?)
+        """,
+        (sid, initial_minute, DEFAULT_WORLD_SEASON, DEFAULT_CALENDAR_LABEL, now),
+    )
     for kind, target_id, status, reliability, source, notes in _DEFAULT_KNOWLEDGE:
         conn.execute(
             """
@@ -622,6 +647,9 @@ def world_snapshot(sid: str) -> dict | None:
         ).fetchone()
         if loc is None:
             return None
+        world_time = conn.execute(
+            "SELECT * FROM save_world_time WHERE save_id=?", (sid,)
+        ).fetchone()
         knowledge = conn.execute(
             "SELECT * FROM save_player_knowledge WHERE save_id=? ORDER BY knowledge_type, status, id",
             (sid,),
@@ -635,6 +663,7 @@ def world_snapshot(sid: str) -> dict | None:
         realms = conn.execute("SELECT * FROM world_realms ORDER BY rowid").fetchall()
     return {
         "location": dict(loc),
+        "time": dict(world_time),
         "knowledge": [dict(row) for row in knowledge],
         "regions": [dict(row) for row in regions],
         "locations": [dict(row) for row in locations],
@@ -666,6 +695,26 @@ def update_player_location(
             """,
             (region_id, location_id, site_name, location_state, intended_destination_id, lost_risk, time.time(), sid),
         )
+
+
+def advance_world_time(sid: str, minutes: int) -> dict:
+    """Advance the persistent story clock; the clock can never move backward."""
+    elapsed = max(0, int(minutes))
+    with _conn() as conn:
+        _ensure_default_save_world_state(conn, sid)
+        row = conn.execute(
+            "SELECT * FROM save_world_time WHERE save_id=?", (sid,)
+        ).fetchone()
+        total = (int(row["day"]) - 1) * 1440 + int(row["minute_of_day"]) + elapsed
+        day, minute_of_day = divmod(total, 1440)
+        conn.execute(
+            "UPDATE save_world_time SET day=?, minute_of_day=?, updated_at=? WHERE save_id=?",
+            (day + 1, minute_of_day, time.time(), sid),
+        )
+        updated = conn.execute(
+            "SELECT * FROM save_world_time WHERE save_id=?", (sid,)
+        ).fetchone()
+    return dict(updated)
 
 
 def set_intended_destination(sid: str, target_id: str | None) -> None:
@@ -1017,5 +1066,6 @@ def rename(sid: str, name: str) -> bool:
 def delete(sid: str) -> bool:
     with _conn() as conn:
         conn.execute("DELETE FROM save_opportunity_rewards WHERE save_id=?", (sid,))
+        conn.execute("DELETE FROM save_world_time WHERE save_id=?", (sid,))
         cur = conn.execute("DELETE FROM saves WHERE id=?", (sid,))
     return cur.rowcount > 0

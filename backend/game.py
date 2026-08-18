@@ -883,7 +883,9 @@ def commit(session_id: str, user_content: str | None, assistant_content: str) ->
     # 解析本回合面板回影子库（新物入库、失去物移除、正文命中刷 last_turn）
     _reconcile_inventory(state, assistant_content)
     _finalize_director_state(state, assistant_content)
-    constraints.reconcile_location(session_id, _narration_body(assistant_content))
+    constraints.reconcile_location(
+        session_id, _narration_body(assistant_content), user_content
+    )
     store.save_state(session_id, state["messages"], state["transcript"], state["turns"])
     store.save_stage_summary(
         session_id, state.get("stage_summary") or "", int(state.get("summary_turn") or 0)

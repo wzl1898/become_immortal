@@ -1052,6 +1052,14 @@ function renderConstraint(state) {
     ["行动意图", loc.intended_destination_name],
   ]));
 
+  const time = worldState.time || {};
+  constraintBodyEl.appendChild(constraintSection("世界时间", [
+    ["日期", time.calendar_label && time.day ? `${time.calendar_label}第${time.day}日` : ""],
+    ["时刻", time.clock],
+    ["时段", time.period],
+    ["季节", time.season],
+  ]));
+
   const knowledge = worldState.knowledge || {};
   constraintBodyEl.appendChild(chipSection("已确认地点", knowledge.confirmed_locations));
   constraintBodyEl.appendChild(chipSection("听闻地点", knowledge.rumored_locations));

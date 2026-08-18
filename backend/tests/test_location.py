@@ -36,7 +36,7 @@ class StructuredLocationTests(unittest.TestCase):
 
         location = self.location()
         self.assertEqual(location["location_id"], "baishi_ruined_temple")
-        self.assertEqual(location["site_name"], "")
+        self.assertEqual(location["site_name"], "村外破庙")
         self.assertEqual(location["location_state"], "安全")
         self.assertIsNone(location["intended_destination_id"])
 
@@ -75,6 +75,25 @@ class StructuredLocationTests(unittest.TestCase):
         constraints.reconcile_location(self.sid, "村民说破庙附近有狼。你终于抵达落霞仙城。")
 
         self.assertEqual(self.location()["location_id"], "baishi_village")
+
+    def test_confirmed_local_scene_updates_site_without_changing_location(self):
+        constraints.reconcile_location(self.sid, "你沿村西小径走了一阵，终于来到村口。")
+
+        location = self.location()
+        self.assertEqual(location["location_id"], "baishi_village")
+        self.assertEqual(location["site_name"], "白石村村口")
+
+    def test_planned_local_scene_does_not_update_site(self):
+        constraints.reconcile_location(self.sid, "你打算明日来到村口，再去青溪镇。")
+
+        self.assertEqual(self.location()["site_name"], "村西老槐树")
+
+    def test_macro_arrival_replaces_stale_local_scene(self):
+        constraints.reconcile_location(self.sid, "日落前，你终于赶到村外破庙。")
+
+        location = self.location()
+        self.assertEqual(location["location_id"], "baishi_ruined_temple")
+        self.assertEqual(location["site_name"], "村外破庙")
 
 
 if __name__ == "__main__":
