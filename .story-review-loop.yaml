@@ -7,8 +7,22 @@ service:
   proxy_bypass: 127.0.0.1,localhost
 
 session:
-  strategy: dedicated
+  strategy: clone
   save_name: 自动剧情验收
+  id: null
+
+seed:
+  source_session_id: 38e4be30508ccb696330e6b0b42cf51e
+  turn: 11
+  require_exact_turn: true
+  clone_complete_save: true
+  agent_outputs: all
+  require_all_available: true
+  inject_into_all_agents: true
+  verify_hashes: true
+  fail_on_missing: true
+  include_in_review_package: true
+  include_in_report: true
 
 input:
   mode: auto
