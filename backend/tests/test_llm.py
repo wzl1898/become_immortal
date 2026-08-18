@@ -38,6 +38,25 @@ class _RetryClient:
 
 
 class LLMRetryTests(unittest.TestCase):
+    def test_deepseek_v4_payload_disables_reasoning(self):
+        payload = llm._openai_payload(
+            [{"role": "user", "content": "hi"}],
+            model="deepseek-v4-flash",
+            temperature=0.2,
+            max_tokens=100,
+            stream=True,
+        )
+
+        self.assertEqual(payload["thinking"], {"type": "disabled"})
+        self.assertTrue(payload["stream"])
+
+    def test_other_openai_models_do_not_receive_deepseek_option(self):
+        payload = llm._openai_payload(
+            [], model="gpt-compatible", temperature=0.2, max_tokens=100, stream=False
+        )
+
+        self.assertNotIn("thinking", payload)
+
     def test_complete_openai_retries_connect_errors(self):
         _RetryClient.attempts = 0
         config = llm.LLMConfig("openai", "https://example.test/v1", "key", "model", 5)

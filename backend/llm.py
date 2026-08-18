@@ -40,6 +40,29 @@ class LLMConfig:
 DEFAULT_CONFIG = LLMConfig(PROTOCOL, BASE_URL, API_KEY, MODEL)
 
 
+def _openai_payload(
+    messages: list[dict],
+    *,
+    model: str,
+    temperature: float,
+    max_tokens: int,
+    stream: bool,
+) -> dict:
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": stream,
+    }
+    # DeepSeek V4 Flash defaults to reasoning output. Reasoning tokens count
+    # against max_tokens but are not shown to the player, which can leave the
+    # final content empty. Disable reasoning for narrative and JSON agents.
+    if model.lower().startswith("deepseek-v4"):
+        payload["thinking"] = {"type": "disabled"}
+    return payload
+
+
 def config_from_env(prefix: str) -> LLMConfig:
     """Build an agent-specific config, falling back to the main LLM."""
     return LLMConfig(
@@ -190,13 +213,10 @@ async def _stream_openai(messages: list[dict]):
         "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json",
     }
-    payload = {
-        "model": MODEL,
-        "messages": messages,
-        "temperature": TEMPERATURE,
-        "max_tokens": MAX_TOKENS,
-        "stream": True,
-    }
+    payload = _openai_payload(
+        messages, model=MODEL, temperature=TEMPERATURE,
+        max_tokens=MAX_TOKENS, stream=True,
+    )
 
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         for attempt in range(len(CONNECT_RETRY_DELAYS) + 1):
@@ -239,13 +259,13 @@ async def _complete_openai(
         "Authorization": f"Bearer {config.api_key}",
         "Content-Type": "application/json",
     }
-    payload = {
-        "model": config.model,
-        "messages": messages,
-        "temperature": TEMPERATURE if temperature is None else temperature,
-        "max_tokens": MAX_TOKENS if max_tokens is None else max_tokens,
-        "stream": False,
-    }
+    payload = _openai_payload(
+        messages,
+        model=config.model,
+        temperature=TEMPERATURE if temperature is None else temperature,
+        max_tokens=MAX_TOKENS if max_tokens is None else max_tokens,
+        stream=False,
+    )
 
     timeout = _completion_timeout(config.timeout_seconds)
     async with httpx.AsyncClient(timeout=timeout) as client:

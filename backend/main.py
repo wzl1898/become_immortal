@@ -78,7 +78,15 @@ async def _stream(
             on_error()
         yield _sse("error", {"message": str(e)})
         return
-    payload = on_done("".join(full)) or {}
+    completed = "".join(full)
+    if not completed.strip():
+        if on_error:
+            on_error()
+        yield _sse("error", {
+            "message": "模型没有返回可显示的正文，请重试。当前回合未保存。"
+        })
+        return
+    payload = on_done(completed) or {}
     yield _sse("done", payload)
 
 
