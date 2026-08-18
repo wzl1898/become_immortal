@@ -19,7 +19,7 @@ import httpx
 PROTOCOL = os.getenv("LLM_PROTOCOL", "openai").strip().lower()
 BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com/v1").rstrip("/")
 API_KEY = os.getenv("LLM_API_KEY", "")
-MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
+MODEL = os.getenv("LLM_MODEL", "deepseek-v4-flash")
 TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.9"))
 MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 ANTHROPIC_VERSION = os.getenv("ANTHROPIC_VERSION", "2023-06-01")
