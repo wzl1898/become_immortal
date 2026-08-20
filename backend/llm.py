@@ -78,6 +78,7 @@ async def stream_chat(
     messages: list[dict],
     request_type: str = "narrative",
     session_id: str | None = None,
+    turn: int | None = None,
 ):
     """向 LLM 发起流式对话，逐段 yield 文本增量。
 
@@ -90,8 +91,10 @@ async def stream_chat(
     """
     started = time.monotonic()
     output_chars = 0
+    output_parts = []
     status = "success"
     error_type = ""
+    error_message = ""
     try:
         if not API_KEY:
             raise RuntimeError("未配置 LLM_API_KEY，请复制 .env.example 为 .env 并填写。")
@@ -103,26 +106,37 @@ async def stream_chat(
             raise RuntimeError(f"未知的 LLM_PROTOCOL={PROTOCOL!r}，应为 openai 或 anthropic。")
         async for piece in iterator:
             output_chars += len(piece)
+            output_parts.append(piece)
             yield piece
     except asyncio.CancelledError:
         status = "timeout"
         error_type = "CancelledError"
+        error_message = "stream cancelled"
         raise
     except Exception as exc:
         status = "api_error"
         error_type = type(exc).__name__
+        error_message = str(exc)
         raise
     finally:
+        duration_ms = round((time.monotonic() - started) * 1000)
         _record_metric({
             "save_id": session_id,
             "request_type": request_type,
             "protocol": PROTOCOL,
             "model": MODEL,
             "status": status,
-            "duration_ms": round((time.monotonic() - started) * 1000),
+            "duration_ms": duration_ms,
             "input_chars": sum(len(str(message.get("content") or "")) for message in messages),
             "output_chars": output_chars,
             "error_type": error_type,
+        })
+        _record_trace({
+            "save_id": session_id, "turn": turn, "agent_type": request_type,
+            "protocol": PROTOCOL, "model": MODEL, "stream": True,
+            "input_messages": messages, "raw_output": "".join(output_parts),
+            "status": status, "duration_ms": duration_ms,
+            "error_type": error_type, "error_message": error_message,
         })
 
 
@@ -133,6 +147,7 @@ async def complete_chat(
     config: LLMConfig | None = None,
     request_type: str = "background",
     session_id: str | None = None,
+    turn: int | None = None,
 ) -> str:
     """向 LLM 发起非流式对话，用于后台结构化任务。"""
     config = config or DEFAULT_CONFIG
@@ -144,6 +159,7 @@ async def complete_chat(
     usage = {}
     status = "success"
     error_type = ""
+    error_message = ""
     try:
         if config.protocol == "anthropic":
             text, usage = await _complete_anthropic(messages, temperature, max_tokens, config)
@@ -155,23 +171,33 @@ async def complete_chat(
     except asyncio.CancelledError:
         status = "timeout"
         error_type = "CancelledError"
+        error_message = "request cancelled"
         raise
     except Exception as exc:
         status = "api_error"
         error_type = type(exc).__name__
+        error_message = str(exc)
         raise
     finally:
+        duration_ms = round((time.monotonic() - started) * 1000)
         _record_metric({
             "save_id": session_id,
             "request_type": request_type,
             "protocol": config.protocol,
             "model": config.model,
             "status": status,
-            "duration_ms": round((time.monotonic() - started) * 1000),
+            "duration_ms": duration_ms,
             "input_chars": sum(len(str(message.get("content") or "")) for message in messages),
             "output_chars": len(text),
             "error_type": error_type,
             **_usage_metrics(usage),
+        })
+        _record_trace({
+            "save_id": session_id, "turn": turn, "agent_type": request_type,
+            "protocol": config.protocol, "model": config.model, "stream": False,
+            "input_messages": messages, "raw_output": text, "status": status,
+            "duration_ms": duration_ms, "error_type": error_type,
+            "error_message": error_message,
         })
 
 
@@ -197,6 +223,15 @@ def _record_metric(metric: dict) -> None:
         import store
         store.record_llm_request_metric(metric)
     except Exception:
+        pass
+
+
+def _record_trace(trace: dict) -> None:
+    try:
+        import store
+        store.record_agent_trace({**trace, "created_at": time.time()})
+    except Exception:
+        # Trace persistence must never break the player's generation request.
         pass
 
 

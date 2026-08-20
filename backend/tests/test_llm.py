@@ -38,6 +38,44 @@ class _RetryClient:
 
 
 class LLMRetryTests(unittest.TestCase):
+    def test_complete_chat_records_full_trace_with_turn(self):
+        config = llm.LLMConfig("openai", "https://example.test/v1", "key", "model", 5)
+        messages = [{"role": "user", "content": "trace me"}]
+        traces = []
+        with patch.object(llm, "_complete_openai", return_value=("raw result", {})), \
+             patch.object(llm, "_record_metric"), \
+             patch.object(llm, "_record_trace", side_effect=traces.append):
+            result = asyncio.run(llm.complete_chat(
+                messages, config=config, request_type="director_test",
+                session_id="save-1", turn=7,
+            ))
+
+        self.assertEqual(result, "raw result")
+        self.assertEqual(traces[0]["turn"], 7)
+        self.assertEqual(traces[0]["input_messages"], messages)
+        self.assertEqual(traces[0]["raw_output"], "raw result")
+        self.assertEqual(traces[0]["status"], "success")
+
+    def test_complete_chat_records_api_error_trace(self):
+        config = llm.LLMConfig("openai", "https://example.test/v1", "key", "model", 5)
+        traces = []
+
+        async def fail(*args, **kwargs):
+            raise httpx.ConnectError("offline")
+
+        with patch.object(llm, "_complete_openai", side_effect=fail), \
+             patch.object(llm, "_record_metric"), \
+             patch.object(llm, "_record_trace", side_effect=traces.append):
+            with self.assertRaises(httpx.ConnectError):
+                asyncio.run(llm.complete_chat(
+                    [{"role": "user", "content": "fail"}], config=config,
+                    request_type="director_test", session_id="save-1", turn=8,
+                ))
+
+        self.assertEqual(traces[0]["status"], "api_error")
+        self.assertEqual(traces[0]["error_type"], "ConnectError")
+        self.assertEqual(traces[0]["error_message"], "offline")
+
     def test_deepseek_v4_payload_disables_reasoning(self):
         payload = llm._openai_payload(
             [{"role": "user", "content": "hi"}],

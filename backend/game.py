@@ -945,6 +945,7 @@ async def _extract_and_store_memory(
             max_tokens=800,
             request_type="memory_extract",
             session_id=session_id,
+            turn=turn,
         )
         # 解析并就地消解：更新 entities（建新实体 / 追加别名），给每条落 canonical_id
         items = _parse_extracted_memories(raw, turn, entities)
@@ -1745,7 +1746,8 @@ def _schedule_causal_foundation(
         "【当前输入】\n" + action,
     ])
     task = asyncio.create_task(_run_causal_foundation(
-        state.get("session_id"), event_id, event_seed, context, world_context
+        state.get("session_id"), event_id, event_seed, context, world_context,
+        int(state.get("turns") or 0) + 1,
     ))
     _CAUSAL_TASKS[event_id] = task
     task.add_done_callback(lambda done, key=event_id: (
@@ -1759,6 +1761,7 @@ async def _run_causal_foundation(
     event_seed: dict,
     context: str,
     world_context: dict,
+    turn: int,
 ) -> None:
     source = "llm"
     model = DIRECTOR_LLM_CONFIG.model
@@ -1779,6 +1782,7 @@ async def _run_causal_foundation(
             config=DIRECTOR_CAUSAL_LLM_CONFIG,
             request_type="director_causal",
             session_id=session_id,
+            turn=turn,
         )
         causal_model = _clean_markdown(raw)
         if not causal_model:
@@ -1817,6 +1821,8 @@ async def _call_director_agent(
     messages: list[dict], request_type: str, max_tokens: int, session_id: str | None
 ) -> tuple[dict | None, dict]:
     messages = _inject_story_seed_messages(messages, session_id, request_type)
+    state = _CACHE.get(session_id) if session_id else None
+    trace_turn = int((state or {}).get("turns") or 0) + 1
     result = None
     reason = ""
     try:
@@ -1828,6 +1834,7 @@ async def _call_director_agent(
                 config=DIRECTOR_LLM_CONFIG,
                 request_type=request_type,
                 session_id=session_id,
+                turn=trace_turn,
             ),
             timeout=DIRECTOR_PLANNER_TIMEOUT_SECONDS,
         )
@@ -1854,6 +1861,8 @@ async def _call_director_text_agent(
     session_id: str | None,
 ) -> tuple[str | None, dict]:
     messages = _inject_story_seed_messages(messages, session_id, request_type)
+    state = _CACHE.get(session_id) if session_id else None
+    trace_turn = int((state or {}).get("turns") or 0) + 1
     result = None
     reason = ""
     try:
@@ -1865,6 +1874,7 @@ async def _call_director_text_agent(
                 config=DIRECTOR_LLM_CONFIG,
                 request_type=request_type,
                 session_id=session_id,
+                turn=trace_turn,
             ),
             timeout=DIRECTOR_PLANNER_TIMEOUT_SECONDS,
         )
@@ -2668,6 +2678,7 @@ async def _run_director_audit(
             max_tokens=500,
             request_type="director_audit",
             session_id=session_id,
+            turn=turn,
         )
         result = _extract_json_object(raw) or {}
         audit = {
@@ -2864,6 +2875,7 @@ async def _run_director(
             max_tokens=700,
             request_type="legacy_director",
             session_id=session_id,
+            turn=turn,
         )
         result = _extract_json_object(raw)
         if result is None:
@@ -3132,6 +3144,14 @@ def get_turns(session_id: str) -> int | None:
 
 def get_llm_request_metrics(session_id: str, limit: int = 30) -> list[dict] | None:
     return store.list_llm_request_metrics(session_id, limit)
+
+
+def get_agent_traces(
+    session_id: str, *, turn: int | None = None, limit: int = 100, include_content: bool = False
+) -> list[dict] | None:
+    return store.list_agent_traces(
+        session_id, turn=turn, limit=limit, include_content=include_content
+    )
 
 
 def commit_inquiry_memory(session_id: str, question: str, answer: str) -> None:

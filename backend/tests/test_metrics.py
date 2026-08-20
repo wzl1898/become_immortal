@@ -8,6 +8,44 @@ import store
 
 
 class LLMMetricStoreTests(unittest.TestCase):
+    def test_agent_traces_keep_complete_payloads_by_turn(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "saves.db")
+            with patch.object(store, "DB_PATH", db_path):
+                store.init()
+                sid = store.create("test", [])
+                trace_id = store.record_agent_trace({
+                    "save_id": sid,
+                    "turn": 5,
+                    "agent_type": "director_skeleton",
+                    "protocol": "openai",
+                    "model": "test-model",
+                    "stream": False,
+                    "input_messages": [{"role": "user", "content": "完整输入"}],
+                    "raw_output": '{"beats":["完整输出"]}',
+                    "status": "success",
+                    "duration_ms": 123,
+                })
+
+                summary = store.list_agent_traces(sid)
+                complete = store.list_agent_traces(
+                    sid, turn=5, include_content=True
+                )
+
+                self.assertEqual(summary[0]["id"], trace_id)
+                self.assertNotIn("input_messages", summary[0])
+                self.assertNotIn("raw_output", summary[0])
+                self.assertEqual(complete[0]["input_messages"][0]["content"], "完整输入")
+                self.assertIn("完整输出", complete[0]["raw_output"])
+                self.assertIsNone(store.list_agent_traces("missing"))
+
+                self.assertTrue(store.delete(sid))
+                with sqlite3.connect(db_path) as conn:
+                    count = conn.execute(
+                        "SELECT COUNT(*) FROM agent_traces WHERE save_id=?", (sid,)
+                    ).fetchone()[0]
+                self.assertEqual(count, 0)
+
     def test_lists_recent_metrics_for_save_with_limit(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "saves.db")
