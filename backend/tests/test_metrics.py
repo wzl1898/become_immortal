@@ -37,6 +37,7 @@ class LLMMetricStoreTests(unittest.TestCase):
                 self.assertNotIn("raw_output", summary[0])
                 self.assertEqual(complete[0]["input_messages"][0]["content"], "完整输入")
                 self.assertIn("完整输出", complete[0]["raw_output"])
+                self.assertGreater(complete[0]["updated_at"], 0)
                 self.assertIsNone(store.list_agent_traces("missing"))
 
                 self.assertTrue(store.delete(sid))
@@ -45,6 +46,34 @@ class LLMMetricStoreTests(unittest.TestCase):
                         "SELECT COUNT(*) FROM agent_traces WHERE save_id=?", (sid,)
                     ).fetchone()[0]
                 self.assertEqual(count, 0)
+
+    def test_agent_trace_lifecycle_and_incremental_cursor(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "saves.db")
+            with patch.object(store, "DB_PATH", db_path):
+                store.init()
+                sid = store.create("test", [])
+                trace_id = store.record_agent_trace({
+                    "save_id": sid, "turn": 1, "agent_type": "opening",
+                    "protocol": "openai", "model": "test",
+                    "input_messages": [{"role": "user", "content": "开始"}],
+                    "status": "running",
+                })
+                running = store.list_agent_traces(sid, include_content=True)[0]
+                self.assertEqual(running["status"], "running")
+                cursor = running["updated_at"]
+                self.assertEqual(store.list_agent_traces(sid, updated_after=cursor), [])
+
+                store.finish_agent_trace(trace_id, {
+                    "raw_output": "剧情", "status": "success", "duration_ms": 42,
+                })
+                changed = store.list_agent_traces(
+                    sid, include_content=True, updated_after=cursor
+                )
+                self.assertEqual(len(changed), 1)
+                self.assertEqual(changed[0]["id"], trace_id)
+                self.assertEqual(changed[0]["status"], "success")
+                self.assertEqual(changed[0]["raw_output"], "剧情")
 
     def test_lists_recent_metrics_for_save_with_limit(self):
         with tempfile.TemporaryDirectory() as tmpdir:

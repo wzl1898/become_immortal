@@ -95,6 +95,11 @@ async def stream_chat(
     status = "success"
     error_type = ""
     error_message = ""
+    trace_id = _start_trace({
+        "save_id": session_id, "turn": turn, "agent_type": request_type,
+        "protocol": PROTOCOL, "model": MODEL, "stream": True,
+        "input_messages": messages,
+    })
     try:
         if not API_KEY:
             raise RuntimeError("未配置 LLM_API_KEY，请复制 .env.example 为 .env 并填写。")
@@ -131,10 +136,8 @@ async def stream_chat(
             "output_chars": output_chars,
             "error_type": error_type,
         })
-        _record_trace({
-            "save_id": session_id, "turn": turn, "agent_type": request_type,
-            "protocol": PROTOCOL, "model": MODEL, "stream": True,
-            "input_messages": messages, "raw_output": "".join(output_parts),
+        _finish_trace(trace_id, {
+            "raw_output": "".join(output_parts),
             "status": status, "duration_ms": duration_ms,
             "error_type": error_type, "error_message": error_message,
         })
@@ -151,16 +154,20 @@ async def complete_chat(
 ) -> str:
     """向 LLM 发起非流式对话，用于后台结构化任务。"""
     config = config or DEFAULT_CONFIG
-    if not config.api_key:
-        raise RuntimeError("未配置 LLM_API_KEY，请复制 .env.example 为 .env 并填写。")
-
     started = time.monotonic()
     text = ""
     usage = {}
     status = "success"
     error_type = ""
     error_message = ""
+    trace_id = _start_trace({
+        "save_id": session_id, "turn": turn, "agent_type": request_type,
+        "protocol": config.protocol, "model": config.model, "stream": False,
+        "input_messages": messages,
+    })
     try:
+        if not config.api_key:
+            raise RuntimeError("未配置 LLM_API_KEY，请复制 .env.example 为 .env 并填写。")
         if config.protocol == "anthropic":
             text, usage = await _complete_anthropic(messages, temperature, max_tokens, config)
         elif config.protocol == "openai":
@@ -192,10 +199,8 @@ async def complete_chat(
             "error_type": error_type,
             **_usage_metrics(usage),
         })
-        _record_trace({
-            "save_id": session_id, "turn": turn, "agent_type": request_type,
-            "protocol": config.protocol, "model": config.model, "stream": False,
-            "input_messages": messages, "raw_output": text, "status": status,
+        _finish_trace(trace_id, {
+            "raw_output": text, "status": status,
             "duration_ms": duration_ms, "error_type": error_type,
             "error_message": error_message,
         })
@@ -226,12 +231,25 @@ def _record_metric(metric: dict) -> None:
         pass
 
 
-def _record_trace(trace: dict) -> None:
+def _start_trace(trace: dict) -> int | None:
     try:
         import store
-        store.record_agent_trace({**trace, "created_at": time.time()})
+        return store.record_agent_trace({
+            **trace, "raw_output": "", "status": "running",
+            "duration_ms": 0, "created_at": time.time(),
+        })
     except Exception:
         # Trace persistence must never break the player's generation request.
+        return None
+
+
+def _finish_trace(trace_id: int | None, trace: dict) -> None:
+    if trace_id is None:
+        return
+    try:
+        import store
+        store.finish_agent_trace(trace_id, trace)
+    except Exception:
         pass
 
 

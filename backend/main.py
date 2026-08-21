@@ -317,14 +317,20 @@ async def llm_metrics(sid: str, limit: int = 30):
 
 
 @app.get("/api/agent-traces")
-async def agent_traces(sid: str, turn: int | None = None, limit: int = 100):
-    """Read immutable Agent traces; a turn filter returns full prompts and outputs."""
+async def agent_traces(
+    sid: str, turn: int | None = None, limit: int = 100,
+    include_content: bool = False, updated_after: float | None = None,
+):
+    """Read Agent traces, optionally returning only records changed since a cursor."""
     items = game.get_agent_traces(
-        sid, turn=turn, limit=limit, include_content=turn is not None
+        sid, turn=turn, limit=limit,
+        include_content=include_content or turn is not None,
+        updated_after=updated_after,
     )
     if items is None:
         raise HTTPException(404, "存档不存在")
-    return {"traces": items}
+    cursor = max((item["updated_at"] for item in items), default=updated_after or 0)
+    return {"traces": items, "cursor": cursor}
 
 
 @app.get("/api/world-state")

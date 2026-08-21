@@ -108,10 +108,15 @@ def init() -> None:
                 duration_ms INTEGER NOT NULL,
                 error_type TEXT NOT NULL DEFAULT '',
                 error_message TEXT NOT NULL DEFAULT '',
-                created_at REAL NOT NULL
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
             )
             """
         )
+        trace_cols = {row["name"] for row in conn.execute("PRAGMA table_info(agent_traces)")}
+        if "updated_at" not in trace_cols:
+            conn.execute("ALTER TABLE agent_traces ADD COLUMN updated_at REAL NOT NULL DEFAULT 0")
+            conn.execute("UPDATE agent_traces SET updated_at=created_at WHERE updated_at=0")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_agent_traces_save_turn "
             "ON agent_traces(save_id, turn, id)"
@@ -854,15 +859,16 @@ def list_llm_request_metrics(sid: str, limit: int = 30) -> list[dict] | None:
 
 
 def record_agent_trace(trace: dict) -> int:
-    """Append one immutable full-input/full-output Agent execution trace."""
+    """Create an Agent trace; callers may later finish the same row."""
+    now = float(trace.get("created_at") or time.time())
     with _conn() as conn:
         cur = conn.execute(
             """
             INSERT INTO agent_traces (
                 save_id, turn, agent_type, protocol, model, stream,
                 input_messages, raw_output, status, duration_ms,
-                error_type, error_message, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                error_type, error_message, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 trace.get("save_id"),
@@ -877,14 +883,38 @@ def record_agent_trace(trace: dict) -> int:
                 int(trace.get("duration_ms") or 0),
                 trace.get("error_type") or "",
                 trace.get("error_message") or "",
-                float(trace.get("created_at") or time.time()),
+                now,
+                now,
             ),
         )
     return int(cur.lastrowid)
 
 
+def finish_agent_trace(trace_id: int, trace: dict) -> None:
+    """Finish a running Agent trace without changing its identity."""
+    with _conn() as conn:
+        conn.execute(
+            """
+            UPDATE agent_traces
+            SET raw_output=?, status=?, duration_ms=?, error_type=?,
+                error_message=?, updated_at=?
+            WHERE id=?
+            """,
+            (
+                str(trace.get("raw_output") or ""),
+                trace.get("status") or "unknown",
+                int(trace.get("duration_ms") or 0),
+                trace.get("error_type") or "",
+                trace.get("error_message") or "",
+                time.time(),
+                int(trace_id),
+            ),
+        )
+
+
 def list_agent_traces(
-    sid: str, *, turn: int | None = None, limit: int = 100, include_content: bool = False
+    sid: str, *, turn: int | None = None, limit: int = 100,
+    include_content: bool = False, updated_after: float | None = None,
 ) -> list[dict] | None:
     """Read trace summaries, or complete payloads when explicitly requested."""
     limit = max(1, min(int(limit), 500))
@@ -892,20 +922,28 @@ def list_agent_traces(
         if conn.execute("SELECT 1 FROM saves WHERE id=?", (sid,)).fetchone() is None:
             return None
         content_columns = ", input_messages, raw_output, error_message" if include_content else ""
-        turn_clause = " AND turn=?" if turn is not None else ""
-        params = (sid, int(turn), limit) if turn is not None else (sid, limit)
+        clauses = ["save_id=?"]
+        params: list = [sid]
+        if turn is not None:
+            clauses.append("turn=?")
+            params.append(int(turn))
+        if updated_after is not None:
+            clauses.append("updated_at>?")
+            params.append(float(updated_after))
+        params.append(limit)
+        order_by = "updated_at ASC, id ASC" if updated_after is not None else "id ASC"
         rows = conn.execute(
             f"""
             SELECT id, save_id, turn, agent_type, protocol, model, stream,
-                   status, duration_ms, error_type, created_at,
+                   status, duration_ms, error_type, created_at, updated_at,
                    length(input_messages) AS input_chars, length(raw_output) AS output_chars
                    {content_columns}
             FROM agent_traces
-            WHERE save_id=?{turn_clause}
-            ORDER BY id ASC
+            WHERE {' AND '.join(clauses)}
+            ORDER BY {order_by}
             LIMIT ?
             """,
-            params,
+            tuple(params),
         ).fetchall()
     result = [dict(row) for row in rows]
     if include_content:
