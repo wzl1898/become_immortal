@@ -61,6 +61,10 @@ _ARRIVAL_BEFORE_RE = re.compile(
     r"身处|置身于?|住进|落脚在?|(?:你|主角)(?:已经|已|正)?在|到了|进了)"
     r"[了在于]?\s*[「『\u201c\"]?$"
 )
+_ARRIVAL_AFTER_RE = re.compile(
+    r"^[\s，。；：、——-]*(?:已经|已)?"
+    r"(?:抵达|到达|到了|进入|走进|踏入|赶到|来到|行至|回到|返回到?|进了)"
+)
 _UNREALIZED_BEFORE_RE = re.compile(
     r"(?:尚未|还未|还没|未能|没能|并未|无法|不能|不曾|打算|计划|准备|想要|希望|欲|"
     r"若|如果|一旦|需要|须|必须|可以|试图|尝试|开始).{0,8}"
@@ -269,7 +273,10 @@ def _confirmed_site_arrivals(narrative: str, location_id: str) -> list[tuple[int
 def _is_confirmed_arrival(before: str, after: str) -> bool:
     if _UNREALIZED_BEFORE_RE.search(before) or _UNREALIZED_AFTER_RE.search(after):
         return False
-    return bool(_ARRIVAL_BEFORE_RE.search(before))
+    return bool(
+        _ARRIVAL_BEFORE_RE.search(before)
+        or _ARRIVAL_AFTER_RE.search(after)
+    )
 
 
 def director_context(session_id: str, action: str) -> dict:

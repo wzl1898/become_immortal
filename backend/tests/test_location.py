@@ -40,6 +40,23 @@ class StructuredLocationTests(unittest.TestCase):
         self.assertEqual(location["location_state"], "安全")
         self.assertIsNone(location["intended_destination_id"])
 
+    def test_postposed_arrival_updates_actual_location(self):
+        constraints.reconcile_location(
+            self.sid,
+            "行至晌午前，前方地平线上渐次浮现一片屋舍轮廓，青溪镇到了。",
+        )
+
+        location = self.location()
+        self.assertEqual(location["location_id"], "qingxi_town")
+        self.assertEqual(location["site_name"], "青溪镇")
+
+    def test_directional_or_planned_postposed_phrase_does_not_move(self):
+        constraints.reconcile_location(self.sid, "前往青溪镇方向，沿官道继续赶路。")
+        self.assertEqual(self.location()["location_id"], "baishi_village")
+
+        constraints.reconcile_location(self.sid, "青溪镇尚未到达，只能在野外暂歇。")
+        self.assertEqual(self.location()["location_id"], "baishi_village")
+
     def test_intent_or_failed_arrival_does_not_move(self):
         constraints.action_constraints(self.sid, "前往村外破庙")
 
