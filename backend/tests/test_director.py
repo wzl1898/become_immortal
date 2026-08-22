@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import game
 import llm
+import prompts
 
 
 def _context():
@@ -85,6 +86,17 @@ def _director(*, status="offered", turns=0):
 
 
 class DirectorPlanTests(unittest.TestCase):
+    def test_cultivation_rules_are_at_tail_of_story_event_and_causal_prompts(self):
+        prompts_to_check = (
+            prompts.SYSTEM_PROMPT,
+            prompts.DIRECTOR_EVENT_SYSTEM_PROMPT,
+            prompts.DIRECTOR_CAUSAL_SYSTEM_PROMPT,
+        )
+        for prompt in prompts_to_check:
+            self.assertIn("“引气诀”是固定世界中的功法名称，不是境界名称", prompt)
+            self.assertIn("不得创造“引气期”“纳气期”或其他未定义境界", prompt)
+            self.assertTrue(prompt.rstrip().endswith("不得继续扩散该错误术语。"))
+
     def test_player_avoidance_replans_event_without_resetting_it(self):
         first = game._apply_director_plan(_director(), _plan(), "迎战", _context(), 1)
         second_raw = _plan(action="continue", intent="避开山匪", route="escape")

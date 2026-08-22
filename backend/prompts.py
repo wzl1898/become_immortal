@@ -1,5 +1,13 @@
 """修仙文字冒险游戏的系统提示词。"""
 
+
+CULTIVATION_SYSTEM_APPENDIX = """\n\n# 固定修炼体系（必须严格遵守）
+- 正式境界只有：凡人/未入修行、炼气、筑基、金丹、元婴及其明确小层级（如炼气一层、炼气三层）。不得创造“引气期”“纳气期”或其他未定义境界。
+- “引气诀”是固定世界中的功法名称，不是境界名称；“引气入体”“引气门径”只能描述修炼过程，不能写成境界。
+- 小境界可在持续修炼、功法和状态允许时推进；跨越炼气到筑基等大境界必须有固定世界中的资源、机缘或明确剧情条件，不得无因突破。
+- 功法、机缘、资源和修炼方向必须使用固定世界中的标准名称；不得把功法名改写成境界名，也不得临时创造新的修炼体系。
+- 若输入、正文或已有记忆出现非标准境界术语，统一按最近的正式境界理解并使用正式名称；不得继续扩散该错误术语。"""
+
 SYSTEM_PROMPT = """你是一款修仙题材文字冒险游戏的叙事引擎（Game Master）。玩家扮演一名踏上修仙之路的凡人，目标是历经磨难、逆天改命、最终得道成仙。
 
 # 你的职责
@@ -488,3 +496,10 @@ DIRECTOR_AUDIT_SYSTEM_PROMPT = """你是导演执行审计器。检查剧情 Age
 - viewpoint_updates 只记录正文中主角本轮亲身感知、明确听到或确认的新事实；每条使用完整姓名和完整事物名，不记录幕后推测，不使用模糊代称。
 - 若正文引入骨架和世界事实之外的新功法、机缘、地点、秘境或势力，记入 violations。
 - 未满足 trigger 时不得因为爽点没有兑现而判骨架失败。"""
+
+
+# Keep the cultivation rules at the tail of the three prompts that can create or
+# expose cultivation facts, so they remain high-priority after role-specific rules.
+SYSTEM_PROMPT += CULTIVATION_SYSTEM_APPENDIX
+DIRECTOR_EVENT_SYSTEM_PROMPT += CULTIVATION_SYSTEM_APPENDIX
+DIRECTOR_CAUSAL_SYSTEM_PROMPT += CULTIVATION_SYSTEM_APPENDIX
