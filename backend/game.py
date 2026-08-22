@@ -1314,6 +1314,26 @@ async def _plan_director_turn(
     )
     payoff_result, payoff_meta = payoff_call
     pacing_result, pacing_meta = pacing_call
+    payoff_retry_meta = None
+    if payoff_result is not None and world_context is not None:
+        initial_binding = _resolve_payoff_binding(payoff_result, world_context)
+        if _payoff_text(payoff_result) is not None and initial_binding is None:
+            retry_call = await _call_director_agent(
+                _director_payoff_retry_messages(
+                    state, action, world_context, prev, compact_memories, payoff_result,
+                ),
+                "director_payoff_retry",
+                DIRECTOR_PAYOFF_MAX_TOKENS,
+                state.get("session_id"),
+            )
+            retry_result, payoff_retry_meta = retry_call
+            if retry_result is not None:
+                payoff_result = retry_result
+                payoff_meta = {
+                    **payoff_meta,
+                    "retry": payoff_retry_meta,
+                    "retry_output": retry_result,
+                }
     if payoff_result is None:
         payoff_result = _fallback_director_payoff(prev)
     if pacing_result is None:
@@ -1955,6 +1975,40 @@ def _director_payoff_messages(
         {"role": "system", "content": "【稳定世界层】\n" + _stable_json(world_layer)},
         {"role": "user", "content": payoff_content},
     ]
+
+
+def _director_payoff_retry_messages(
+    state: dict,
+    action: str,
+    world_context: dict,
+    prev: dict,
+    memories: list[dict],
+    failed_result: dict,
+) -> list[dict]:
+    """Ask the payoff agent to repair an output rejected by the world binder."""
+    messages = _director_payoff_messages(state, action, world_context, prev, memories)
+    opportunity_names = [
+        str(row.get("name", "")).strip()
+        for row in world_context.get("opportunities", [])
+        if str(row.get("name", "")).strip()
+    ]
+    reward_names = [
+        str(row.get("name", "")).strip()
+        for row in world_context.get("reward_candidates", [])
+        if str(row.get("name", "")).strip()
+    ]
+    feedback = {
+        "failed_output": failed_result,
+        "failure": "上一条输出未通过固定世界绑定校验",
+        "required": "重新生成时，desc 必须逐字包含一个标准机缘名和一个标准奖励名；只能从下面列表选择。若没有合理组合，输出空字符串。",
+        "standard_opportunity_names": opportunity_names,
+        "standard_reward_names": reward_names,
+    }
+    messages.append({
+        "role": "user",
+        "content": "【校验失败后的重试要求】\n" + _stable_json(feedback),
+    })
+    return messages
 
 
 def _director_pacing_messages(

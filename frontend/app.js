@@ -83,6 +83,7 @@ const LLM_REQUEST_LABELS = {
   director_cognition: "视角 Agent（旧版）",
   director_hook: "钩子 Agent",
   director_payoff: "爽点 Agent",
+  director_payoff_retry: "爽点 Agent（校验失败重试）",
   director_pacing: "节奏 Agent",
   director_skeleton: "导演骨架 Agent",
   narrative: "剧情生成",
