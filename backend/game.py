@@ -2377,16 +2377,23 @@ def _resolve_payoff_binding(result: dict, world_context: dict) -> dict | None:
         row for row in world_context.get("reward_candidates", [])
         if _clean_text(row.get("name"), 120) in desc
     ]
-    if len(opportunities) > 1 or len(rewards) != 1:
+    if not rewards:
         return None
-    reward = rewards[0]
+    # Descriptions often mention an existing item before the newly acquired
+    # reward (for example, trading 引气诀 for 铁骨功). Treat the last standard
+    # reward name as the acquired result instead of rejecting the payoff as
+    # ambiguous.
+    reward = max(rewards, key=lambda row: _reward_match_score(desc, row))
     binding = {
         "reward_kind": "art",
         "reward_id": str(reward["id"]),
         "reward_name": _clean_text(reward["name"], 120),
     }
     if opportunities:
-        opportunity = opportunities[0]
+        opportunity = max(
+            opportunities,
+            key=lambda row: desc.rfind(_clean_text(row.get("name"), 120)),
+        )
         if any(
             row.get("opportunity_id") == opportunity["id"]
             for row in world_context.get("existing_reward_bindings", [])
@@ -2397,6 +2404,17 @@ def _resolve_payoff_binding(result: dict, world_context: dict) -> dict | None:
             "opportunity_name": _clean_text(opportunity["name"], 120),
         })
     return binding
+
+
+def _reward_match_score(desc: str, row: dict) -> tuple[int, int]:
+    """Prefer a standard reward named immediately after an acquisition verb."""
+    name = _clean_text(row.get("name"), 120)
+    index = desc.rfind(name)
+    if index < 0:
+        return (0, -1)
+    prefix = desc[max(0, index - 10):index]
+    acquisition = 1 if re.search(r"(?:获得|得到|换取|取得|拿到|获取|学会|习得)[「『\"“]?$", prefix) else 0
+    return (acquisition, index)
 
 
 def _reconcile_payoff_state(

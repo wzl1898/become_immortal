@@ -454,6 +454,20 @@ class DirectorPlanTests(unittest.TestCase):
         self.assertEqual(payoff["binding"]["reward_id"], "iron_bone")
         self.assertNotIn("opportunity_id", payoff["binding"])
 
+    def test_reward_only_payoff_uses_last_standard_reward_in_trade_description(self):
+        context = _context()
+        context["reward_candidates"] = [
+            {"id": "yin_qi_jue", "name": "引气诀", "reward_kind": "art"},
+            {"id": "iron_bone", "name": "铁骨功", "reward_kind": "art"},
+        ]
+        context["opportunities"] = []
+        payoff, _ = game._reconcile_payoff_state({}, {
+            "desc": "通过引气诀获得铁骨功，在青溪镇武馆完成交换",
+            "trigger": "前往青溪镇武馆求取炼体功法",
+        }, 4, context)
+
+        self.assertEqual(payoff["binding"]["reward_id"], "iron_bone")
+
     def test_invalid_payoff_retry_receives_failed_output_and_standard_names(self):
         messages = game._director_payoff_retry_messages(
             {"turns": 3, "character_state": {}, "transcript": []},
