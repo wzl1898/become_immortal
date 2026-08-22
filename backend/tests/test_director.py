@@ -1159,6 +1159,56 @@ class DirectorPlanTests(unittest.TestCase):
         finally:
             game._CACHE.pop(sid, None)
 
+    def test_audit_conflict_keeps_progression_end_decision(self):
+        sid = "audit-end-conflict-test"
+        plan = {
+            "plan_id": "plan-end-conflict-1",
+            "event_id": "event-1",
+            "turn_mode": "resolve",
+            "event_ended": True,
+            "event_action": "resolve",
+            "turn_objective": "完成潜入并结束当前事件",
+        }
+        game._CACHE[sid] = {
+            "session_id": sid,
+            "turns": 73,
+            "transcript": [{"role": "narration", "text": "主角已经潜入坳口内部。"}],
+            "director_state": {
+                "event": _event(status="resolved", turns=1),
+                "current_plan": plan,
+                "agent_outputs": {},
+            },
+        }
+
+        async def fake_complete(*args, **kwargs):
+            self.assertEqual(kwargs["request_type"], "director_audit")
+            return json.dumps({
+                "fulfilled": True,
+                "payoff_triggered": False,
+                "event_end_reached": False,
+                "evidence": "正文完成潜入，但未观察到关键人物。",
+                "viewpoint_updates": [],
+                "violations": [],
+                "note": "审计认为结束条件尚未满足。",
+            }, ensure_ascii=False)
+
+        try:
+            with patch.object(game, "complete_chat", fake_complete), patch.object(
+                game.store, "save_director_state"
+            ), patch.object(game.store, "save_opportunity_reward_binding"):
+                asyncio.run(game._run_director_audit(
+                    sid, "继续潜入", "主角钻过缺口进入坳口内部。", 73, plan
+                ))
+            audit = game._CACHE[sid]["director_state"]["last_audit"]
+            self.assertTrue(audit["event_end_reached"])
+            self.assertFalse(audit["agent_event_end_reached"])
+            self.assertEqual(audit["event_end_source"], "progression")
+            self.assertEqual(
+                game._CACHE[sid]["director_state"]["event"]["status"], "resolved"
+            )
+        finally:
+            game._CACHE.pop(sid, None)
+
     def test_stage_summary_updates_only_on_boundary(self):
         messages = [{"role": "system", "content": "fixed"}]
         for turn in range(1, 21):

@@ -2771,6 +2771,9 @@ async def _run_director_audit(
             turn=turn,
         )
         result = _extract_json_object(raw) or {}
+        agent_event_end_reached = bool(
+            result.get("event_end_reached", result.get("end_condition_met", False))
+        )
         audit = {
             "plan_id": plan.get("plan_id"),
             "turn": turn,
@@ -2778,9 +2781,8 @@ async def _run_director_audit(
             "payoff_triggered": bool(
                 result.get("payoff_triggered", result.get("payoff_delivered", False))
             ),
-            "event_end_reached": bool(
-                result.get("event_end_reached", result.get("end_condition_met", False))
-            ),
+            "event_end_reached": agent_event_end_reached,
+            "agent_event_end_reached": agent_event_end_reached,
             "evidence": _clean_text(result.get("evidence"), 360),
             "violations": _clean_string_list(result.get("violations"), limit=8),
             "note": _clean_text(result.get("note"), 360),
@@ -2797,6 +2799,11 @@ async def _run_director_audit(
         current = director.get("current_plan") or {}
         if current.get("plan_id") != plan.get("plan_id"):
             return
+        # 推进 Agent 已明确收束时，审计 Agent 的相反判断不能把事件重新打开。
+        # 保留原始审计值供 trace 追溯，但最终状态按“结束优先”判定。
+        if current.get("event_ended") and not audit["event_end_reached"]:
+            audit["event_end_reached"] = True
+            audit["event_end_source"] = "progression"
         director["last_audit"] = audit
         outputs = director.get("agent_outputs") if isinstance(director.get("agent_outputs"), dict) else {}
         director["agent_outputs"] = {
