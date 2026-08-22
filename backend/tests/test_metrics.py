@@ -96,6 +96,28 @@ class LLMMetricStoreTests(unittest.TestCase):
                 self.assertEqual([row["duration_ms"] for row in rows], [300, 200])
                 self.assertIsNone(store.list_llm_request_metrics("missing"))
 
+    def test_reaps_stale_running_agent_traces(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "saves.db")
+            with patch.object(store, "DB_PATH", db_path):
+                store.init()
+                sid = store.create("test", [])
+                trace_id = store.record_agent_trace({
+                    "save_id": sid, "turn": 1, "agent_type": "director_audit",
+                    "protocol": "openai", "model": "test", "status": "running",
+                })
+                old = __import__("time").time() - 600
+                with store._conn() as conn:
+                    conn.execute(
+                        "UPDATE agent_traces SET created_at=?, updated_at=? WHERE id=?",
+                        (old, old, trace_id),
+                    )
+
+                self.assertEqual(store.reap_stale_agent_traces(sid), 1)
+                trace = next(row for row in store.list_agent_traces(sid) if row["id"] == trace_id)
+                self.assertEqual(trace["status"], "timeout")
+                self.assertEqual(trace["error_type"], "StaleTrace")
+
     def test_persists_save_specific_opportunity_reward_binding(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "saves.db")

@@ -952,6 +952,25 @@ def list_agent_traces(
     return result
 
 
+def reap_stale_agent_traces(sid: str, *, max_age_seconds: float = 180.0) -> int:
+    """Mark abandoned running traces so they cannot remain live forever."""
+    now = time.time()
+    cutoff = now - max(30.0, float(max_age_seconds))
+    with _conn() as conn:
+        cur = conn.execute(
+            """
+            UPDATE agent_traces
+            SET status='timeout', error_type='StaleTrace',
+                error_message='trace 未在超时窗口内完成，已自动收尾',
+                duration_ms=CAST((? - created_at) * 1000 AS INTEGER),
+                updated_at=?
+            WHERE save_id=? AND status='running' AND created_at<?
+            """,
+            (now, now, sid, cutoff),
+        )
+        return int(cur.rowcount or 0)
+
+
 def save_lore(sid: str, lore: list[dict]) -> None:
     """只更新见闻录（问询旁路，不触发主状态落盘）。"""
     with _conn() as conn:
