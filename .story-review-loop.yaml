@@ -1,0 +1,108 @@
+service:
+  base_url: http://127.0.0.1:8888
+  health_path: /api/saves
+  health_timeout_seconds: 8
+  generation_timeout_seconds: 180
+  start_command: cd backend && ../.venv/bin/python -m uvicorn main:app --reload --port 8888 --timeout-graceful-shutdown 3
+  proxy_bypass: 127.0.0.1,localhost
+
+session:
+  strategy: clone
+  save_name: 自动剧情验收
+  id: null
+
+seed:
+  source_session_id: 38e4be30508ccb696330e6b0b42cf51e
+  turn: 11
+  require_exact_turn: true
+  clone_complete_save: true
+  agent_outputs: all
+  require_all_available: true
+  inject_into_all_agents: true
+  verify_hashes: true
+  fail_on_missing: true
+  include_in_review_package: true
+  include_in_report: true
+
+input:
+  mode: auto
+  auto:
+    source: reviewer
+    max_chars: 160
+    policy:
+      - 顺着已通过审查的场景和角色既定目标行动。
+      - 优先选择可观察、可逆、风险适中的行动。
+      - 不假定角色拥有尚未获得的知识、物品、能力或他人同意。
+      - 未获玩家授权时，不作出叛宗、投靠、婚契、生死处置等不可逆重大选择。
+  user:
+    show_suggestions: true
+
+review:
+  timeout_seconds: 180
+  invalid_report_retries: 1
+  code_trace_on_fail: true
+  require_regression_tests: true
+  verdict_policy:
+    fail_on_any_blocking_rule: true
+    advisory_failure_is_blocking: false
+  rules:
+    - id: player-action-alignment
+      enabled: false
+    - id: player-agency
+      enabled: false
+    - id: director-contract
+      enabled: false
+    - id: causal-continuity
+      enabled: false
+    - id: progression-grounding
+      enabled: false
+    - id: item-provenance
+      enabled: false
+    - id: persisted-state-consistency
+      enabled: false
+    - id: knowledge-boundary
+      enabled: false
+    - id: suggestion-boundary
+      enabled: false
+    - id: prose-quality
+      enabled: false
+    - id: escape-plot-progress
+      enabled: false
+    - id: escape-plot-scope
+      enabled: false
+
+followup_checks:
+  - id: post-escape-regression
+    enabled: true
+    trigger: objective_escape
+    required_passes: 1
+    input:
+      source: fixed
+      kind: non_escape_or_stationary
+      action: 我留在原地，取出引气诀仔细查看，并尝试按上面的口诀开始引气。
+      policy:
+        - 输入必须是非逃跑行动或原地不动类活动。
+        - 不主动接近、寻找、联络或挑衅已经甩脱的追兵。
+        - 不制造声响、踪迹、消息或其他足以让旧追兵重新锁定主角的新因果触发。
+    rules:
+      - id: no-resolved-pursuit-regression
+        enabled: true
+        severity: blocking
+        description: 在正文和持久化状态已经确认主角客观脱离追兵后，下一回合执行非逃跑行动或原地不动类活动时，同一批追兵、同一追逐事件或迫使主角再次逃跑的局面不得在缺少新且可观察的因果触发时重新出现。仅回忆、担忧或背景提及不算回归；追兵重新现身、逼近、搜到主角、恢复追踪，或剧情重新要求逃跑均判定不通过。若玩家主动接近、联络、挑衅追兵，或制造了明确可追踪的新线索，则可视为新事件，不按无因回归判定。
+
+stop:
+  on_first_fail: true
+  on_review_error: true
+  on_generation_error: true
+  max_accepted_turns: null
+
+artifacts:
+  directory: /tmp/story-review-loop
+  keep: false
+
+report:
+  enabled: true
+  directory: ./story-review-reports
+  filename: null
+  include_full_reviewer_report: true
+  keep_ledger: false

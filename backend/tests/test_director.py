@@ -440,6 +440,95 @@ class DirectorPlanTests(unittest.TestCase):
         self.assertEqual(payoff["binding"]["reward_id"], "yin_qi_jue")
         self.assertEqual({row["id"] for row in facts}, {"ruined_temple_bones", "yin_qi_jue"})
 
+    def test_reward_only_payoff_is_accepted_without_opportunity(self):
+        context = _context()
+        context["reward_candidates"] = [{
+            "id": "iron_bone", "name": "铁骨功", "reward_kind": "art",
+        }]
+        context["opportunities"] = []
+        payoff, _ = game._reconcile_payoff_state({}, {
+            "desc": "通过青溪镇武馆获得铁骨功",
+            "trigger": "前往青溪镇武馆求取炼体功法",
+        }, 4, context)
+
+        self.assertEqual(payoff["binding"]["reward_id"], "iron_bone")
+        self.assertNotIn("opportunity_id", payoff["binding"])
+
+    def test_reward_only_payoff_uses_last_standard_reward_in_trade_description(self):
+        context = _context()
+        context["reward_candidates"] = [
+            {"id": "yin_qi_jue", "name": "引气诀", "reward_kind": "art"},
+            {"id": "iron_bone", "name": "铁骨功", "reward_kind": "art"},
+        ]
+        context["opportunities"] = []
+        payoff, _ = game._reconcile_payoff_state({}, {
+            "desc": "通过引气诀获得铁骨功，在青溪镇武馆完成交换",
+            "trigger": "前往青溪镇武馆求取炼体功法",
+        }, 4, context)
+
+        self.assertEqual(payoff["binding"]["reward_id"], "iron_bone")
+
+    def test_invalid_payoff_retry_receives_failed_output_and_standard_names(self):
+        messages = game._director_payoff_retry_messages(
+            {"turns": 3, "character_state": {}, "transcript": []},
+            "去破庙查看",
+            _context(),
+            {},
+            [],
+            {"desc": "通过青溪镇武馆获得铁骨功", "trigger": "前往武馆"},
+        )
+
+        feedback = messages[-1]["content"]
+        self.assertIn("通过青溪镇武馆获得铁骨功", feedback)
+        self.assertIn("破庙道人遗骨", feedback)
+        self.assertIn("引气诀", feedback)
+        self.assertIn("必须逐字包含一个标准奖励名", feedback)
+
+    def test_invalid_payoff_is_retried_before_director_skeleton(self):
+        calls = []
+
+        async def fake_complete(*args, **kwargs):
+            request_type = kwargs["request_type"]
+            calls.append(request_type)
+            if request_type == "director_payoff":
+                return json.dumps({
+                    "desc": "通过青溪镇武馆获得铁骨功",
+                    "trigger": "前往青溪镇武馆",
+                }, ensure_ascii=False)
+            if request_type == "director_payoff_retry":
+                self.assertIn("青溪镇武馆", args[0][-1]["content"])
+                self.assertIn("破庙道人遗骨", args[0][-1]["content"])
+                return json.dumps({
+                    "desc": "通过「破庙道人遗骨」获得「引气诀」",
+                    "trigger": "检查破庙石像后的遗骨",
+                }, ensure_ascii=False)
+            if request_type == "director_pacing":
+                return json.dumps({"intent": {"key": "调查", "same_as_previous": False}, "resolved": True})
+            if request_type == "director_progression":
+                return json.dumps({"direction": "调查破庙", "ended": False})
+            if request_type == "director_hook":
+                return json.dumps({"goal": "检查破庙石像后的遗骨"})
+            self.assertEqual(request_type, "director_skeleton")
+            return json.dumps({
+                "turn_objective": "调查破庙",
+                "beats": ["抵达破庙", "发现石像后的异常"],
+                "scene": "破庙",
+            }, ensure_ascii=False)
+
+        state = {
+            "turns": 0,
+            "transcript": [],
+            "character_state": {},
+            "director_state": _director(),
+        }
+        with patch.object(game, "complete_chat", fake_complete):
+            planned = asyncio.run(game._plan_director_turn(state, "去破庙查看", _context()))
+
+        self.assertEqual(set(calls[:2]), {"director_pacing", "director_payoff"})
+        self.assertEqual(calls[2], "director_payoff_retry")
+        self.assertEqual(planned["current_plan"]["payoff"]["binding"]["opportunity_id"], "ruined_temple_bones")
+        self.assertEqual(planned["agent_outputs"]["payoff"]["retry_output"]["desc"], "通过「破庙道人遗骨」获得「引气诀」")
+
     def test_payoff_with_invented_reward_is_rejected(self):
         payoff, last = game._reconcile_payoff_state({}, {
             "desc": "通过「破庙道人遗骨」获得「太古飞仙经」",
@@ -1011,6 +1100,62 @@ class DirectorPlanTests(unittest.TestCase):
                 director["agent_outputs"]["audit"]["output"]["evidence"],
                 "主角检查遗骨后取得入道机缘。",
             )
+        finally:
+            game._CACHE.pop(sid, None)
+
+    def test_audit_end_condition_restarts_progression_as_ended(self):
+        sid = "audit-event-end-test"
+        plan = {
+            "plan_id": "plan-end-1",
+            "event_id": "event-1",
+            "turn_mode": "progress",
+            "event_ended": False,
+            "turn_objective": "确认来者离开",
+            "intent": {"key": "观察", "same_as_previous": False},
+            "beats": ["确认来者离开"],
+        }
+        game._CACHE[sid] = {
+            "session_id": sid,
+            "turns": 4,
+            "transcript": [{"role": "narration", "text": "来者已经离开。"}],
+            "director_state": {
+                "event": _event(status="active", turns=4),
+                "current_plan": plan,
+                "agent_outputs": {},
+            },
+        }
+        calls = []
+
+        async def fake_complete(*args, **kwargs):
+            calls.append(kwargs["request_type"])
+            if kwargs["request_type"] == "director_audit":
+                return json.dumps({
+                    "fulfilled": True,
+                    "payoff_triggered": False,
+                    "event_end_reached": True,
+                    "evidence": "正文确认来者已经离开，事件结束条件已满足。",
+                    "viewpoint_updates": [],
+                    "violations": [],
+                    "note": "",
+                }, ensure_ascii=False)
+            self.assertEqual(kwargs["request_type"], "director_progression")
+            self.assertIn("ended", args[0][-1]["content"])
+            return json.dumps({"direction": "收束当前事件", "ended": False}, ensure_ascii=False)
+
+        try:
+            with patch.object(game, "complete_chat", fake_complete), patch.object(
+                game.store, "save_director_state"
+            ), patch.object(game.store, "save_opportunity_reward_binding"):
+                asyncio.run(game._run_director_audit(
+                    sid, "观察", "来者已经离开。", 4, plan
+                ))
+            director = game._CACHE[sid]["director_state"]
+            self.assertEqual(calls, ["director_audit", "director_progression"])
+            self.assertTrue(director["current_plan"]["event_ended"])
+            self.assertEqual(director["current_plan"]["event_action"], "resolve")
+            self.assertEqual(director["event"]["status"], "resolved")
+            self.assertTrue(director["last_audit"]["event_end_reached"])
+            self.assertTrue(director["last_audit"]["progression_after_event_end"]["ended"])
         finally:
             game._CACHE.pop(sid, None)
 

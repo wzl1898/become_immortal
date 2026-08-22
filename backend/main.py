@@ -55,6 +55,7 @@ async def _stream(
     *,
     request_type: str,
     session_id: str,
+    turn: int | None = None,
     on_error=None,
 ):
     """公共的流式生成器：边流边发 delta，结束后调 on_done(full_text) 落库。
@@ -65,7 +66,7 @@ async def _stream(
     full = []
     try:
         async for piece in stream_chat(
-            messages, request_type=request_type, session_id=session_id
+            messages, request_type=request_type, session_id=session_id, turn=turn
         ):
             full.append(piece)
             yield _sse("delta", {"text": piece})
@@ -78,7 +79,15 @@ async def _stream(
             on_error()
         yield _sse("error", {"message": str(e)})
         return
-    payload = on_done("".join(full)) or {}
+    completed = "".join(full)
+    if not completed.strip():
+        if on_error:
+            on_error()
+        yield _sse("error", {
+            "message": "模型没有返回可显示的正文，请重试。当前回合未保存。"
+        })
+        return
+    payload = on_done(completed) or {}
     yield _sse("done", payload)
 
 
@@ -93,11 +102,13 @@ def _narrate(messages: list[dict], sid: str, user_content: str | None):
             "director_state": game.get_director_state(sid) or {},
         }
     request_type = "opening" if user_content is None else "narrative"
+    target_turn = (game.get_turns(sid) or 0) + 1
     return _stream(
         messages,
         _done,
         request_type=request_type,
         session_id=sid,
+        turn=target_turn,
         on_error=lambda: game.rollback_prepared_action(sid),
     )
 
@@ -109,6 +120,7 @@ def _answer_inquiry(messages: list[dict], sid: str, question: str):
         lambda text: game.commit_inquiry_memory(sid, question, text),
         request_type="inquiry",
         session_id=sid,
+        turn=game.get_turns(sid) or 0,
     )
 
 
@@ -302,6 +314,23 @@ async def llm_metrics(sid: str, limit: int = 30):
     if items is None:
         raise HTTPException(404, "存档不存在")
     return {"requests": items}
+
+
+@app.get("/api/agent-traces")
+async def agent_traces(
+    sid: str, turn: int | None = None, limit: int = 100,
+    include_content: bool = False, updated_after: float | None = None,
+):
+    """Read Agent traces, optionally returning only records changed since a cursor."""
+    items = game.get_agent_traces(
+        sid, turn=turn, limit=limit,
+        include_content=include_content or turn is not None,
+        updated_after=updated_after,
+    )
+    if items is None:
+        raise HTTPException(404, "存档不存在")
+    cursor = max((item["updated_at"] for item in items), default=updated_after or 0)
+    return {"traces": items, "cursor": cursor}
 
 
 @app.get("/api/world-state")

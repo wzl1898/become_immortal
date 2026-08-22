@@ -49,7 +49,7 @@ cd backend
 | `LLM_PROTOCOL` | 接口协议：`openai` 或 `anthropic` | `openai` |
 | `LLM_BASE_URL` | 服务地址（不含 `/chat/completions` 或 `/messages`） | `https://api.deepseek.com/v1` |
 | `LLM_API_KEY` | API Key | `sk-...` |
-| `LLM_MODEL` | 模型名 | `deepseek-chat` / `claude-sonnet-5` |
+| `LLM_MODEL` | 模型名 | `deepseek-v4-flash` / `claude-sonnet-5` |
 | `LLM_TEMPERATURE` | 采样温度，叙事建议 0.8~1.0 | `0.9` |
 | `LLM_MAX_TOKENS` | 单次回复最大 token | `2048` |
 | `DIRECTOR_LLM_*` | 可选的独立导演模型配置；协议、地址、Key、模型默认继承主模型 | 未设置 |
@@ -71,7 +71,7 @@ LLM 请求会写入 SQLite 的 `llm_request_metrics` 表，包含请求类型、
 # OpenAI 协议（DeepSeek）
 LLM_PROTOCOL=openai
 LLM_BASE_URL=https://api.deepseek.com/v1
-LLM_MODEL=deepseek-chat
+LLM_MODEL=deepseek-v4-flash
 
 # Anthropic 协议
 LLM_PROTOCOL=anthropic

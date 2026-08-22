@@ -36,10 +36,34 @@ LOCATION_ALIASES = {
     "xuanxiao_outer_gate": ("玄霄宗山门", "外山门"),
 }
 
+# Local scenes are deliberately allow-listed.  They refine ``site_name`` but
+# never create a new world location or move the player across the world map.
+SITE_ALIASES = {
+    "baishi_village": {
+        "村西老槐树": ("村西老槐树", "老槐树下", "老槐树旁"),
+        "村西小径": ("村西小径",),
+        "白石村村口": ("白石村村口", "村口"),
+        "白石村村中": ("白石村村中", "村中", "村里", "村内"),
+        "张婶家": ("张婶家",),
+    },
+    "baishi_back_mountain": {
+        "后山入口": ("后山入口", "后山山脚"),
+        "后山林中": ("后山林中", "后山密林", "林间空地"),
+    },
+    "baishi_ruined_temple": {
+        "破庙门前": ("破庙门前", "破庙外"),
+        "破庙内": ("破庙内", "破庙里", "庙内"),
+    },
+}
+
 _ARRIVAL_BEFORE_RE = re.compile(
     r"(?:抵达|到达|来到|赶到|走到|行至|回到|返回到?|进入|走进|踏入|"
     r"身处|置身于?|住进|落脚在?|(?:你|主角)(?:已经|已|正)?在|到了|进了)"
     r"[了在于]?\s*[「『\u201c\"]?$"
+)
+_ARRIVAL_AFTER_RE = re.compile(
+    r"^[\s，。；：、——-]*(?:已经|已)?"
+    r"(?:抵达|到达|到了|进入|走进|踏入|赶到|来到|行至|回到|返回到?|进了)"
 )
 _UNREALIZED_BEFORE_RE = re.compile(
     r"(?:尚未|还未|还没|未能|没能|并未|无法|不能|不曾|打算|计划|准备|想要|希望|欲|"
@@ -63,6 +87,7 @@ def opening_constraints(session_id: str) -> str:
             "不要展示可前往地点列表；只能在叙事中自然露出道路、传闻和环境线索。",
             "不要给固定主线；只给当前处境和可被玩家自由回应的契机。",
             _location_line(snap),
+            _time_line(snap),
             _knowledge_line(snap, "location", "confirmed", "已确认地点", limit=8),
             _knowledge_line(snap, "location", "rumored", "听闻地点", limit=8),
         ],
@@ -86,6 +111,7 @@ def action_constraints(session_id: str, action: str) -> str:
             "固定规则：地点、功法、机缘、秘境、势力只能来自 SQLite 固定库；玩家未知内容不得直接暴露。",
             "显示规则：不要列出“可前往地点”菜单；可在叙事中自然提到道路、传闻、人物反应或线索。",
             _location_line(snap),
+            _time_line(snap),
             _intent_line(action_type, verdict),
             _entity_line(matches),
             _knowledge_line(snap, "location", "confirmed", "已确认地点", limit=10),
@@ -99,6 +125,7 @@ def action_constraints(session_id: str, action: str) -> str:
             f"允许揭示：{_join_or_none(verdict['allowed_reveals'])}",
             f"禁止揭示：{_join_or_none(verdict['forbidden_reveals'])}",
             "若玩家说出库中不存在的核心地点/功法/机缘/势力，不得补造；只能写成主角无从确认、无人听过或需要另行打听。",
+            "时间必须从当前世界时间向前发展，不得倒退；若行动明显耗时，应在正文自然体现经过的时间。",
         ],
     )
 
@@ -114,6 +141,7 @@ def inquiry_constraints(session_id: str) -> str:
             "这是主角当前知识视野，回答问询时必须以它为准；若它与旧世界记忆冲突，以本边界为准。",
             "status=confirmed 表示主角确认知道；status=rumored 表示主角只听闻过名字或模糊传闻，不等于掌握细节。",
             _location_line(snap),
+            _time_line(snap),
             _knowledge_detail_line(snap, "location", "地点知识", limit=14),
             _knowledge_detail_line(snap, "route", "路线知识", limit=12),
             _knowledge_detail_line(snap, "faction", "势力知识", limit=10),
@@ -144,6 +172,7 @@ def get_world_state(session_id: str) -> dict | None:
             "intended_destination_name": names.get(intended_id, "") if intended_id else "",
             "lost_risk": snap["location"]["lost_risk"],
         },
+        "time": _public_time(snap["time"]),
         "knowledge": {
             "confirmed_locations": _names_for_knowledge(snap, knowledge, "location", "confirmed"),
             "rumored_locations": _names_for_knowledge(snap, knowledge, "location", "rumored"),
@@ -155,8 +184,10 @@ def get_world_state(session_id: str) -> dict | None:
     }
 
 
-def reconcile_location(session_id: str, assistant_content: str) -> dict | None:
-    """正文明确确认抵达后，才把固定地点写入结构化位置。"""
+def reconcile_location(
+    session_id: str, assistant_content: str, action: str | None = None
+) -> dict | None:
+    """Reconcile confirmed location/site changes and advance story time."""
     snap = store.world_snapshot(session_id)
     narrative = (assistant_content or "").strip()
     if not snap or not narrative:
@@ -177,37 +208,75 @@ def reconcile_location(session_id: str, assistant_content: str) -> dict | None:
                     arrivals.append((index, location, alias))
                 start = index + len(alias)
 
-    if not arrivals:
-        return None
+    target = None
+    target_index = -1
+    target_alias = ""
+    if arrivals:
+        # The final confirmed arrival in the prose is the end-of-turn location.
+        target_index, target, target_alias = max(arrivals, key=lambda row: (row[0], len(row[2])))
 
-    # The final confirmed arrival in the prose is the end-of-turn location.
-    _, target, alias = max(arrivals, key=lambda row: (row[0], len(row[2])))
-    route = _route_between(snap, snap["location"]["location_id"], target["id"])
-    lost_risk = "低" if route and route.get("risk") in ("medium", "high") else "无"
-    store.update_player_location(
-        session_id,
-        region_id=target["region_id"],
-        location_id=target["id"],
-        site_name="",
-        location_state=_state_for_location(target),
-        intended_destination_id=None,
-        lost_risk=lost_risk,
-    )
-    store.upsert_knowledge(
-        session_id,
-        "location",
-        target["id"],
-        "confirmed",
-        reliability="high",
-        source="正文确认抵达",
-    )
+    location_id = target["id"] if target else snap["location"]["location_id"]
+    site_arrivals = _confirmed_site_arrivals(narrative, location_id)
+    site_name = snap["location"]["site_name"]
+    if target:
+        # A macro move must never retain a stale site from the previous place.
+        site_name = target_alias if target_alias != target["name"] else target["name"]
+    if site_arrivals:
+        site_index, confirmed_site = max(site_arrivals, key=lambda row: row[0])
+        if not target or site_index >= target_index:
+            site_name = confirmed_site
+
+    if target or site_name != snap["location"]["site_name"]:
+        current_location = target or next(
+            row for row in snap["locations"] if row["id"] == location_id
+        )
+        route = _route_between(snap, snap["location"]["location_id"], location_id)
+        lost_risk = "低" if route and route.get("risk") in ("medium", "high") else "无"
+        store.update_player_location(
+            session_id,
+            region_id=current_location["region_id"],
+            location_id=location_id,
+            site_name=site_name,
+            location_state=_state_for_location(current_location),
+            intended_destination_id=None if target else snap["location"]["intended_destination_id"],
+            lost_risk=lost_risk if target else snap["location"]["lost_risk"],
+        )
+
+    if target:
+        store.upsert_knowledge(
+            session_id, "location", target["id"], "confirmed",
+            reliability="high", source="正文确认抵达",
+        )
+
+    if action is not None:
+        store.advance_world_time(session_id, _elapsed_minutes(action, narrative, snap["time"]))
     return target
+
+
+def _confirmed_site_arrivals(narrative: str, location_id: str) -> list[tuple[int, str]]:
+    arrivals = []
+    for canonical, aliases in SITE_ALIASES.get(location_id, {}).items():
+        for alias in aliases:
+            start = 0
+            while True:
+                index = narrative.find(alias, start)
+                if index < 0:
+                    break
+                before = narrative[max(0, index - 28):index]
+                after = narrative[index + len(alias):index + len(alias) + 16]
+                if _is_confirmed_arrival(before, after):
+                    arrivals.append((index, canonical))
+                start = index + len(alias)
+    return arrivals
 
 
 def _is_confirmed_arrival(before: str, after: str) -> bool:
     if _UNREALIZED_BEFORE_RE.search(before) or _UNREALIZED_AFTER_RE.search(after):
         return False
-    return bool(_ARRIVAL_BEFORE_RE.search(before))
+    return bool(
+        _ARRIVAL_BEFORE_RE.search(before)
+        or _ARRIVAL_AFTER_RE.search(after)
+    )
 
 
 def director_context(session_id: str, action: str) -> dict:
@@ -323,6 +392,7 @@ def director_context(session_id: str, action: str) -> dict:
             "location_state": snap["location"]["location_state"],
             "lost_risk": snap["location"]["lost_risk"],
         },
+        "time": _public_time(snap["time"]),
         "player_cognition": {
             "locations": _names_for_knowledge(snap, knowledge, "location", None),
             "routes": _names_for_knowledge(snap, knowledge, "route", None),
@@ -580,6 +650,78 @@ def _location_line(snap: dict) -> str:
         f"当前真实位置：玄苍大陆 / {loc['region_name']} / {loc['location_name']}{site}"
         f"；状态：{loc['location_state']}；迷路风险：{loc['lost_risk']}{dest}"
     )
+
+
+def _public_time(world_time: dict) -> dict:
+    minute = int(world_time["minute_of_day"])
+    hour, minute = divmod(minute, 60)
+    return {
+        "day": int(world_time["day"]),
+        "minute_of_day": int(world_time["minute_of_day"]),
+        "clock": f"{hour:02d}:{minute:02d}",
+        "period": _period_name(hour),
+        "season": world_time["season"],
+        "calendar_label": world_time["calendar_label"],
+    }
+
+
+def _time_line(snap: dict) -> str:
+    value = _public_time(snap["time"])
+    return (
+        f"当前世界时间：{value['calendar_label']}第{value['day']}日 "
+        f"{value['clock']}（{value['period']}），季节：{value['season']}"
+    )
+
+
+def _period_name(hour: int) -> str:
+    if hour < 5:
+        return "深夜"
+    if hour < 8:
+        return "清晨"
+    if hour < 12:
+        return "上午"
+    if hour < 14:
+        return "正午"
+    if hour < 17:
+        return "下午"
+    if hour < 19:
+        return "傍晚"
+    if hour < 22:
+        return "入夜"
+    return "深夜"
+
+
+_CN_NUMBERS = {"一": 1, "两": 2, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6}
+_DURATION_RE = re.compile(
+    r"(?P<prefix>过了|经过|耗时|用了|花了|足足|持续|修炼了|赶了|走了|等了)?"
+    r"(?P<num>[一二两三四五六\d]+|半)(?:个)?(?P<unit>时辰|小时|刻钟|分钟)"
+)
+_PLAN_DURATION_RE = re.compile(r"(?:打算|计划|准备|想要|预计|约定).{0,10}$")
+
+
+def _elapsed_minutes(action: str, narrative: str, world_time: dict) -> int:
+    """Estimate elapsed in-world time from completed prose, then action type."""
+    explicit = []
+    for match in _DURATION_RE.finditer(narrative):
+        before = narrative[max(0, match.start() - 16):match.start()]
+        if _PLAN_DURATION_RE.search(before):
+            continue
+        raw = match.group("num")
+        amount = 0.5 if raw == "半" else float(_CN_NUMBERS.get(raw, int(raw) if raw.isdigit() else 1))
+        unit = match.group("unit")
+        factor = {"时辰": 120, "小时": 60, "刻钟": 15, "分钟": 1}[unit]
+        explicit.append(max(1, round(amount * factor)))
+    if explicit:
+        return max(explicit)
+
+    action_type = _infer_action_type(action or "")
+    return {
+        "移动": 30,
+        "探索": 15,
+        "社交/交易": 15,
+        "修炼": 60,
+        "物品": 5,
+    }.get(action_type, 10)
 
 
 def _intent_line(action_type: str, verdict: dict) -> str:

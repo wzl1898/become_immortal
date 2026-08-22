@@ -19,7 +19,7 @@ import httpx
 PROTOCOL = os.getenv("LLM_PROTOCOL", "openai").strip().lower()
 BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com/v1").rstrip("/")
 API_KEY = os.getenv("LLM_API_KEY", "")
-MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
+MODEL = os.getenv("LLM_MODEL", "deepseek-v4-flash")
 TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.9"))
 MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 ANTHROPIC_VERSION = os.getenv("ANTHROPIC_VERSION", "2023-06-01")
@@ -40,6 +40,29 @@ class LLMConfig:
 DEFAULT_CONFIG = LLMConfig(PROTOCOL, BASE_URL, API_KEY, MODEL)
 
 
+def _openai_payload(
+    messages: list[dict],
+    *,
+    model: str,
+    temperature: float,
+    max_tokens: int,
+    stream: bool,
+) -> dict:
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": stream,
+    }
+    # DeepSeek V4 Flash defaults to reasoning output. Reasoning tokens count
+    # against max_tokens but are not shown to the player, which can leave the
+    # final content empty. Disable reasoning for narrative and JSON agents.
+    if model.lower().startswith("deepseek-v4"):
+        payload["thinking"] = {"type": "disabled"}
+    return payload
+
+
 def config_from_env(prefix: str) -> LLMConfig:
     """Build an agent-specific config, falling back to the main LLM."""
     return LLMConfig(
@@ -55,6 +78,7 @@ async def stream_chat(
     messages: list[dict],
     request_type: str = "narrative",
     session_id: str | None = None,
+    turn: int | None = None,
 ):
     """向 LLM 发起流式对话，逐段 yield 文本增量。
 
@@ -67,8 +91,15 @@ async def stream_chat(
     """
     started = time.monotonic()
     output_chars = 0
+    output_parts = []
     status = "success"
     error_type = ""
+    error_message = ""
+    trace_id = _start_trace({
+        "save_id": session_id, "turn": turn, "agent_type": request_type,
+        "protocol": PROTOCOL, "model": MODEL, "stream": True,
+        "input_messages": messages,
+    })
     try:
         if not API_KEY:
             raise RuntimeError("未配置 LLM_API_KEY，请复制 .env.example 为 .env 并填写。")
@@ -80,26 +111,35 @@ async def stream_chat(
             raise RuntimeError(f"未知的 LLM_PROTOCOL={PROTOCOL!r}，应为 openai 或 anthropic。")
         async for piece in iterator:
             output_chars += len(piece)
+            output_parts.append(piece)
             yield piece
     except asyncio.CancelledError:
         status = "timeout"
         error_type = "CancelledError"
+        error_message = "stream cancelled"
         raise
     except Exception as exc:
         status = "api_error"
         error_type = type(exc).__name__
+        error_message = str(exc)
         raise
     finally:
+        duration_ms = round((time.monotonic() - started) * 1000)
         _record_metric({
             "save_id": session_id,
             "request_type": request_type,
             "protocol": PROTOCOL,
             "model": MODEL,
             "status": status,
-            "duration_ms": round((time.monotonic() - started) * 1000),
+            "duration_ms": duration_ms,
             "input_chars": sum(len(str(message.get("content") or "")) for message in messages),
             "output_chars": output_chars,
             "error_type": error_type,
+        })
+        _finish_trace(trace_id, {
+            "raw_output": "".join(output_parts),
+            "status": status, "duration_ms": duration_ms,
+            "error_type": error_type, "error_message": error_message,
         })
 
 
@@ -110,18 +150,24 @@ async def complete_chat(
     config: LLMConfig | None = None,
     request_type: str = "background",
     session_id: str | None = None,
+    turn: int | None = None,
 ) -> str:
     """向 LLM 发起非流式对话，用于后台结构化任务。"""
     config = config or DEFAULT_CONFIG
-    if not config.api_key:
-        raise RuntimeError("未配置 LLM_API_KEY，请复制 .env.example 为 .env 并填写。")
-
     started = time.monotonic()
     text = ""
     usage = {}
     status = "success"
     error_type = ""
+    error_message = ""
+    trace_id = _start_trace({
+        "save_id": session_id, "turn": turn, "agent_type": request_type,
+        "protocol": config.protocol, "model": config.model, "stream": False,
+        "input_messages": messages,
+    })
     try:
+        if not config.api_key:
+            raise RuntimeError("未配置 LLM_API_KEY，请复制 .env.example 为 .env 并填写。")
         if config.protocol == "anthropic":
             text, usage = await _complete_anthropic(messages, temperature, max_tokens, config)
         elif config.protocol == "openai":
@@ -132,23 +178,31 @@ async def complete_chat(
     except asyncio.CancelledError:
         status = "timeout"
         error_type = "CancelledError"
+        error_message = "request cancelled"
         raise
     except Exception as exc:
         status = "api_error"
         error_type = type(exc).__name__
+        error_message = str(exc)
         raise
     finally:
+        duration_ms = round((time.monotonic() - started) * 1000)
         _record_metric({
             "save_id": session_id,
             "request_type": request_type,
             "protocol": config.protocol,
             "model": config.model,
             "status": status,
-            "duration_ms": round((time.monotonic() - started) * 1000),
+            "duration_ms": duration_ms,
             "input_chars": sum(len(str(message.get("content") or "")) for message in messages),
             "output_chars": len(text),
             "error_type": error_type,
             **_usage_metrics(usage),
+        })
+        _finish_trace(trace_id, {
+            "raw_output": text, "status": status,
+            "duration_ms": duration_ms, "error_type": error_type,
+            "error_message": error_message,
         })
 
 
@@ -177,6 +231,28 @@ def _record_metric(metric: dict) -> None:
         pass
 
 
+def _start_trace(trace: dict) -> int | None:
+    try:
+        import store
+        return store.record_agent_trace({
+            **trace, "raw_output": "", "status": "running",
+            "duration_ms": 0, "created_at": time.time(),
+        })
+    except Exception:
+        # Trace persistence must never break the player's generation request.
+        return None
+
+
+def _finish_trace(trace_id: int | None, trace: dict) -> None:
+    if trace_id is None:
+        return
+    try:
+        import store
+        store.finish_agent_trace(trace_id, trace)
+    except Exception:
+        pass
+
+
 def _iter_sse_data(line: str) -> str | None:
     """从一行 SSE 中取出 data: 后的内容，非 data 行返回 None。"""
     if not line or not line.startswith("data:"):
@@ -190,13 +266,10 @@ async def _stream_openai(messages: list[dict]):
         "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json",
     }
-    payload = {
-        "model": MODEL,
-        "messages": messages,
-        "temperature": TEMPERATURE,
-        "max_tokens": MAX_TOKENS,
-        "stream": True,
-    }
+    payload = _openai_payload(
+        messages, model=MODEL, temperature=TEMPERATURE,
+        max_tokens=MAX_TOKENS, stream=True,
+    )
 
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         for attempt in range(len(CONNECT_RETRY_DELAYS) + 1):
@@ -239,13 +312,13 @@ async def _complete_openai(
         "Authorization": f"Bearer {config.api_key}",
         "Content-Type": "application/json",
     }
-    payload = {
-        "model": config.model,
-        "messages": messages,
-        "temperature": TEMPERATURE if temperature is None else temperature,
-        "max_tokens": MAX_TOKENS if max_tokens is None else max_tokens,
-        "stream": False,
-    }
+    payload = _openai_payload(
+        messages,
+        model=config.model,
+        temperature=TEMPERATURE if temperature is None else temperature,
+        max_tokens=MAX_TOKENS if max_tokens is None else max_tokens,
+        stream=False,
+    )
 
     timeout = _completion_timeout(config.timeout_seconds)
     async with httpx.AsyncClient(timeout=timeout) as client:

@@ -18,6 +18,8 @@ import uuid
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 DB_PATH = os.path.join(DATA_DIR, "saves.db")
+DEFAULT_WORLD_SEASON = "\u6df1\u79cb"
+DEFAULT_CALENDAR_LABEL = "\u4ed9\u5386"
 
 
 def _conn() -> sqlite3.Connection:
@@ -89,6 +91,35 @@ def init() -> None:
                 created_at REAL NOT NULL
             )
             """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS agent_traces (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                save_id TEXT,
+                turn INTEGER,
+                agent_type TEXT NOT NULL,
+                protocol TEXT NOT NULL,
+                model TEXT NOT NULL,
+                stream INTEGER NOT NULL DEFAULT 0,
+                input_messages TEXT NOT NULL DEFAULT '[]',
+                raw_output TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL,
+                duration_ms INTEGER NOT NULL,
+                error_type TEXT NOT NULL DEFAULT '',
+                error_message TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        trace_cols = {row["name"] for row in conn.execute("PRAGMA table_info(agent_traces)")}
+        if "updated_at" not in trace_cols:
+            conn.execute("ALTER TABLE agent_traces ADD COLUMN updated_at REAL NOT NULL DEFAULT 0")
+            conn.execute("UPDATE agent_traces SET updated_at=created_at WHERE updated_at=0")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_traces_save_turn "
+            "ON agent_traces(save_id, turn, id)"
         )
         conn.execute(
             """
@@ -478,6 +509,18 @@ def _init_world_tables(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS save_world_time (
+            save_id TEXT PRIMARY KEY,
+            day INTEGER NOT NULL DEFAULT 1,
+            minute_of_day INTEGER NOT NULL DEFAULT 930,
+            season TEXT NOT NULL DEFAULT '',
+            calendar_label TEXT NOT NULL DEFAULT '',
+            updated_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS save_player_knowledge (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             save_id TEXT NOT NULL,
@@ -570,6 +613,17 @@ def _ensure_default_save_world_state(conn: sqlite3.Connection, sid: str) -> None
         """,
         (sid, now),
     )
+    save_row = conn.execute("SELECT turns FROM saves WHERE id=?", (sid,)).fetchone()
+    elapsed_turns = max(0, int(save_row["turns"] or 0) - 1) if save_row else 0
+    initial_minute = min(1439, 930 + elapsed_turns * 15)
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO save_world_time
+        (save_id, day, minute_of_day, season, calendar_label, updated_at)
+        VALUES (?, 1, ?, ?, ?, ?)
+        """,
+        (sid, initial_minute, DEFAULT_WORLD_SEASON, DEFAULT_CALENDAR_LABEL, now),
+    )
     for kind, target_id, status, reliability, source, notes in _DEFAULT_KNOWLEDGE:
         conn.execute(
             """
@@ -622,6 +676,9 @@ def world_snapshot(sid: str) -> dict | None:
         ).fetchone()
         if loc is None:
             return None
+        world_time = conn.execute(
+            "SELECT * FROM save_world_time WHERE save_id=?", (sid,)
+        ).fetchone()
         knowledge = conn.execute(
             "SELECT * FROM save_player_knowledge WHERE save_id=? ORDER BY knowledge_type, status, id",
             (sid,),
@@ -635,6 +692,7 @@ def world_snapshot(sid: str) -> dict | None:
         realms = conn.execute("SELECT * FROM world_realms ORDER BY rowid").fetchall()
     return {
         "location": dict(loc),
+        "time": dict(world_time),
         "knowledge": [dict(row) for row in knowledge],
         "regions": [dict(row) for row in regions],
         "locations": [dict(row) for row in locations],
@@ -666,6 +724,26 @@ def update_player_location(
             """,
             (region_id, location_id, site_name, location_state, intended_destination_id, lost_risk, time.time(), sid),
         )
+
+
+def advance_world_time(sid: str, minutes: int) -> dict:
+    """Advance the persistent story clock; the clock can never move backward."""
+    elapsed = max(0, int(minutes))
+    with _conn() as conn:
+        _ensure_default_save_world_state(conn, sid)
+        row = conn.execute(
+            "SELECT * FROM save_world_time WHERE save_id=?", (sid,)
+        ).fetchone()
+        total = (int(row["day"]) - 1) * 1440 + int(row["minute_of_day"]) + elapsed
+        day, minute_of_day = divmod(total, 1440)
+        conn.execute(
+            "UPDATE save_world_time SET day=?, minute_of_day=?, updated_at=? WHERE save_id=?",
+            (day + 1, minute_of_day, time.time(), sid),
+        )
+        updated = conn.execute(
+            "SELECT * FROM save_world_time WHERE save_id=?", (sid,)
+        ).fetchone()
+    return dict(updated)
 
 
 def set_intended_destination(sid: str, target_id: str | None) -> None:
@@ -778,6 +856,119 @@ def list_llm_request_metrics(sid: str, limit: int = 30) -> list[dict] | None:
             (sid, limit),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def record_agent_trace(trace: dict) -> int:
+    """Create an Agent trace; callers may later finish the same row."""
+    now = float(trace.get("created_at") or time.time())
+    with _conn() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO agent_traces (
+                save_id, turn, agent_type, protocol, model, stream,
+                input_messages, raw_output, status, duration_ms,
+                error_type, error_message, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                trace.get("save_id"),
+                trace.get("turn"),
+                trace.get("agent_type") or "unknown",
+                trace.get("protocol") or "",
+                trace.get("model") or "",
+                int(bool(trace.get("stream"))),
+                json.dumps(trace.get("input_messages") or [], ensure_ascii=False, default=str),
+                str(trace.get("raw_output") or ""),
+                trace.get("status") or "unknown",
+                int(trace.get("duration_ms") or 0),
+                trace.get("error_type") or "",
+                trace.get("error_message") or "",
+                now,
+                now,
+            ),
+        )
+    return int(cur.lastrowid)
+
+
+def finish_agent_trace(trace_id: int, trace: dict) -> None:
+    """Finish a running Agent trace without changing its identity."""
+    with _conn() as conn:
+        conn.execute(
+            """
+            UPDATE agent_traces
+            SET raw_output=?, status=?, duration_ms=?, error_type=?,
+                error_message=?, updated_at=?
+            WHERE id=?
+            """,
+            (
+                str(trace.get("raw_output") or ""),
+                trace.get("status") or "unknown",
+                int(trace.get("duration_ms") or 0),
+                trace.get("error_type") or "",
+                trace.get("error_message") or "",
+                time.time(),
+                int(trace_id),
+            ),
+        )
+
+
+def list_agent_traces(
+    sid: str, *, turn: int | None = None, limit: int = 100,
+    include_content: bool = False, updated_after: float | None = None,
+) -> list[dict] | None:
+    """Read trace summaries, or complete payloads when explicitly requested."""
+    limit = max(1, min(int(limit), 500))
+    with _conn() as conn:
+        if conn.execute("SELECT 1 FROM saves WHERE id=?", (sid,)).fetchone() is None:
+            return None
+        content_columns = ", input_messages, raw_output, error_message" if include_content else ""
+        clauses = ["save_id=?"]
+        params: list = [sid]
+        if turn is not None:
+            clauses.append("turn=?")
+            params.append(int(turn))
+        if updated_after is not None:
+            clauses.append("updated_at>?")
+            params.append(float(updated_after))
+        params.append(limit)
+        order_by = "updated_at ASC, id ASC" if updated_after is not None else "id ASC"
+        rows = conn.execute(
+            f"""
+            SELECT id, save_id, turn, agent_type, protocol, model, stream,
+                   status, duration_ms, error_type, created_at, updated_at,
+                   length(input_messages) AS input_chars, length(raw_output) AS output_chars
+                   {content_columns}
+            FROM agent_traces
+            WHERE {' AND '.join(clauses)}
+            ORDER BY {order_by}
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+    result = [dict(row) for row in rows]
+    if include_content:
+        for row in result:
+            row["input_messages"] = json.loads(row["input_messages"] or "[]")
+    return result
+
+
+def reap_stale_agent_traces(sid: str, *, max_age_seconds: float = 180.0) -> int:
+    """Mark abandoned running traces so they cannot remain live forever."""
+    now = time.time()
+    cutoff = now - max(30.0, float(max_age_seconds))
+    with _conn() as conn:
+        cur = conn.execute(
+            """
+            UPDATE agent_traces
+            SET status='timeout', error_type='StaleTrace',
+                error_message='trace 未在超时窗口内完成，已自动收尾',
+                duration_ms=CAST((? - created_at) * 1000 AS INTEGER),
+                updated_at=?
+            WHERE save_id=? AND status='running' AND created_at<?
+            """,
+            (now, now, sid, cutoff),
+        )
+        return int(cur.rowcount or 0)
 
 
 def save_lore(sid: str, lore: list[dict]) -> None:
@@ -1017,5 +1208,7 @@ def rename(sid: str, name: str) -> bool:
 def delete(sid: str) -> bool:
     with _conn() as conn:
         conn.execute("DELETE FROM save_opportunity_rewards WHERE save_id=?", (sid,))
+        conn.execute("DELETE FROM save_world_time WHERE save_id=?", (sid,))
+        conn.execute("DELETE FROM agent_traces WHERE save_id=?", (sid,))
         cur = conn.execute("DELETE FROM saves WHERE id=?", (sid,))
     return cur.rowcount > 0

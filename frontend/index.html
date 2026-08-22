@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>问道 · 修仙文字奇缘</title>
-  <link rel="stylesheet" href="style.css?v=event-causality-1" />
+  <link rel="stylesheet" href="style.css?v=status-drawer-1" />
 </head>
 <body>
   <div class="app">
@@ -22,9 +22,27 @@
     </header>
 
     <aside id="status-panel" class="status-panel empty" aria-label="身体状态">
-      <h2 class="status-title">状态</h2>
+      <div class="status-head">
+        <h2 class="status-title">状态与物品</h2>
+        <button
+          id="status-toggle"
+          class="status-toggle"
+          type="button"
+          aria-expanded="true"
+          title="收起状态与物品栏"
+        >‹</button>
+      </div>
       <div id="status-body" class="status-body"></div>
       <p class="status-empty">尚未入世</p>
+    </aside>
+
+    <aside id="trace-panel" class="trace-panel empty" aria-label="Agent 实时 Trace">
+      <div class="trace-head">
+        <h2>Agent Trace</h2>
+        <span id="trace-live-state" class="trace-live-state">等待中</span>
+      </div>
+      <div id="trace-list" class="trace-list"></div>
+      <p id="trace-empty" class="trace-empty">等待 Agent 运行……</p>
     </aside>
 
     <main id="story" class="story" aria-live="polite"></main>
@@ -117,6 +135,6 @@
     </form>
   </div>
 
-  <script src="app.js?v=event-progression-1"></script>
+  <script src="app.js?v=status-drawer-1"></script>
 </body>
 </html>

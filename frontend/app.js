@@ -11,6 +11,10 @@ const drawerClose = document.getElementById("drawer-close");
 const saveListEl = document.getElementById("save-list");
 const saveEmptyEl = document.getElementById("save-empty");
 const statusPanel = document.getElementById("status-panel");
+const statusToggle = document.getElementById("status-toggle");
+const tracePanel = document.getElementById("trace-panel");
+const traceList = document.getElementById("trace-list");
+const traceLiveState = document.getElementById("trace-live-state");
 const statusBodyEl = document.getElementById("status-body");
 const loreBtn = document.getElementById("lore-btn");
 const loreDrawer = document.getElementById("lore-drawer");
@@ -45,9 +49,23 @@ function clearStatus() {
   statusPanel.classList.add("empty");
 }
 
+function setStatusCollapsed(collapsed) {
+  statusPanel.classList.toggle("collapsed", collapsed);
+  statusToggle.setAttribute("aria-expanded", String(!collapsed));
+  statusToggle.title = collapsed ? "展开状态与物品栏" : "收起状态与物品栏";
+}
+
+statusToggle.addEventListener("click", () => {
+  setStatusCollapsed(!statusPanel.classList.contains("collapsed"));
+});
+
 let sessionId = null;
 let currentName = "";
 let busy = false;
+let traceCursor = 0;
+let traceRefreshActive = false;
+let traceSession = null;
+const agentTraces = new Map();
 let worldMemory = []; // 世界记忆，含 qa 与自动提取的长期事实
 let worldState = null; // 世界约束 Agent 的实时状态：位置 + 主角知识视野
 let loreBusy = false; // 问询独立忙态，不锁主行动
@@ -65,6 +83,7 @@ const LLM_REQUEST_LABELS = {
   director_cognition: "视角 Agent（旧版）",
   director_hook: "钩子 Agent",
   director_payoff: "爽点 Agent",
+  director_payoff_retry: "爽点 Agent（校验失败重试）",
   director_pacing: "节奏 Agent",
   director_skeleton: "导演骨架 Agent",
   narrative: "剧情生成",
@@ -73,6 +92,10 @@ const LLM_REQUEST_LABELS = {
   inquiry: "记忆问询",
   legacy_director: "旧版导演",
 };
+const TRACE_STATUS_LABELS = {
+  running: "运行中", success: "完成", timeout: "超时", api_error: "失败",
+};
+const TRACE_ROLE_LABELS = { system: "系统", user: "用户", assistant: "助手", tool: "工具" };
 
 function formatDuration(ms) {
   const value = Math.max(0, Number(ms) || 0);
@@ -128,9 +151,115 @@ function setBusy(state) {
 }
 
 function setCurrent(sid, name) {
+  if (sid !== traceSession) resetAgentTraces(sid);
   sessionId = sid;
   currentName = name || "";
   saveNameEl.textContent = currentName ? `《${currentName}》` : "";
+}
+
+function resetAgentTraces(sid) {
+  traceSession = sid;
+  traceCursor = 0;
+  agentTraces.clear();
+  traceList.replaceChildren();
+  tracePanel.classList.add("empty");
+  traceLiveState.textContent = sid ? "同步中" : "等待中";
+  traceLiveState.classList.remove("active");
+}
+
+function makeTextElement(tag, className, text) {
+  const element = document.createElement(tag);
+  element.className = className;
+  element.textContent = text == null ? "" : String(text);
+  return element;
+}
+
+function traceBubble(trace, wasOpen) {
+  const bubble = document.createElement("details");
+  bubble.className = `trace-bubble ${trace.status || "unknown"}`;
+  bubble.dataset.traceId = String(trace.id);
+  bubble.open = wasOpen;
+  const summary = document.createElement("summary");
+  summary.className = "trace-summary";
+  const top = document.createElement("div");
+  top.className = "trace-summary-top";
+  top.append(
+    makeTextElement("span", "trace-agent", LLM_REQUEST_LABELS[trace.agent_type] || trace.agent_type),
+    makeTextElement("span", `trace-status ${trace.status}`, TRACE_STATUS_LABELS[trace.status] || trace.status),
+  );
+  const meta = document.createElement("div");
+  meta.className = "trace-summary-meta";
+  meta.append(
+    makeTextElement("span", "turn", trace.turn == null ? "回合 —" : `回合 ${trace.turn}`),
+    makeTextElement("span", "model", trace.model || trace.protocol || ""),
+    makeTextElement("span", "duration", trace.status === "running" ? "…" : formatDuration(trace.duration_ms || 0)),
+  );
+  summary.append(top, meta);
+  const detail = document.createElement("div");
+  detail.className = "trace-detail";
+  const inputSection = document.createElement("section");
+  inputSection.className = "trace-section";
+  inputSection.append(makeTextElement("h3", "trace-section-title", "输入"));
+  for (const message of trace.input_messages || []) {
+    const box = document.createElement("div");
+    box.className = "trace-message";
+    box.append(
+      makeTextElement("span", "trace-role", TRACE_ROLE_LABELS[message.role] || message.role || "消息"),
+      makeTextElement("pre", "trace-content", message.content),
+    );
+    inputSection.append(box);
+  }
+  const outputSection = document.createElement("section");
+  outputSection.className = "trace-section";
+  outputSection.append(
+    makeTextElement("h3", "trace-section-title", "原始输出"),
+    makeTextElement("pre", "trace-output", trace.raw_output || (trace.status === "running" ? "正在生成……" : "（空）")),
+  );
+  detail.append(inputSection, outputSection);
+  if (trace.error_message) {
+    const errorSection = document.createElement("section");
+    errorSection.className = "trace-section";
+    errorSection.append(
+      makeTextElement("h3", "trace-section-title", "错误"),
+      makeTextElement("pre", "trace-error", trace.error_message),
+    );
+    detail.append(errorSection);
+  }
+  bubble.append(summary, detail);
+  return bubble;
+}
+
+function renderAgentTraces() {
+  const openIds = new Set([...traceList.querySelectorAll("details[open]")].map(node => Number(node.dataset.traceId)));
+  const nearEnd = traceList.scrollHeight - traceList.scrollTop - traceList.clientHeight < 48;
+  const fragment = document.createDocumentFragment();
+  for (const trace of [...agentTraces.values()].sort((a, b) => a.id - b.id)) {
+    fragment.append(traceBubble(trace, openIds.has(trace.id)));
+  }
+  traceList.replaceChildren(fragment);
+  tracePanel.classList.toggle("empty", agentTraces.size === 0);
+  const running = [...agentTraces.values()].filter(trace => trace.status === "running").length;
+  traceLiveState.textContent = running ? `${running} 个运行中` : "实时";
+  traceLiveState.classList.toggle("active", running > 0);
+  if (nearEnd) traceList.scrollTop = traceList.scrollHeight;
+}
+
+async function refreshAgentTraces() {
+  if (!sessionId || traceRefreshActive) return;
+  traceRefreshActive = true;
+  const sid = sessionId;
+  try {
+    const data = await fetchJSON(`/api/agent-traces?sid=${encodeURIComponent(sid)}&include_content=true&limit=500&updated_after=${traceCursor}`);
+    if (sid !== sessionId) return;
+    for (const trace of data.traces || []) agentTraces.set(trace.id, trace);
+    traceCursor = Math.max(traceCursor, Number(data.cursor) || 0);
+    if ((data.traces || []).length) renderAgentTraces();
+    else if (!agentTraces.size) traceLiveState.textContent = "实时";
+  } catch (_) {
+    if (sid === sessionId) traceLiveState.textContent = "同步失败";
+  } finally {
+    traceRefreshActive = false;
+  }
 }
 
 // ---- SSE 流式 ----
@@ -1052,6 +1181,14 @@ function renderConstraint(state) {
     ["行动意图", loc.intended_destination_name],
   ]));
 
+  const time = worldState.time || {};
+  constraintBodyEl.appendChild(constraintSection("世界时间", [
+    ["日期", time.calendar_label && time.day ? `${time.calendar_label}第${time.day}日` : ""],
+    ["时刻", time.clock],
+    ["时段", time.period],
+    ["季节", time.season],
+  ]));
+
   const knowledge = worldState.knowledge || {};
   constraintBodyEl.appendChild(chipSection("已确认地点", knowledge.confirmed_locations));
   constraintBodyEl.appendChild(chipSection("听闻地点", knowledge.rumored_locations));
@@ -1198,3 +1335,4 @@ async function boot() {
 }
 
 boot();
+setInterval(refreshAgentTraces, 600);

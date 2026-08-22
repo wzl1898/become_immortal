@@ -8,6 +8,73 @@ import store
 
 
 class LLMMetricStoreTests(unittest.TestCase):
+    def test_agent_traces_keep_complete_payloads_by_turn(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "saves.db")
+            with patch.object(store, "DB_PATH", db_path):
+                store.init()
+                sid = store.create("test", [])
+                trace_id = store.record_agent_trace({
+                    "save_id": sid,
+                    "turn": 5,
+                    "agent_type": "director_skeleton",
+                    "protocol": "openai",
+                    "model": "test-model",
+                    "stream": False,
+                    "input_messages": [{"role": "user", "content": "完整输入"}],
+                    "raw_output": '{"beats":["完整输出"]}',
+                    "status": "success",
+                    "duration_ms": 123,
+                })
+
+                summary = store.list_agent_traces(sid)
+                complete = store.list_agent_traces(
+                    sid, turn=5, include_content=True
+                )
+
+                self.assertEqual(summary[0]["id"], trace_id)
+                self.assertNotIn("input_messages", summary[0])
+                self.assertNotIn("raw_output", summary[0])
+                self.assertEqual(complete[0]["input_messages"][0]["content"], "完整输入")
+                self.assertIn("完整输出", complete[0]["raw_output"])
+                self.assertGreater(complete[0]["updated_at"], 0)
+                self.assertIsNone(store.list_agent_traces("missing"))
+
+                self.assertTrue(store.delete(sid))
+                with sqlite3.connect(db_path) as conn:
+                    count = conn.execute(
+                        "SELECT COUNT(*) FROM agent_traces WHERE save_id=?", (sid,)
+                    ).fetchone()[0]
+                self.assertEqual(count, 0)
+
+    def test_agent_trace_lifecycle_and_incremental_cursor(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "saves.db")
+            with patch.object(store, "DB_PATH", db_path):
+                store.init()
+                sid = store.create("test", [])
+                trace_id = store.record_agent_trace({
+                    "save_id": sid, "turn": 1, "agent_type": "opening",
+                    "protocol": "openai", "model": "test",
+                    "input_messages": [{"role": "user", "content": "开始"}],
+                    "status": "running",
+                })
+                running = store.list_agent_traces(sid, include_content=True)[0]
+                self.assertEqual(running["status"], "running")
+                cursor = running["updated_at"]
+                self.assertEqual(store.list_agent_traces(sid, updated_after=cursor), [])
+
+                store.finish_agent_trace(trace_id, {
+                    "raw_output": "剧情", "status": "success", "duration_ms": 42,
+                })
+                changed = store.list_agent_traces(
+                    sid, include_content=True, updated_after=cursor
+                )
+                self.assertEqual(len(changed), 1)
+                self.assertEqual(changed[0]["id"], trace_id)
+                self.assertEqual(changed[0]["status"], "success")
+                self.assertEqual(changed[0]["raw_output"], "剧情")
+
     def test_lists_recent_metrics_for_save_with_limit(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "saves.db")
@@ -28,6 +95,28 @@ class LLMMetricStoreTests(unittest.TestCase):
 
                 self.assertEqual([row["duration_ms"] for row in rows], [300, 200])
                 self.assertIsNone(store.list_llm_request_metrics("missing"))
+
+    def test_reaps_stale_running_agent_traces(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "saves.db")
+            with patch.object(store, "DB_PATH", db_path):
+                store.init()
+                sid = store.create("test", [])
+                trace_id = store.record_agent_trace({
+                    "save_id": sid, "turn": 1, "agent_type": "director_audit",
+                    "protocol": "openai", "model": "test", "status": "running",
+                })
+                old = __import__("time").time() - 600
+                with store._conn() as conn:
+                    conn.execute(
+                        "UPDATE agent_traces SET created_at=?, updated_at=? WHERE id=?",
+                        (old, old, trace_id),
+                    )
+
+                self.assertEqual(store.reap_stale_agent_traces(sid), 1)
+                trace = next(row for row in store.list_agent_traces(sid) if row["id"] == trace_id)
+                self.assertEqual(trace["status"], "timeout")
+                self.assertEqual(trace["error_type"], "StaleTrace")
 
     def test_persists_save_specific_opportunity_reward_binding(self):
         with tempfile.TemporaryDirectory() as tmpdir:
