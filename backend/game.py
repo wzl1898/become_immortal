@@ -1182,7 +1182,9 @@ def _dynamic_director_state(raw: dict | None) -> dict:
         # mistaken for the new long-lived desc/trigger contract.
         payoff = normalized.get("payoff_state")
         normalized["payoff_state"] = (
-            payoff if _is_maintained_payoff(payoff) and _has_payoff_binding(payoff) else None
+            payoff
+            if _is_maintained_payoff(payoff) and _has_reward_binding(payoff)
+            else None
         )
         normalized.setdefault("last_payoff", None)
         normalized.setdefault("hook_state", None)
@@ -2000,7 +2002,7 @@ def _director_payoff_retry_messages(
     feedback = {
         "failed_output": failed_result,
         "failure": "上一条输出未通过固定世界绑定校验",
-        "required": "重新生成时，desc 必须逐字包含一个标准机缘名和一个标准奖励名；只能从下面列表选择。若没有合理组合，输出空字符串。",
+        "required": "重新生成时，desc 必须逐字包含一个标准奖励名；机缘名可选，若使用机缘也必须逐字使用标准机缘名。只能从下面列表选择。若没有合理奖励，输出空字符串。",
         "standard_opportunity_names": opportunity_names,
         "standard_reward_names": reward_names,
     }
@@ -2344,6 +2346,15 @@ def _has_payoff_binding(value) -> bool:
     )
 
 
+def _has_reward_binding(value) -> bool:
+    binding = value.get("binding") if isinstance(value, dict) else None
+    return bool(
+        isinstance(binding, dict)
+        and _clean_text(binding.get("reward_id"), 120)
+        and binding.get("reward_kind") == "art"
+    )
+
+
 def _payoff_text(value: dict | None) -> dict | None:
     if not _is_maintained_payoff(value):
         return None
@@ -2366,22 +2377,26 @@ def _resolve_payoff_binding(result: dict, world_context: dict) -> dict | None:
         row for row in world_context.get("reward_candidates", [])
         if _clean_text(row.get("name"), 120) in desc
     ]
-    if len(opportunities) != 1 or len(rewards) != 1:
+    if len(opportunities) > 1 or len(rewards) != 1:
         return None
-    opportunity = opportunities[0]
     reward = rewards[0]
-    if any(
-        row.get("opportunity_id") == opportunity["id"]
-        for row in world_context.get("existing_reward_bindings", [])
-    ):
-        return None
-    return {
-        "opportunity_id": str(opportunity["id"]),
-        "opportunity_name": _clean_text(opportunity["name"], 120),
+    binding = {
         "reward_kind": "art",
         "reward_id": str(reward["id"]),
         "reward_name": _clean_text(reward["name"], 120),
     }
+    if opportunities:
+        opportunity = opportunities[0]
+        if any(
+            row.get("opportunity_id") == opportunity["id"]
+            for row in world_context.get("existing_reward_bindings", [])
+        ):
+            return None
+        binding.update({
+            "opportunity_id": str(opportunity["id"]),
+            "opportunity_name": _clean_text(opportunity["name"], 120),
+        })
+    return binding
 
 
 def _reconcile_payoff_state(
@@ -2429,7 +2444,7 @@ def _payoff_selected_facts(payoff: dict | None, world_context: dict) -> list[dic
     """Expose only the opportunity and reward selected by the dynamic binding."""
     if not _is_maintained_payoff(payoff):
         return []
-    binding = payoff.get("binding") if _has_payoff_binding(payoff) else {}
+    binding = payoff.get("binding") if isinstance(payoff, dict) else {}
     reference_ids = [binding.get("opportunity_id"), binding.get("reward_id")]
     return constraints.selected_director_facts(world_context, reference_ids)
 

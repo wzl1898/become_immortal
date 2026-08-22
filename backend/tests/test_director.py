@@ -440,6 +440,20 @@ class DirectorPlanTests(unittest.TestCase):
         self.assertEqual(payoff["binding"]["reward_id"], "yin_qi_jue")
         self.assertEqual({row["id"] for row in facts}, {"ruined_temple_bones", "yin_qi_jue"})
 
+    def test_reward_only_payoff_is_accepted_without_opportunity(self):
+        context = _context()
+        context["reward_candidates"] = [{
+            "id": "iron_bone", "name": "铁骨功", "reward_kind": "art",
+        }]
+        context["opportunities"] = []
+        payoff, _ = game._reconcile_payoff_state({}, {
+            "desc": "通过青溪镇武馆获得铁骨功",
+            "trigger": "前往青溪镇武馆求取炼体功法",
+        }, 4, context)
+
+        self.assertEqual(payoff["binding"]["reward_id"], "iron_bone")
+        self.assertNotIn("opportunity_id", payoff["binding"])
+
     def test_invalid_payoff_retry_receives_failed_output_and_standard_names(self):
         messages = game._director_payoff_retry_messages(
             {"turns": 3, "character_state": {}, "transcript": []},
@@ -454,7 +468,7 @@ class DirectorPlanTests(unittest.TestCase):
         self.assertIn("通过青溪镇武馆获得铁骨功", feedback)
         self.assertIn("破庙道人遗骨", feedback)
         self.assertIn("引气诀", feedback)
-        self.assertIn("必须逐字包含一个标准机缘名和一个标准奖励名", feedback)
+        self.assertIn("必须逐字包含一个标准奖励名", feedback)
 
     def test_invalid_payoff_is_retried_before_director_skeleton(self):
         calls = []
