@@ -1581,7 +1581,11 @@ async def _ensure_event_foundation(
             if reuse_existing else state["turns"] + 1
         ),
         "turns": int(existing.get("turns") or 0) if reuse_existing else 0,
-        "causal_model": _clean_markdown((existing or {}).get("causal_model")),
+        # 新事件不能继承已结束事件的幕后因果；每个新 event_id 都必须重新建模。
+        "causal_model": (
+            _clean_markdown((existing or {}).get("causal_model"))
+            if reuse_existing else ""
+        ),
         "viewpoint_model": _clean_markdown(
             (existing or {}).get("viewpoint_model") or (existing or {}).get("cognition_model")
         ),
@@ -1600,7 +1604,7 @@ async def _ensure_event_foundation(
             "causal": causal_output,
         },
     }
-    if not event["causal_model"]:
+    if not reuse_existing or not event["causal_model"]:
         _schedule_causal_foundation(
             state, event["id"], event_seed, action, world_context, memories
         )

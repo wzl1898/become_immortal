@@ -349,6 +349,45 @@ class DirectorPlanTests(unittest.TestCase):
         finally:
             game._CACHE.pop(sid, None)
 
+    def test_new_event_rebuilds_causal_model_instead_of_reusing_ended_event(self):
+        sid = "new-event-causal-refresh-test"
+        previous = _director(status="resolved", turns=3)
+        previous["event"]["causal_model"] = "# 旧事件幕后事实\n旧因果"
+        previous["next_event_seed"] = {
+            "title": "青溪镇夜行传闻",
+            "core": "镇上夜行人留下新的线索",
+            "benefit": "查明夜行人的真实目的",
+            "end_condition": "夜行人的目的得到确认",
+        }
+        state = {
+            "session_id": sid,
+            "turns": 4,
+            "transcript": [],
+            "character_state": {},
+            "director_state": previous,
+        }
+        scheduled = []
+
+        async def fake_viewpoint(*args, **kwargs):
+            return "# 主角视角\n\n主角位于青溪镇。", {"source": "llm", "model": "test", "fallback_reason": ""}
+
+        def fake_schedule(*args):
+            scheduled.append(args[1])
+
+        try:
+            with patch.object(game, "_schedule_causal_foundation", fake_schedule), patch.object(
+                game, "_call_director_text_agent", fake_viewpoint
+            ):
+                result = asyncio.run(game._ensure_event_foundation(
+                    state, "进入青溪镇", _context(), []
+                ))
+            self.assertNotEqual(result["event"]["id"], previous["event"]["id"])
+            self.assertEqual(result["event"]["causal_model"], "")
+            self.assertEqual(scheduled, [result["event"]["id"]])
+            self.assertEqual(result["agent_outputs"]["causal"]["source"], "pending")
+        finally:
+            game._CACHE.pop(sid, None)
+
     def test_eventless_generation_context_centers_player_input_and_intent(self):
         sid = "eventless-context-test"
         state = {
