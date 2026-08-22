@@ -1103,6 +1103,62 @@ class DirectorPlanTests(unittest.TestCase):
         finally:
             game._CACHE.pop(sid, None)
 
+    def test_audit_end_condition_restarts_progression_as_ended(self):
+        sid = "audit-event-end-test"
+        plan = {
+            "plan_id": "plan-end-1",
+            "event_id": "event-1",
+            "turn_mode": "progress",
+            "event_ended": False,
+            "turn_objective": "确认来者离开",
+            "intent": {"key": "观察", "same_as_previous": False},
+            "beats": ["确认来者离开"],
+        }
+        game._CACHE[sid] = {
+            "session_id": sid,
+            "turns": 4,
+            "transcript": [{"role": "narration", "text": "来者已经离开。"}],
+            "director_state": {
+                "event": _event(status="active", turns=4),
+                "current_plan": plan,
+                "agent_outputs": {},
+            },
+        }
+        calls = []
+
+        async def fake_complete(*args, **kwargs):
+            calls.append(kwargs["request_type"])
+            if kwargs["request_type"] == "director_audit":
+                return json.dumps({
+                    "fulfilled": True,
+                    "payoff_triggered": False,
+                    "event_end_reached": True,
+                    "evidence": "正文确认来者已经离开，事件结束条件已满足。",
+                    "viewpoint_updates": [],
+                    "violations": [],
+                    "note": "",
+                }, ensure_ascii=False)
+            self.assertEqual(kwargs["request_type"], "director_progression")
+            self.assertIn("ended", args[0][-1]["content"])
+            return json.dumps({"direction": "收束当前事件", "ended": False}, ensure_ascii=False)
+
+        try:
+            with patch.object(game, "complete_chat", fake_complete), patch.object(
+                game.store, "save_director_state"
+            ), patch.object(game.store, "save_opportunity_reward_binding"):
+                asyncio.run(game._run_director_audit(
+                    sid, "观察", "来者已经离开。", 4, plan
+                ))
+            director = game._CACHE[sid]["director_state"]
+            self.assertEqual(calls, ["director_audit", "director_progression"])
+            self.assertTrue(director["current_plan"]["event_ended"])
+            self.assertEqual(director["current_plan"]["event_action"], "resolve")
+            self.assertEqual(director["event"]["status"], "resolved")
+            self.assertTrue(director["last_audit"]["event_end_reached"])
+            self.assertTrue(director["last_audit"]["progression_after_event_end"]["ended"])
+        finally:
+            game._CACHE.pop(sid, None)
+
     def test_stage_summary_updates_only_on_boundary(self):
         messages = [{"role": "system", "content": "fixed"}]
         for turn in range(1, 21):

@@ -2734,6 +2734,9 @@ def _schedule_director_audit(
     if not isinstance(plan, dict):
         return
     snapshot = json.loads(json.dumps(plan, ensure_ascii=False))
+    event = (state or {}).get("director_state", {}).get("event") or {}
+    snapshot["event_end_condition"] = event.get("end_condition", "")
+    snapshot["event_core"] = event.get("core", "")
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -2774,6 +2777,9 @@ async def _run_director_audit(
             "fulfilled": bool(result.get("fulfilled")),
             "payoff_triggered": bool(
                 result.get("payoff_triggered", result.get("payoff_delivered", False))
+            ),
+            "event_end_reached": bool(
+                result.get("event_end_reached", result.get("end_condition_met", False))
             ),
             "evidence": _clean_text(result.get("evidence"), 360),
             "violations": _clean_string_list(result.get("violations"), limit=8),
@@ -2840,6 +2846,39 @@ async def _run_director_audit(
             director["last_payoff"] = triggered
             if current.get("plan_id") == plan.get("plan_id"):
                 current["payoff"] = triggered
+        if (
+            audit["event_end_reached"]
+            and event
+            and event.get("id") == plan.get("event_id")
+            and event.get("status") not in {"resolved", "abandoned"}
+            and current.get("plan_id") == plan.get("plan_id")
+            and not current.get("event_ended")
+        ):
+            progression = await _run_audit_end_progression(
+                state, director, user_content or "（本轮无玩家行动）", turn,
+                audit["evidence"],
+            )
+            current["event_ended"] = True
+            current["event_action"] = "resolve"
+            current["turn_mode"] = "resolve"
+            current["progression_direction"] = progression.get("direction") or (
+                "当前事件已满足结束条件，收束当前事件"
+            )
+            event["status"] = "resolved"
+            event["ended_turn"] = turn
+            director["event"] = event
+            director["current_plan"] = current
+            outputs = director.get("agent_outputs") if isinstance(director.get("agent_outputs"), dict) else {}
+            director["agent_outputs"] = {
+                **outputs,
+                "progression": {
+                    "source": "llm",
+                    "model": DIRECTOR_LLM_CONFIG.model,
+                    "fallback_reason": "audit_event_end",
+                    "output": progression,
+                },
+            }
+            audit["progression_after_event_end"] = progression
         state["director_state"] = director
         store.save_director_state(session_id, director)
         store.save_opportunity_reward_binding(session_id, director.get("payoff_state"))
@@ -2847,11 +2886,49 @@ async def _run_director_audit(
         _LOG.exception("director audit failed for session %s turn %s", session_id, turn)
 
 
+async def _run_audit_end_progression(
+    state: dict,
+    director: dict,
+    action: str,
+    turn: int,
+    evidence: str,
+) -> dict:
+    """Ask progression to close an event after audit confirms its end condition."""
+    plan = director.get("current_plan") or {}
+    pacing = {
+        "intent": plan.get("intent") or {
+            "key": "（审计确认事件结束）",
+            "same_as_previous": False,
+        },
+        "resolved": True,
+    }
+    messages = _director_progression_messages(state, action, director, pacing)
+    messages.append({
+        "role": "user",
+        "content": (
+            "【事件结束审计结果】\n"
+            "审计 Agent 已确认当前事件的至少一个 end_condition 客观条件已经满足。"
+            "请按推进 Agent 协议输出收束方向，并将 ended 设置为 true。\n"
+            f"证据：{_clean_text(evidence, 360)}"
+        ),
+    })
+    result, _meta = await _call_director_agent(
+        messages,
+        "director_progression",
+        DIRECTOR_PROGRESSION_MAX_TOKENS,
+        state.get("session_id"),
+    )
+    result = result if isinstance(result, dict) else {}
+    return {**result, "ended": True}
+
+
 def _compact_audit_plan(plan: dict) -> dict:
     payoff = plan.get("payoff") if isinstance(plan.get("payoff"), dict) else {}
     return {
         "turn_mode": plan.get("turn_mode"),
         "required_outcome": plan.get("turn_objective") or plan.get("current_goal"),
+        "event_core": plan.get("event_core"),
+        "event_end_condition": plan.get("event_end_condition"),
         "payoff": {
             "id": payoff.get("id"),
             "desc": payoff.get("desc"),
