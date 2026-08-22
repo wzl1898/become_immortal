@@ -97,16 +97,43 @@ html, body {
   padding: 14px 16px;
   font-size: 13px;
   line-height: 1.7;
+  transition: width 0.2s ease, padding 0.2s ease;
 }
-.status-title {
+.status-head {
   flex: none;
-  margin: 0 0 10px;
-  font-size: 15px;
-  letter-spacing: 0.3em;
-  color: var(--accent-soft);
-  text-indent: 0.3em;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  margin-bottom: 10px;
   border-bottom: 1px solid #23272f;
   padding-bottom: 8px;
+}
+.status-title {
+  flex: 1;
+  margin: 0;
+  font-size: 15px;
+  letter-spacing: 0.12em;
+  color: var(--accent-soft);
+}
+.status-toggle {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #3a414c;
+  border-radius: 6px;
+  padding: 0;
+  background: transparent;
+  color: var(--muted);
+  font: 20px/1 sans-serif;
+  cursor: pointer;
+}
+.status-toggle:hover, .status-toggle:focus-visible {
+  color: var(--accent-soft);
+  border-color: var(--accent);
+  outline: none;
 }
 .status-body {
   display: flex;
@@ -153,6 +180,19 @@ html, body {
 .status-empty { color: var(--muted); text-align: center; margin: 4px 0; }
 .status-panel:not(.empty) .status-empty { display: none; }
 .status-panel.empty .status-body { display: none; }
+.status-panel.collapsed {
+  width: 44px;
+  padding: 8px;
+}
+.status-panel.collapsed .status-head {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.status-panel.collapsed .status-title,
+.status-panel.collapsed .status-body,
+.status-panel.collapsed .status-empty { display: none; }
+.status-panel.collapsed .status-toggle { transform: rotate(180deg); }
 
 /* 窄屏（放不下侧栏）：收进正文流顶部，横向铺开 */
 @media (max-width: 1300px) {
@@ -163,8 +203,12 @@ html, body {
     max-height: none;
     margin: 12px 20px 0;
   }
+  .status-panel.collapsed {
+    width: auto;
+    padding: 8px 12px;
+  }
+  .status-panel.collapsed .status-head { justify-content: flex-end; }
   .status-body { flex-direction: row; flex-wrap: wrap; gap: 6px 16px; }
-  .status-panel.empty { display: none; }
 }
 
 /* Agent Trace：宽屏固定在剧情右侧，窄屏变为横向气泡带。 */

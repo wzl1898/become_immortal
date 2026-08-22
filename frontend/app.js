@@ -11,6 +11,7 @@ const drawerClose = document.getElementById("drawer-close");
 const saveListEl = document.getElementById("save-list");
 const saveEmptyEl = document.getElementById("save-empty");
 const statusPanel = document.getElementById("status-panel");
+const statusToggle = document.getElementById("status-toggle");
 const tracePanel = document.getElementById("trace-panel");
 const traceList = document.getElementById("trace-list");
 const traceLiveState = document.getElementById("trace-live-state");
@@ -47,6 +48,16 @@ function clearStatus() {
   statusBodyEl.innerHTML = "";
   statusPanel.classList.add("empty");
 }
+
+function setStatusCollapsed(collapsed) {
+  statusPanel.classList.toggle("collapsed", collapsed);
+  statusToggle.setAttribute("aria-expanded", String(!collapsed));
+  statusToggle.title = collapsed ? "展开状态与物品栏" : "收起状态与物品栏";
+}
+
+statusToggle.addEventListener("click", () => {
+  setStatusCollapsed(!statusPanel.classList.contains("collapsed"));
+});
 
 let sessionId = null;
 let currentName = "";
