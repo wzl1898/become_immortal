@@ -1698,7 +1698,7 @@ async def _run_next_event_generation(
     if world_context is None:
         world_context = constraints.director_context(session_id, "")
     if memories is None:
-        memories = _compact_memories(state.get("world_memory") or [])
+        memories = _compact_memories(_recall_world_memory(state, context))
     result, meta = await _call_director_agent(
         [
             {
@@ -1747,7 +1747,10 @@ def _schedule_eventless_event_generation(
     if current and not current.done():
         return
     world_context = constraints.director_context(session_id, action)
-    memories = _compact_memories(state.get("world_memory") or [])
+    recall_query = "\n\n".join(
+        part for part in (action, _recent_scene(state.get("transcript") or [])) if part
+    )
+    memories = _compact_memories(_recall_world_memory(state, recall_query))
     context = _eventless_event_generation_context(state, action, intent)
     task = asyncio.create_task(_run_next_event_generation(
         session_id, context, world_context, memories
