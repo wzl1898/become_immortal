@@ -404,7 +404,7 @@ class DirectorPlanTests(unittest.TestCase):
         finally:
             game._CACHE.pop(sid, None)
 
-    def test_new_event_rebuilds_causal_model_instead_of_reusing_ended_event(self):
+    def test_new_event_rebuilds_causal_and_viewpoint_models(self):
         sid = "new-event-causal-refresh-test"
         previous = _director(status="resolved", turns=3)
         previous["event"]["causal_model"] = "# 旧事件幕后事实\n旧因果"
@@ -422,8 +422,10 @@ class DirectorPlanTests(unittest.TestCase):
             "director_state": previous,
         }
         scheduled = []
+        viewpoint_calls = []
 
         async def fake_viewpoint(*args, **kwargs):
+            viewpoint_calls.append(args[0][-1]["content"])
             return "# 主角视角\n\n主角位于青溪镇。", {"source": "llm", "model": "test", "fallback_reason": ""}
 
         def fake_schedule(*args):
@@ -438,8 +440,12 @@ class DirectorPlanTests(unittest.TestCase):
                 ))
             self.assertNotEqual(result["event"]["id"], previous["event"]["id"])
             self.assertEqual(result["event"]["causal_model"], "")
+            self.assertEqual(result["event"]["viewpoint_model"], "# 主角视角\n\n主角位于青溪镇。")
+            self.assertEqual(len(viewpoint_calls), 1)
+            self.assertIn("镇上夜行人留下新的线索", viewpoint_calls[0])
             self.assertEqual(scheduled, [result["event"]["id"]])
             self.assertEqual(result["agent_outputs"]["causal"]["source"], "pending")
+            self.assertEqual(result["agent_outputs"]["viewpoint"]["source"], "llm")
         finally:
             game._CACHE.pop(sid, None)
 
@@ -474,6 +480,24 @@ class DirectorPlanTests(unittest.TestCase):
         self.assertIn("刚初悟引气门径", content)
         self.assertNotIn("青溪镇散修", content)
         self.assertNotIn("【稳定世界", content)
+
+    def test_viewpoint_updates_keep_only_eight_newest_facts(self):
+        base = "# 主角视角\n\n## 主角位置\n白石村。"
+        existing = "\n".join(
+            f"- 第 {turn} 回合：认知 {turn}" for turn in range(1, 11)
+        )
+        viewpoint = base + "\n\n## 正文后新增认知\n" + existing
+
+        merged = game._merge_viewpoint_updates(viewpoint, ["认知 11"], 11)
+        update_lines = [line for line in merged.splitlines() if line.startswith("- 第 ")]
+
+        self.assertEqual(len(update_lines), 8)
+        self.assertNotIn("认知 1\n", merged)
+        self.assertNotIn("认知 2\n", merged)
+        self.assertNotIn("认知 3\n", merged)
+        self.assertIn("认知 4", merged)
+        self.assertIn("认知 11", merged)
+        self.assertIn("## 主角位置\n白石村。", merged)
 
     def test_missing_viewpoint_does_not_make_active_event_new(self):
         director = _director(status="active")

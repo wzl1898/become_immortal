@@ -57,6 +57,7 @@ WORLD_MEMORY_RECALL_TOP_K = 8
 WORLD_MEMORY_RECALL_THRESHOLD = 0.32
 WORLD_MEMORY_INJECT_MAX_CHARS = 2200
 MEMORY_EXTRACT_MAX_ITEMS = 5
+VIEWPOINT_UPDATE_LIMIT = 8
 # 提取前召回多少条已有记忆喂给提取器判增量（避免复述型重复入库）
 MEMORY_EXTRACT_RECALL_K = 8
 
@@ -1637,8 +1638,13 @@ async def _ensure_event_foundation(
             _clean_markdown((existing or {}).get("causal_model"))
             if reuse_existing else ""
         ),
-        "viewpoint_model": _clean_markdown(
-            (existing or {}).get("viewpoint_model") or (existing or {}).get("cognition_model")
+        # 视角模型属于单个事件；新事件必须按新 core 和当前位置重新生成。
+        "viewpoint_model": (
+            _clean_markdown(
+                (existing or {}).get("viewpoint_model")
+                or (existing or {}).get("cognition_model")
+            )
+            if reuse_existing else ""
         ),
     }
     event.pop("cognition_model", None)
@@ -2771,6 +2777,39 @@ def _render_event_models(state: dict) -> str:
     return "\n\n".join(parts)
 
 
+def _merge_viewpoint_updates(
+    viewpoint: str,
+    updates: list[str],
+    turn: int,
+) -> str:
+    """Keep the event's base viewpoint plus only its eight newest learned facts."""
+    heading = "## 正文后新增认知"
+    cleaned = _clean_markdown(viewpoint)
+    if heading in cleaned:
+        base, existing_section = cleaned.split(heading, 1)
+        existing = [
+            line.strip()
+            for line in existing_section.splitlines()
+            if line.strip().startswith("- ")
+        ]
+    else:
+        base = cleaned
+        existing = []
+
+    combined = list(existing)
+    known = "\n".join([base, *existing])
+    for item in updates:
+        if item and item not in known:
+            combined.append(f"- 第 {turn} 回合：{item}")
+            known += "\n" + item
+    combined = combined[-VIEWPOINT_UPDATE_LIMIT:]
+    if not combined:
+        return base.rstrip()
+    return _clean_markdown(
+        base.rstrip() + "\n\n" + heading + "\n" + "\n".join(combined)
+    )
+
+
 def _finalize_director_state(state: dict, assistant_content: str) -> None:
     director = _dynamic_director_state(state.get("director_state"))
     plan = director.get("current_plan") if isinstance(director.get("current_plan"), dict) else None
@@ -2883,22 +2922,15 @@ async def _run_director_audit(
         }
         director["needs_repair"] = not audit["fulfilled"]
         event = director.get("event") if isinstance(director.get("event"), dict) else None
-        if event and event.get("id") == plan.get("event_id") and audit["viewpoint_updates"]:
+        if event and event.get("id") == plan.get("event_id"):
             viewpoint = _clean_markdown(
                 event.get("viewpoint_model") or event.get("cognition_model")
             )
-            additions = []
-            for item in audit["viewpoint_updates"]:
-                line = f"- 第 {turn} 回合：{item}"
-                if item not in viewpoint:
-                    additions.append(line)
-            if additions:
-                heading = "## 正文后新增认知"
-                separator = "\n\n" if heading not in viewpoint else "\n"
-                event["viewpoint_model"] = _clean_markdown(
-                    viewpoint + separator + (heading + "\n" if heading not in viewpoint else "")
-                    + "\n".join(additions)
-                )
+            merged_viewpoint = _merge_viewpoint_updates(
+                viewpoint, audit["viewpoint_updates"], turn
+            )
+            if merged_viewpoint != viewpoint:
+                event["viewpoint_model"] = merged_viewpoint
                 director["event"] = event
         payoff = plan.get("payoff") if _is_maintained_payoff(plan.get("payoff")) else None
         current_payoff = director.get("payoff_state")
