@@ -103,6 +103,12 @@ class DirectorPlanTests(unittest.TestCase):
         self.assertIn("若上一个事件是主角被追杀、追踪、搜捕或围堵", prompts.DIRECTOR_EVENT_SYSTEM_PROMPT)
         self.assertIn("不得继续保留被追杀、可能暴露或搜捕网收紧的压力", prompts.DIRECTOR_EVENT_SYSTEM_PROMPT)
 
+    def test_narrative_prompt_forbids_state_regression(self):
+        self.assertIn("状态绝不允许无故回退", prompts.SYSTEM_PROMPT)
+        self.assertIn("不得把“膻中已通/任督贯通”重新写成“膻中未破/经脉未通”", prompts.SYSTEM_PROMPT)
+        self.assertIn("只有正文明确描写受伤、废功、境界跌落", prompts.SYSTEM_PROMPT)
+        self.assertIn("主角状态同样是既定事实", prompts.SYSTEM_PROMPT)
+
     def test_causal_messages_put_world_in_system_and_order_user_sections(self):
         messages = game._director_causal_messages(
             _event(),
