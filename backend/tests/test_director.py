@@ -967,14 +967,22 @@ class DirectorPlanTests(unittest.TestCase):
             director,
             None,
             _context(),
+            [
+                {"id": "m1", "type": "plot", "text": "主角已经甩脱追兵。"},
+                {"id": "m2", "type": "plot", "text": "  "},
+            ],
         )
         rendered = game._render_director_plan(director, _context())
 
         self.assertIn("通往当前事件 benefit", hook_messages[0]["content"])
         self.assertIn("意图完成后的新局面", hook_messages[0]["content"])
         self.assertIn("不得依据意图执行前的旧位置", hook_messages[0]["content"])
+        self.assertIn("必须与【召回记忆】中的既有事实一致", hook_messages[0]["content"])
         self.assertIn("本轮将完整落实的玩家意图", hook_messages[-1]["content"])
         self.assertIn("本轮意图完成后的预计结果", hook_messages[-1]["content"])
+        self.assertIn('【召回记忆】\n["主角已经甩脱追兵。"]', hook_messages[-1]["content"])
+        self.assertNotIn('"id":"m1"', hook_messages[-1]["content"])
+        self.assertNotIn('"type":"plot"', hook_messages[-1]["content"])
         self.assertIn("恢复白石村通往县城的道路", hook_messages[-1]["content"])
         self.assertIn("向赵横的粮草押运者查明补给路线", rendered)
         self.assertIn("钩子收益方向", rendered)

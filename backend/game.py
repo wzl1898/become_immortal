@@ -1415,7 +1415,9 @@ async def _plan_director_turn(
             "ended_turn": state["turns"] + 1,
         }
     hook_result, hook_meta = await _call_director_agent(
-        _director_hook_messages(state, action, planned, previous_hook, world_context),
+        _director_hook_messages(
+            state, action, planned, previous_hook, world_context, compact_memories
+        ),
         "director_hook", DIRECTOR_HOOK_MAX_TOKENS, state.get("session_id"),
     )
     if hook_result is None:
@@ -2159,9 +2161,16 @@ def _director_hook_messages(
     planned: dict,
     previous_hook: dict | None,
     world_context: dict,
+    memories: list[dict],
 ) -> list[dict]:
     event = planned.get("event") or {}
     plan = planned.get("current_plan") or {}
+    memory_texts = [
+        text
+        for item in memories
+        if isinstance(item, dict)
+        if (text := str(item.get("text") or "").strip())
+    ]
     content = "\n\n".join([
         "【事件】\n" + _stable_json({
             key: event.get(key)
@@ -2169,6 +2178,7 @@ def _director_hook_messages(
         }),
         "【幕后因果模型】\n" + _clean_markdown(event.get("causal_model")),
         "【主角视角模型】\n" + _clean_markdown(event.get("viewpoint_model")),
+        "【召回记忆】\n" + _stable_json(memory_texts),
         "【当前主角位置约束】\n" + _stable_json(world_context.get("location") or {}),
         "【上一轮钩子】\n" + _stable_json(_hook_text(previous_hook)),
         "【本轮将完整落实的玩家意图】\n" + _stable_json({
