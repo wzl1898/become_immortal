@@ -1501,6 +1501,24 @@ def _event_needs_foundation(prev: dict) -> bool:
     )
 
 
+def _director_event_system_prompt(world_context: dict, memories: list[dict]) -> str:
+    """Place trusted event context after the rules and before the output contract."""
+    memory_texts = [
+        text
+        for item in memories
+        if isinstance(item, dict)
+        if (text := str(item.get("text") or "").strip())
+    ]
+    context = "\n\n".join([
+        "【稳定世界】\n" + _stable_json(world_context),
+        "【近期世界记忆】\n" + _stable_json(memory_texts),
+    ])
+    marker = "\n\n# 输出"
+    if marker not in DIRECTOR_EVENT_SYSTEM_PROMPT:
+        raise ValueError("事件 Agent 系统提示词缺少输出段标记")
+    return DIRECTOR_EVENT_SYSTEM_PROMPT.replace(marker, "\n\n" + context + marker, 1)
+
+
 async def _ensure_event_foundation(
     state: dict,
     action: str,
@@ -1527,9 +1545,7 @@ async def _ensure_event_foundation(
         key: value for key, value in (state.get("character_state") or {}).items()
         if key != "updated_at"
     }
-    world_layer = {"world_slice": world_context, "protagonist_memories": memories}
     base_context = "\n\n".join([
-        "【稳定世界与记忆】\n" + _stable_json(world_layer),
         "【主角状态】\n" + _stable_json(character),
         "【已存在事件（若有）】\n" + _stable_json({
             key: existing.get(key)
@@ -1559,7 +1575,10 @@ async def _ensure_event_foundation(
     else:
         event_result, event_meta = await _call_director_agent(
             [
-                {"role": "system", "content": DIRECTOR_EVENT_SYSTEM_PROMPT},
+                {
+                    "role": "system",
+                    "content": _director_event_system_prompt(world_context, memories),
+                },
                 {"role": "user", "content": base_context},
             ],
             "director_event", DIRECTOR_EVENT_MAX_TOKENS, state.get("session_id"),
@@ -1667,10 +1686,25 @@ async def _ensure_event_foundation(
     return foundation
 
 
-async def _run_next_event_generation(session_id: str, context: str) -> None:
+async def _run_next_event_generation(
+    session_id: str,
+    context: str,
+    world_context: dict | None = None,
+    memories: list[dict] | None = None,
+) -> None:
+    state = _CACHE.get(session_id)
+    if not state:
+        return
+    if world_context is None:
+        world_context = constraints.director_context(session_id, "")
+    if memories is None:
+        memories = _compact_memories(state.get("world_memory") or [])
     result, meta = await _call_director_agent(
         [
-            {"role": "system", "content": DIRECTOR_EVENT_SYSTEM_PROMPT},
+            {
+                "role": "system",
+                "content": _director_event_system_prompt(world_context, memories),
+            },
             {"role": "user", "content": context},
         ],
         "director_event", DIRECTOR_EVENT_MAX_TOKENS, session_id,
@@ -1712,8 +1746,12 @@ def _schedule_eventless_event_generation(
     current = _NEXT_EVENT_TASKS.get(session_id)
     if current and not current.done():
         return
+    world_context = constraints.director_context(session_id, action)
+    memories = _compact_memories(state.get("world_memory") or [])
     context = _eventless_event_generation_context(state, action, intent)
-    task = asyncio.create_task(_run_next_event_generation(session_id, context))
+    task = asyncio.create_task(_run_next_event_generation(
+        session_id, context, world_context, memories
+    ))
     _NEXT_EVENT_TASKS[session_id] = task
     task.add_done_callback(
         lambda done, key=session_id: _NEXT_EVENT_TASKS.pop(key, None)
@@ -1722,14 +1760,11 @@ def _schedule_eventless_event_generation(
 
 
 def _eventless_event_generation_context(state: dict, action: str, intent: dict) -> str:
-    session_id = state.get("session_id")
-    world_context = constraints.director_context(session_id, action)
     event = (state.get("director_state") or {}).get("event") or {}
     character = {
         key: value for key, value in (state.get("character_state") or {}).items()
         if key != "updated_at"
     }
-    memories = _compact_memories(state.get("world_memory") or [])
     return "\n\n".join([
         "【玩家当前输入】\n" + (action or ""),
         "【节奏 Agent 判出的玩家意图】\n" + _stable_json(intent or {}),
@@ -1738,8 +1773,6 @@ def _eventless_event_generation_context(state: dict, action: str, intent: dict) 
             key: event.get(key) for key in ("title", "core", "benefit", "end_condition")
         }),
         "【主角当前状态与成长】\n" + _stable_json(character),
-        "【近期世界记忆】\n" + _stable_json(memories),
-        "【稳定世界与当前地点】\n" + _stable_json(world_context),
         "硬规则：新事件必须顺着【玩家当前输入】与【玩家意图】的方向展开，以主角此刻主动选择"
         "去做的事为核心，而不是延续刚结束事件的冲突。不得用同一人物、同一物件、同一地点或"
         "等价冲突重启已结束事件；旧事件已确认的结算结果不可推翻。",

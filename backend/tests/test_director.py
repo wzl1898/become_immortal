@@ -86,6 +86,23 @@ def _director(*, status="offered", turns=0):
 
 
 class DirectorPlanTests(unittest.TestCase):
+    def test_event_system_prompt_places_world_then_memory_after_rules(self):
+        system = game._director_event_system_prompt(
+            _context(),
+            [{"id": "memory-1", "type": "plot", "text": "主角已经甩脱追兵。"}],
+        )
+
+        self.assertLess(system.index("# 规则"), system.index("【稳定世界】"))
+        self.assertLess(system.index("【稳定世界】"), system.index("【近期世界记忆】"))
+        self.assertLess(system.index("【近期世界记忆】"), system.index("# 输出"))
+        self.assertIn('["主角已经甩脱追兵。"]', system)
+        self.assertNotIn("memory-1", system)
+        self.assertNotIn('"type":"plot"', system)
+
+    def test_event_prompt_forbids_continuing_pursuit_after_escape(self):
+        self.assertIn("若上一个事件是主角被追杀、追踪、搜捕或围堵", prompts.DIRECTOR_EVENT_SYSTEM_PROMPT)
+        self.assertIn("不得继续保留被追杀、可能暴露或搜捕网收紧的压力", prompts.DIRECTOR_EVENT_SYSTEM_PROMPT)
+
     def test_cultivation_rules_are_at_tail_of_story_event_and_causal_prompts(self):
         prompts_to_check = (
             prompts.SYSTEM_PROMPT,
@@ -262,6 +279,11 @@ class DirectorPlanTests(unittest.TestCase):
                 }, ensure_ascii=False)
             if request_type == "director_event":
                 content = messages[-1]["content"]
+                system = messages[0]["content"]
+                self.assertIn("【稳定世界】", system)
+                self.assertIn("【近期世界记忆】", system)
+                self.assertNotIn("【稳定世界】", content)
+                self.assertNotIn("【近期世界记忆】", content)
                 self.assertIn("【玩家当前输入】", content)
                 self.assertIn("开始练引气决", content)
                 self.assertIn("【节奏 Agent 判出的玩家意图】", content)
@@ -427,10 +449,10 @@ class DirectorPlanTests(unittest.TestCase):
         # 旧事件仅作背景，且明令不得续写。
         self.assertIn("仅作背景，不得续写", content)
         self.assertIn("而不是延续刚结束事件的冲突", content)
-        # 仍带主角成长/记忆/世界地点作为约束。
+        # user 内容仍带主角成长；记忆与稳定世界已迁入 system 内容。
         self.assertIn("刚初悟引气门径", content)
-        self.assertIn("青溪镇散修", content)
-        self.assertIn("【稳定世界与当前地点】", content)
+        self.assertNotIn("青溪镇散修", content)
+        self.assertNotIn("【稳定世界", content)
 
     def test_missing_viewpoint_does_not_make_active_event_new(self):
         director = _director(status="active")
