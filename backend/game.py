@@ -1182,12 +1182,16 @@ def _dynamic_director_state(raw: dict | None) -> dict:
         # Old immediate payoff objects used type/outcome/proof and must not be
         # mistaken for the new long-lived desc/trigger contract.
         payoff = normalized.get("payoff_state")
-        normalized["payoff_state"] = (
+        normalized.setdefault("last_payoff", None)
+        normalized_payoff = (
             payoff
             if _is_maintained_payoff(payoff) and _has_reward_binding(payoff)
             else None
         )
-        normalized.setdefault("last_payoff", None)
+        if normalized_payoff and normalized_payoff.get("status") == "triggered":
+            normalized["last_payoff"] = normalized_payoff
+            normalized_payoff = None
+        normalized["payoff_state"] = normalized_payoff
         normalized.setdefault("hook_state", None)
         normalized.setdefault("last_hook", None)
         normalized["hook_state"] = _normalize_hook_state(normalized.get("hook_state"))
@@ -2513,9 +2517,10 @@ def _reconcile_payoff_state(
             "trigger_source": "payoff_agent_recent_story",
         }
     elif previous and previous.get("status") == "triggered":
+        last_payoff = previous
         same = candidate and all(candidate[key] == previous.get(key) for key in ("desc", "trigger"))
         if same or candidate is None:
-            return previous, last_payoff
+            return None, last_payoff
 
     if candidate is None or (world_context is not None and binding is None):
         return None, last_payoff
@@ -2947,10 +2952,10 @@ async def _run_director_audit(
                 "trigger_source": "director_audit",
                 "evidence": audit["evidence"],
             }
-            director["payoff_state"] = triggered
+            director["payoff_state"] = None
             director["last_payoff"] = triggered
             if current.get("plan_id") == plan.get("plan_id"):
-                current["payoff"] = triggered
+                current["payoff"] = None
         if (
             audit["event_end_reached"]
             and event
@@ -2986,7 +2991,7 @@ async def _run_director_audit(
             audit["progression_after_event_end"] = progression
         state["director_state"] = director
         store.save_director_state(session_id, director)
-        store.save_opportunity_reward_binding(session_id, director.get("payoff_state"))
+        store.save_opportunity_reward_binding(session_id, director.get("last_payoff"))
     except Exception:  # noqa: BLE001
         _LOG.exception("director audit failed for session %s turn %s", session_id, turn)
 
