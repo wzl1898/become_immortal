@@ -109,6 +109,15 @@ class DirectorPlanTests(unittest.TestCase):
         self.assertIn("只有正文明确描写受伤、废功、境界跌落", prompts.SYSTEM_PROMPT)
         self.assertIn("主角状态同样是既定事实", prompts.SYSTEM_PROMPT)
 
+    def test_progression_agent_owns_player_action_consequences(self):
+        rule = "玩家提出目标就让世界百依百顺"
+
+        self.assertIn(rule, prompts.DIRECTOR_PROGRESSION_SYSTEM_PROMPT)
+        self.assertIn("鲁莽可以受伤、失败、损失资源甚至陨落", prompts.DIRECTOR_PROGRESSION_SYSTEM_PROMPT)
+        self.assertIn("机敏可以避险或抓住已有机缘", prompts.DIRECTOR_PROGRESSION_SYSTEM_PROMPT)
+        self.assertNotIn("玩家的选择要有真实后果", prompts.SYSTEM_PROMPT)
+        self.assertNotIn(rule, prompts.SYSTEM_PROMPT)
+
     def test_causal_messages_put_world_in_system_and_order_user_sections(self):
         messages = game._director_causal_messages(
             _event(),
