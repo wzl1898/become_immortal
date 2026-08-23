@@ -1239,21 +1239,25 @@ class DirectorPlanTests(unittest.TestCase):
         self.assertEqual(meta["source"], "llm")
         self.assertEqual(meta["fallback_reason"], "")
 
-    def test_narrative_plan_is_appended_after_history(self):
+    def test_narrative_plan_keeps_only_two_recent_raw_rounds(self):
         sid = "cache-prefix-test"
         historical = [
             {"role": "system", "content": "fixed"},
-            {"role": "user", "content": "old action"},
-            {"role": "assistant", "content": "old result"},
         ]
+        for turn in range(1, 5):
+            historical.extend([
+                {"role": "user", "content": f"action {turn}"},
+                {"role": "assistant", "content": f"result {turn}"},
+            ])
         game._CACHE[sid] = {
             "messages": list(historical),
             "transcript": [],
-            "turns": 1,
+            "turns": 4,
             "character_state": {},
             "world_memory": [],
             "inventory": [],
             "director_state": {},
+            "stage_summary": "earlier rounds summary",
             "_injected": [],
         }
         planned = game._apply_director_plan(_director(), _plan(), "迎战", _context(), 2)
@@ -1282,7 +1286,13 @@ class DirectorPlanTests(unittest.TestCase):
         finally:
             game._CACHE.pop(sid, None)
 
-        self.assertEqual(messages[:-1], historical)
+        self.assertEqual(messages[:-1], [
+            historical[0],
+            {"role": "system", "content": "【既往阶段摘要】\nearlier rounds summary"},
+            *historical[-4:],
+        ])
+        self.assertNotIn("action 1", [message["content"] for message in messages])
+        self.assertNotIn("result 2", [message["content"] for message in messages])
         self.assertIn("本轮导演骨架", messages[-1]["content"])
         self.assertTrue(messages[-1]["content"].endswith("【玩家原始行动】\n迎战"))
 

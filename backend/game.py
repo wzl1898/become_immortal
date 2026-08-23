@@ -49,6 +49,7 @@ _LOG = logging.getLogger(__name__)
 # 保留的历史轮数（system 之外），防止上下文无限增长
 MAX_TURNS = 40
 RECENT_RAW_ROUNDS = 16
+NARRATIVE_RECENT_RAW_ROUNDS = 2
 SUMMARY_INTERVAL = 10
 STAGE_SUMMARY_MAX_CHARS = 1800
 
@@ -190,6 +191,22 @@ def get_transcript(session_id: str) -> list[dict] | None:
     return None if state is None else state["transcript"]
 
 
+def _narrative_context_messages(state: dict) -> list[dict]:
+    """Build the prose Agent context without discarding persisted history."""
+    stored = state.get("messages") or []
+    if not stored:
+        return []
+    messages = [stored[0]]
+    if state.get("stage_summary"):
+        messages.append({
+            "role": "system",
+            "content": "【既往阶段摘要】\n" + state["stage_summary"],
+        })
+    keep = NARRATIVE_RECENT_RAW_ROUNDS * 2
+    messages.extend(stored[1:][-keep:])
+    return messages
+
+
 async def prepare_opening(session_id: str) -> list[dict]:
     """Initialize the first event models, then build opening narrative messages."""
     state = _get(session_id)
@@ -210,12 +227,7 @@ async def prepare_opening(session_id: str) -> list[dict]:
         state["director_state"] = director_state
         inject = _injection(state, None)
         world_constraints = constraints.opening_constraints(session_id)
-        messages = list(state["messages"])
-        if state.get("stage_summary"):
-            messages.insert(1, {
-                "role": "system",
-                "content": "【既往阶段摘要】\n" + state["stage_summary"],
-            })
+        messages = _narrative_context_messages(state)
         parts = [
             world_constraints.rstrip(),
             inject.rstrip(),
@@ -740,12 +752,7 @@ async def prepare_action(session_id: str, action: str) -> list[dict]:
             f"【玩家原始行动】\n{action}",
         ]
         content = "\n\n".join(part for part in parts if part)
-        messages = list(state["messages"])
-        if state.get("stage_summary"):
-            messages.insert(1, {
-                "role": "system",
-                "content": "【既往阶段摘要】\n" + state["stage_summary"],
-            })
+        messages = _narrative_context_messages(state)
         messages.append({"role": "user", "content": content})
         return _inject_story_seed_messages(messages, session_id, "narrative")
     except Exception:
@@ -794,12 +801,7 @@ async def _prepare_action_eventless(
         f"【玩家原始行动】\n{action}",
     ]
     content = "\n\n".join(part for part in parts if part)
-    messages = list(state["messages"])
-    if state.get("stage_summary"):
-        messages.insert(1, {
-            "role": "system",
-            "content": "【既往阶段摘要】\n" + state["stage_summary"],
-        })
+    messages = _narrative_context_messages(state)
     messages.append({"role": "user", "content": content})
     return _inject_story_seed_messages(
         messages, state.get("session_id"), "narrative"
