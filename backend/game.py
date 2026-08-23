@@ -1435,7 +1435,7 @@ async def _plan_director_turn(
     planned["current_plan"]["hook"] = dict(hook_state) if hook_state else None
 
     skeleton_result, skeleton_meta = await _call_director_agent(
-        _director_skeleton_messages(state, action, planned),
+        _director_skeleton_messages(state, action, planned, compact_memories),
         "director_skeleton",
         DIRECTOR_SKELETON_MAX_TOKENS,
         state.get("session_id"),
@@ -2198,9 +2198,17 @@ def _director_hook_messages(
     ]
 
 
-def _director_skeleton_messages(state: dict, action: str, planned: dict) -> list[dict]:
+def _director_skeleton_messages(
+    state: dict, action: str, planned: dict, memories: list[dict]
+) -> list[dict]:
     event = planned.get("event") or {}
     plan = planned.get("current_plan") or {}
+    memory_texts = [
+        text
+        for item in memories
+        if isinstance(item, dict)
+        if (text := str(item.get("text") or "").strip())
+    ]
     content = "\n\n".join([
         "【事件】\n" + _stable_json({
             key: event.get(key)
@@ -2208,6 +2216,7 @@ def _director_skeleton_messages(state: dict, action: str, planned: dict) -> list
         }),
         "【幕后因果模型】\n" + _clean_markdown(event.get("causal_model")),
         "【主角视角模型】\n" + _clean_markdown(event.get("viewpoint_model")),
+        "【召回记忆】\n" + _stable_json(memory_texts),
         "【节奏 Agent结果】\n" + _stable_json({
             "intent": plan.get("intent"),
             "resolved": plan.get("intent_resolved"),
@@ -2217,7 +2226,7 @@ def _director_skeleton_messages(state: dict, action: str, planned: dict) -> list
             "direction": plan.get("progression_direction"),
             "ended": plan.get("event_ended"),
         }),
-        "【入口钩子】\n" + _stable_json(plan.get("hook")),
+        "【本轮刚生成的钩子】\n" + _stable_json(plan.get("hook")),
         "【爽点】\n" + _stable_json({
             "payoff": plan.get("payoff"), "selected_facts": plan.get("selected_facts"),
         }),

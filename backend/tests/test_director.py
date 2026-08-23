@@ -1119,12 +1119,26 @@ class DirectorPlanTests(unittest.TestCase):
         )
         state = {"transcript": [{"role": "narration", "text": "黑牌微微发亮。"}]}
 
-        messages = game._director_skeleton_messages(state, "继续查看黑牌", second)
+        messages = game._director_skeleton_messages(
+            state,
+            "继续查看黑牌",
+            second,
+            [
+                {"id": "m1", "type": "plot", "text": "主角已经甩脱追兵。"},
+                {"id": "m2", "type": "plot", "text": "  "},
+            ],
+        )
 
         self.assertIn('"resolved":true', messages[-1]["content"])
         self.assertIn('"ended":false', messages[-1]["content"])
         self.assertNotIn('"event_action"', messages[-1]["content"])
         self.assertIn("同一意图已连续尝试 2 次", messages[-1]["content"])
+        self.assertIn('【召回记忆】\n["主角已经甩脱追兵。"]', messages[-1]["content"])
+        self.assertNotIn('"id":"m1"', messages[-1]["content"])
+        self.assertNotIn('"type":"plot"', messages[-1]["content"])
+        self.assertIn("【本轮刚生成的钩子】", messages[-1]["content"])
+        self.assertIn("必须直接用于设计 beats", messages[0]["content"])
+        self.assertIn("每轮至少一个 beat", messages[0]["content"])
 
     def test_viewpoint_uses_core_and_location_while_causal_runs_without_planner_timeout(self):
         async def scenario():
