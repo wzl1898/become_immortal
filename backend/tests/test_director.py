@@ -109,6 +109,11 @@ class DirectorPlanTests(unittest.TestCase):
         self.assertIn("只有正文明确描写受伤、废功、境界跌落", prompts.SYSTEM_PROMPT)
         self.assertIn("主角状态同样是既定事实", prompts.SYSTEM_PROMPT)
 
+    def test_narrative_prompt_omits_unnecessary_environment_description(self):
+        self.assertIn("默认不写环境描写", prompts.SYSTEM_PROMPT)
+        self.assertIn("禁止用天气、光线、景色、气味、虫鸣风声等做无功能铺垫", prompts.SYSTEM_PROMPT)
+        self.assertIn("删掉环境句后不影响本轮信息与结果，就必须删掉", prompts.SYSTEM_PROMPT)
+
     def test_progression_agent_owns_player_action_consequences(self):
         rule = "玩家提出目标就让世界百依百顺"
 
