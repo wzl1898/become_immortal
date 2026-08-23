@@ -43,7 +43,12 @@ class LLMRetryTests(unittest.TestCase):
         messages = [{"role": "user", "content": "trace me"}]
         starts = []
         finishes = []
-        with patch.object(llm, "_complete_openai", return_value=("raw result", {})), \
+        usage = {
+            "prompt_tokens": 120,
+            "completion_tokens": 30,
+            "prompt_cache_hit_tokens": 80,
+        }
+        with patch.object(llm, "_complete_openai", return_value=("raw result", usage)), \
              patch.object(llm, "_record_metric"), \
              patch.object(llm, "_start_trace", side_effect=lambda trace: starts.append(trace) or 17), \
              patch.object(llm, "_finish_trace", side_effect=lambda trace_id, trace: finishes.append((trace_id, trace))):
@@ -58,6 +63,10 @@ class LLMRetryTests(unittest.TestCase):
         self.assertEqual(finishes[0][0], 17)
         self.assertEqual(finishes[0][1]["raw_output"], "raw result")
         self.assertEqual(finishes[0][1]["status"], "success")
+        self.assertEqual(finishes[0][1]["input_tokens"], 120)
+        self.assertEqual(finishes[0][1]["output_tokens"], 30)
+        self.assertEqual(finishes[0][1]["total_tokens"], 150)
+        self.assertEqual(finishes[0][1]["cache_hit_tokens"], 80)
 
     def test_complete_chat_records_api_error_trace(self):
         config = llm.LLMConfig("openai", "https://example.test/v1", "key", "model", 5)
@@ -92,6 +101,20 @@ class LLMRetryTests(unittest.TestCase):
 
         self.assertEqual(payload["thinking"], {"type": "disabled"})
         self.assertTrue(payload["stream"])
+
+    def test_anthropic_usage_includes_cached_input_in_totals(self):
+        metrics = llm._usage_metrics({
+            "input_tokens": 20,
+            "cache_creation_input_tokens": 30,
+            "cache_read_input_tokens": 50,
+            "output_tokens": 10,
+        })
+
+        self.assertEqual(metrics["prompt_tokens"], 100)
+        self.assertEqual(metrics["completion_tokens"], 10)
+        self.assertEqual(metrics["total_tokens"], 110)
+        self.assertEqual(metrics["cache_hit_tokens"], 50)
+        self.assertEqual(metrics["cache_miss_tokens"], 50)
 
     def test_other_openai_models_do_not_receive_deepseek_option(self):
         payload = llm._openai_payload(

@@ -3431,6 +3431,10 @@ def get_llm_request_metrics(session_id: str, limit: int = 30) -> list[dict] | No
     return store.list_llm_request_metrics(session_id, limit)
 
 
+def get_agent_token_stats(session_id: str) -> dict | None:
+    return store.get_agent_token_stats(session_id)
+
+
 def get_agent_traces(
     session_id: str, *, turn: int | None = None, limit: int = 100,
     include_content: bool = False, updated_after: float | None = None,

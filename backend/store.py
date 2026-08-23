@@ -85,6 +85,7 @@ def init() -> None:
                 output_chars INTEGER NOT NULL,
                 prompt_tokens INTEGER,
                 completion_tokens INTEGER,
+                total_tokens INTEGER,
                 cache_hit_tokens INTEGER,
                 cache_miss_tokens INTEGER,
                 error_type TEXT NOT NULL DEFAULT '',
@@ -108,6 +109,10 @@ def init() -> None:
                 duration_ms INTEGER NOT NULL,
                 error_type TEXT NOT NULL DEFAULT '',
                 error_message TEXT NOT NULL DEFAULT '',
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                total_tokens INTEGER,
+                cache_hit_tokens INTEGER,
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL
             )
@@ -117,6 +122,12 @@ def init() -> None:
         if "updated_at" not in trace_cols:
             conn.execute("ALTER TABLE agent_traces ADD COLUMN updated_at REAL NOT NULL DEFAULT 0")
             conn.execute("UPDATE agent_traces SET updated_at=created_at WHERE updated_at=0")
+        for column in ("input_tokens", "output_tokens", "total_tokens", "cache_hit_tokens"):
+            if column not in trace_cols:
+                conn.execute(f"ALTER TABLE agent_traces ADD COLUMN {column} INTEGER")
+        metric_cols = {row["name"] for row in conn.execute("PRAGMA table_info(llm_request_metrics)")}
+        if "total_tokens" not in metric_cols:
+            conn.execute("ALTER TABLE llm_request_metrics ADD COLUMN total_tokens INTEGER")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_agent_traces_save_turn "
             "ON agent_traces(save_id, turn, id)"
@@ -821,9 +832,9 @@ def record_llm_request_metric(metric: dict) -> None:
             """
             INSERT INTO llm_request_metrics (
                 save_id, request_type, protocol, model, status, duration_ms,
-                input_chars, output_chars, prompt_tokens, completion_tokens,
+                input_chars, output_chars, prompt_tokens, completion_tokens, total_tokens,
                 cache_hit_tokens, cache_miss_tokens, error_type, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 metric.get("save_id"), metric.get("request_type") or "unknown",
@@ -831,6 +842,7 @@ def record_llm_request_metric(metric: dict) -> None:
                 metric.get("status") or "error", int(metric.get("duration_ms") or 0),
                 int(metric.get("input_chars") or 0), int(metric.get("output_chars") or 0),
                 metric.get("prompt_tokens"), metric.get("completion_tokens"),
+                metric.get("total_tokens"),
                 metric.get("cache_hit_tokens"), metric.get("cache_miss_tokens"),
                 metric.get("error_type") or "", time.time(),
             ),
@@ -846,7 +858,7 @@ def list_llm_request_metrics(sid: str, limit: int = 30) -> list[dict] | None:
         rows = conn.execute(
             """
             SELECT id, request_type, protocol, model, status, duration_ms,
-                   input_chars, output_chars, prompt_tokens, completion_tokens,
+                   input_chars, output_chars, prompt_tokens, completion_tokens, total_tokens,
                    cache_hit_tokens, cache_miss_tokens, error_type, created_at
             FROM llm_request_metrics
             WHERE save_id=?
@@ -867,8 +879,9 @@ def record_agent_trace(trace: dict) -> int:
             INSERT INTO agent_traces (
                 save_id, turn, agent_type, protocol, model, stream,
                 input_messages, raw_output, status, duration_ms,
-                error_type, error_message, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                error_type, error_message, input_tokens, output_tokens,
+                total_tokens, cache_hit_tokens, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 trace.get("save_id"),
@@ -883,6 +896,10 @@ def record_agent_trace(trace: dict) -> int:
                 int(trace.get("duration_ms") or 0),
                 trace.get("error_type") or "",
                 trace.get("error_message") or "",
+                trace.get("input_tokens"),
+                trace.get("output_tokens"),
+                trace.get("total_tokens"),
+                trace.get("cache_hit_tokens"),
                 now,
                 now,
             ),
@@ -897,7 +914,8 @@ def finish_agent_trace(trace_id: int, trace: dict) -> None:
             """
             UPDATE agent_traces
             SET raw_output=?, status=?, duration_ms=?, error_type=?,
-                error_message=?, updated_at=?
+                error_message=?, input_tokens=?, output_tokens=?,
+                total_tokens=?, cache_hit_tokens=?, updated_at=?
             WHERE id=?
             """,
             (
@@ -906,6 +924,10 @@ def finish_agent_trace(trace_id: int, trace: dict) -> None:
                 int(trace.get("duration_ms") or 0),
                 trace.get("error_type") or "",
                 trace.get("error_message") or "",
+                trace.get("input_tokens"),
+                trace.get("output_tokens"),
+                trace.get("total_tokens"),
+                trace.get("cache_hit_tokens"),
                 time.time(),
                 int(trace_id),
             ),
@@ -936,6 +958,7 @@ def list_agent_traces(
             f"""
             SELECT id, save_id, turn, agent_type, protocol, model, stream,
                    status, duration_ms, error_type, created_at, updated_at,
+                   input_tokens, output_tokens, total_tokens, cache_hit_tokens,
                    length(input_messages) AS input_chars, length(raw_output) AS output_chars
                    {content_columns}
             FROM agent_traces
@@ -950,6 +973,48 @@ def list_agent_traces(
         for row in result:
             row["input_messages"] = json.loads(row["input_messages"] or "[]")
     return result
+
+
+def get_agent_token_stats(sid: str) -> dict | None:
+    """Aggregate persisted token usage for a save overall and by Agent type."""
+    with _conn() as conn:
+        if conn.execute("SELECT 1 FROM saves WHERE id=?", (sid,)).fetchone() is None:
+            return None
+        select = """
+            COUNT(*) AS calls,
+            COUNT(total_tokens) AS measured_calls,
+            COALESCE(SUM(input_tokens), 0) AS input_tokens,
+            COALESCE(SUM(output_tokens), 0) AS output_tokens,
+            COALESCE(SUM(total_tokens), 0) AS total_tokens,
+            COALESCE(SUM(cache_hit_tokens), 0) AS cache_hit_tokens
+        """
+        total = dict(conn.execute(
+            f"SELECT {select} FROM agent_traces WHERE save_id=?",
+            (sid,),
+        ).fetchone())
+        rows = conn.execute(
+            f"""
+            SELECT agent_type, {select}
+            FROM agent_traces
+            WHERE save_id=?
+            GROUP BY agent_type
+            ORDER BY total_tokens DESC, agent_type ASC
+            """,
+            (sid,),
+        ).fetchall()
+
+    def with_rate(row: dict) -> dict:
+        input_tokens = int(row.get("input_tokens") or 0)
+        cache_hit_tokens = int(row.get("cache_hit_tokens") or 0)
+        return {
+            **row,
+            "cache_hit_rate": round(cache_hit_tokens / input_tokens, 4) if input_tokens else 0,
+        }
+
+    return {
+        "total": with_rate(total),
+        "by_agent": [with_rate(dict(row)) for row in rows],
+    }
 
 
 def reap_stale_agent_traces(sid: str, *, max_age_seconds: float = 180.0) -> int:
@@ -1209,6 +1274,7 @@ def delete(sid: str) -> bool:
     with _conn() as conn:
         conn.execute("DELETE FROM save_opportunity_rewards WHERE save_id=?", (sid,))
         conn.execute("DELETE FROM save_world_time WHERE save_id=?", (sid,))
+        conn.execute("DELETE FROM llm_request_metrics WHERE save_id=?", (sid,))
         conn.execute("DELETE FROM agent_traces WHERE save_id=?", (sid,))
         cur = conn.execute("DELETE FROM saves WHERE id=?", (sid,))
     return cur.rowcount > 0

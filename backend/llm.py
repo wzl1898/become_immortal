@@ -92,6 +92,7 @@ async def stream_chat(
     started = time.monotonic()
     output_chars = 0
     output_parts = []
+    usage = {}
     status = "success"
     error_type = ""
     error_message = ""
@@ -104,9 +105,9 @@ async def stream_chat(
         if not API_KEY:
             raise RuntimeError("未配置 LLM_API_KEY，请复制 .env.example 为 .env 并填写。")
         if PROTOCOL == "anthropic":
-            iterator = _stream_anthropic(messages)
+            iterator = _stream_anthropic(messages, usage)
         elif PROTOCOL == "openai":
-            iterator = _stream_openai(messages)
+            iterator = _stream_openai(messages, usage)
         else:
             raise RuntimeError(f"未知的 LLM_PROTOCOL={PROTOCOL!r}，应为 openai 或 anthropic。")
         async for piece in iterator:
@@ -125,6 +126,7 @@ async def stream_chat(
         raise
     finally:
         duration_ms = round((time.monotonic() - started) * 1000)
+        usage_metrics = _usage_metrics(usage)
         _record_metric({
             "save_id": session_id,
             "request_type": request_type,
@@ -135,11 +137,16 @@ async def stream_chat(
             "input_chars": sum(len(str(message.get("content") or "")) for message in messages),
             "output_chars": output_chars,
             "error_type": error_type,
+            **usage_metrics,
         })
         _finish_trace(trace_id, {
             "raw_output": "".join(output_parts),
             "status": status, "duration_ms": duration_ms,
             "error_type": error_type, "error_message": error_message,
+            "input_tokens": usage_metrics["prompt_tokens"],
+            "output_tokens": usage_metrics["completion_tokens"],
+            "total_tokens": usage_metrics["total_tokens"],
+            "cache_hit_tokens": usage_metrics["cache_hit_tokens"],
         })
 
 
@@ -187,6 +194,7 @@ async def complete_chat(
         raise
     finally:
         duration_ms = round((time.monotonic() - started) * 1000)
+        usage_metrics = _usage_metrics(usage)
         _record_metric({
             "save_id": session_id,
             "request_type": request_type,
@@ -197,27 +205,45 @@ async def complete_chat(
             "input_chars": sum(len(str(message.get("content") or "")) for message in messages),
             "output_chars": len(text),
             "error_type": error_type,
-            **_usage_metrics(usage),
+            **usage_metrics,
         })
         _finish_trace(trace_id, {
             "raw_output": text, "status": status,
             "duration_ms": duration_ms, "error_type": error_type,
             "error_message": error_message,
+            "input_tokens": usage_metrics["prompt_tokens"],
+            "output_tokens": usage_metrics["completion_tokens"],
+            "total_tokens": usage_metrics["total_tokens"],
+            "cache_hit_tokens": usage_metrics["cache_hit_tokens"],
         })
 
 
 def _usage_metrics(usage: dict | None) -> dict:
     usage = usage if isinstance(usage, dict) else {}
     details = usage.get("prompt_tokens_details") or {}
+    prompt = usage.get("prompt_tokens")
+    if prompt is None and usage.get("input_tokens") is not None:
+        prompt = sum(int(usage.get(key) or 0) for key in (
+            "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
+        ))
+    completion = usage.get("completion_tokens")
+    if completion is None:
+        completion = usage.get("output_tokens")
     hit = usage.get("prompt_cache_hit_tokens")
     if hit is None:
         hit = details.get("cached_tokens")
+    if hit is None:
+        hit = usage.get("cache_read_input_tokens")
     miss = usage.get("prompt_cache_miss_tokens")
-    if miss is None and hit is not None and usage.get("prompt_tokens") is not None:
-        miss = max(0, usage["prompt_tokens"] - hit)
+    if miss is None and hit is not None and prompt is not None:
+        miss = max(0, int(prompt) - int(hit))
+    total = usage.get("total_tokens")
+    if total is None and prompt is not None and completion is not None:
+        total = int(prompt) + int(completion)
     return {
-        "prompt_tokens": usage.get("prompt_tokens") or usage.get("input_tokens"),
-        "completion_tokens": usage.get("completion_tokens") or usage.get("output_tokens"),
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": total,
         "cache_hit_tokens": hit,
         "cache_miss_tokens": miss,
     }
@@ -260,7 +286,7 @@ def _iter_sse_data(line: str) -> str | None:
     return line[len("data:"):].strip()
 
 
-async def _stream_openai(messages: list[dict]):
+async def _stream_openai(messages: list[dict], usage_sink: dict | None = None):
     url = f"{BASE_URL}/chat/completions"
     headers = {
         "Authorization": f"Bearer {API_KEY}",
@@ -270,6 +296,7 @@ async def _stream_openai(messages: list[dict]):
         messages, model=MODEL, temperature=TEMPERATURE,
         max_tokens=MAX_TOKENS, stream=True,
     )
+    payload["stream_options"] = {"include_usage": True}
 
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         for attempt in range(len(CONNECT_RETRY_DELAYS) + 1):
@@ -287,6 +314,9 @@ async def _stream_openai(messages: list[dict]):
                             chunk = json.loads(data)
                         except json.JSONDecodeError:
                             continue
+                        chunk_usage = chunk.get("usage")
+                        if usage_sink is not None and isinstance(chunk_usage, dict):
+                            usage_sink.update(chunk_usage)
                         choices = chunk.get("choices") or []
                         if not choices:
                             continue
@@ -350,7 +380,7 @@ def _split_system(messages: list[dict]) -> tuple[str, list[dict]]:
     return "\n\n".join(p for p in system_parts if p), convo
 
 
-async def _stream_anthropic(messages: list[dict]):
+async def _stream_anthropic(messages: list[dict], usage_sink: dict | None = None):
     system, convo = _split_system(messages)
     url = f"{BASE_URL}/messages"
     headers = {
@@ -382,7 +412,15 @@ async def _stream_anthropic(messages: list[dict]):
                             evt = json.loads(data)
                         except json.JSONDecodeError:
                             continue
-                        if evt.get("type") == "content_block_delta":
+                        if evt.get("type") == "message_start":
+                            evt_usage = (evt.get("message") or {}).get("usage")
+                            if usage_sink is not None and isinstance(evt_usage, dict):
+                                usage_sink.update(evt_usage)
+                        elif evt.get("type") == "message_delta":
+                            evt_usage = evt.get("usage")
+                            if usage_sink is not None and isinstance(evt_usage, dict):
+                                usage_sink.update(evt_usage)
+                        elif evt.get("type") == "content_block_delta":
                             delta = evt.get("delta") or {}
                             if delta.get("type") == "text_delta":
                                 piece = delta.get("text")

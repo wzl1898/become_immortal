@@ -316,6 +316,15 @@ async def llm_metrics(sid: str, limit: int = 30):
     return {"requests": items}
 
 
+@app.get("/api/agent-token-stats")
+async def agent_token_stats(sid: str):
+    """Return persisted token totals overall and grouped by Agent type."""
+    stats = game.get_agent_token_stats(sid)
+    if stats is None:
+        raise HTTPException(404, "存档不存在")
+    return stats
+
+
 @app.get("/api/agent-traces")
 async def agent_traces(
     sid: str, turn: int | None = None, limit: int = 100,

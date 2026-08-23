@@ -66,6 +66,8 @@ class LLMMetricStoreTests(unittest.TestCase):
 
                 store.finish_agent_trace(trace_id, {
                     "raw_output": "剧情", "status": "success", "duration_ms": 42,
+                    "input_tokens": 100, "output_tokens": 20,
+                    "total_tokens": 120, "cache_hit_tokens": 60,
                 })
                 changed = store.list_agent_traces(
                     sid, include_content=True, updated_after=cursor
@@ -74,6 +76,48 @@ class LLMMetricStoreTests(unittest.TestCase):
                 self.assertEqual(changed[0]["id"], trace_id)
                 self.assertEqual(changed[0]["status"], "success")
                 self.assertEqual(changed[0]["raw_output"], "剧情")
+                self.assertEqual(changed[0]["input_tokens"], 100)
+                self.assertEqual(changed[0]["output_tokens"], 20)
+                self.assertEqual(changed[0]["total_tokens"], 120)
+                self.assertEqual(changed[0]["cache_hit_tokens"], 60)
+
+    def test_aggregates_token_usage_overall_and_by_agent(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "saves.db")
+            with patch.object(store, "DB_PATH", db_path):
+                store.init()
+                sid = store.create("test", [])
+                for agent_type, usage in (
+                    ("director_event", (100, 20, 120, 60)),
+                    ("director_event", (80, 10, 90, 20)),
+                    ("director_hook", (40, 5, 45, 0)),
+                ):
+                    trace_id = store.record_agent_trace({
+                        "save_id": sid, "turn": 1, "agent_type": agent_type,
+                        "protocol": "openai", "model": "test", "status": "running",
+                    })
+                    store.finish_agent_trace(trace_id, {
+                        "status": "success",
+                        "input_tokens": usage[0], "output_tokens": usage[1],
+                        "total_tokens": usage[2], "cache_hit_tokens": usage[3],
+                    })
+                store.record_agent_trace({
+                    "save_id": sid, "turn": 2, "agent_type": "director_hook",
+                    "protocol": "openai", "model": "test", "status": "api_error",
+                })
+
+                stats = store.get_agent_token_stats(sid)
+
+                self.assertEqual(stats["total"]["calls"], 4)
+                self.assertEqual(stats["total"]["measured_calls"], 3)
+                self.assertEqual(stats["total"]["input_tokens"], 220)
+                self.assertEqual(stats["total"]["output_tokens"], 35)
+                self.assertEqual(stats["total"]["total_tokens"], 255)
+                self.assertEqual(stats["total"]["cache_hit_tokens"], 80)
+                self.assertEqual(stats["by_agent"][0]["agent_type"], "director_event")
+                self.assertEqual(stats["by_agent"][0]["total_tokens"], 210)
+                self.assertAlmostEqual(stats["by_agent"][0]["cache_hit_rate"], 80 / 180, places=4)
+                self.assertIsNone(store.get_agent_token_stats("missing"))
 
     def test_lists_recent_metrics_for_save_with_limit(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -89,11 +133,15 @@ class LLMMetricStoreTests(unittest.TestCase):
                         "model": "test-model",
                         "status": "success",
                         "duration_ms": duration,
+                        "prompt_tokens": duration,
+                        "completion_tokens": 10,
+                        "total_tokens": duration + 10,
                     })
 
                 rows = store.list_llm_request_metrics(sid, limit=2)
 
                 self.assertEqual([row["duration_ms"] for row in rows], [300, 200])
+                self.assertEqual([row["total_tokens"] for row in rows], [310, 210])
                 self.assertIsNone(store.list_llm_request_metrics("missing"))
 
     def test_reaps_stale_running_agent_traces(self):

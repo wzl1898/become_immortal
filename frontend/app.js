@@ -41,6 +41,7 @@ const llmDrawer = document.getElementById("llm-drawer");
 const llmClose = document.getElementById("llm-close");
 const llmRefresh = document.getElementById("llm-refresh");
 const llmLiveEl = document.getElementById("llm-live");
+const llmTokenSummaryEl = document.getElementById("llm-token-summary");
 const llmListEl = document.getElementById("llm-list");
 const llmEmptyEl = document.getElementById("llm-empty");
 
@@ -192,6 +193,13 @@ function traceBubble(trace, wasOpen) {
   meta.append(
     makeTextElement("span", "turn", trace.turn == null ? "回合 —" : `回合 ${trace.turn}`),
     makeTextElement("span", "model", trace.model || trace.protocol || ""),
+    makeTextElement(
+      "span",
+      "tokens",
+      trace.total_tokens == null
+        ? "Token —"
+        : `Token ${formatTokens(trace.total_tokens)} · 缓存 ${formatTokens(trace.cache_hit_tokens)}`,
+    ),
     makeTextElement("span", "duration", trace.status === "running" ? "…" : formatDuration(trace.duration_ms || 0)),
   );
   summary.append(top, meta);
@@ -1254,7 +1262,57 @@ function formatRequestTime(ts) {
   return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-function renderLLMMetrics(items) {
+function formatTokens(value) {
+  return new Intl.NumberFormat("zh-CN").format(Number(value) || 0);
+}
+
+function renderAgentTokenStats(stats) {
+  llmTokenSummaryEl.replaceChildren();
+  const total = stats?.total;
+  if (!total) {
+    llmTokenSummaryEl.classList.add("hidden");
+    return;
+  }
+  llmTokenSummaryEl.classList.remove("hidden");
+  llmTokenSummaryEl.appendChild(makeTextElement("h3", "llm-token-title", "Agent Token 统计"));
+  const overall = document.createElement("div");
+  overall.className = "llm-token-overall";
+  for (const [label, value] of [
+    ["全部调用", total.calls],
+    ["已计量调用", total.measured_calls],
+    ["输入", total.input_tokens],
+    ["输出", total.output_tokens],
+    ["总计", total.total_tokens],
+    ["缓存命中", total.cache_hit_tokens],
+  ]) {
+    const span = document.createElement("span");
+    span.append(`${label} `, makeTextElement("b", "", formatTokens(value)));
+    overall.appendChild(span);
+  }
+  llmTokenSummaryEl.appendChild(overall);
+  const agents = document.createElement("div");
+  agents.className = "llm-token-agents";
+  for (const row of stats.by_agent || []) {
+    if (!row.measured_calls) continue;
+    const line = document.createElement("div");
+    line.className = "llm-token-agent";
+    line.append(
+      makeTextElement("span", "", LLM_REQUEST_LABELS[row.agent_type] || row.agent_type),
+      makeTextElement("span", "", `总计 ${formatTokens(row.total_tokens)}`),
+      makeTextElement("span", "", `缓存 ${formatTokens(row.cache_hit_tokens)}`),
+    );
+    agents.appendChild(line);
+  }
+  if (!agents.childElementCount) {
+    agents.appendChild(makeTextElement(
+      "p", "llm-token-note", "历史调用没有供应商 usage；新调用完成后会开始显示 Token。",
+    ));
+  }
+  llmTokenSummaryEl.appendChild(agents);
+}
+
+function renderLLMMetrics(items, stats) {
+  renderAgentTokenStats(stats);
   llmListEl.innerHTML = "";
   llmEmptyEl.textContent = "还没有 LLM 请求记录。";
   llmEmptyEl.classList.toggle("hidden", items.length > 0);
@@ -1278,6 +1336,21 @@ function renderLLMMetrics(items) {
     li.querySelector(".llm-duration").textContent = formatDuration(item.duration_ms);
     li.querySelector(".llm-model").textContent = item.model || "未记录模型";
     li.querySelector(".llm-time").textContent = formatRequestTime(item.created_at);
+    if (item.total_tokens != null) {
+      const tokens = document.createElement("div");
+      tokens.className = "llm-token-line";
+      for (const [label, value] of [
+        ["输入", item.prompt_tokens],
+        ["输出", item.completion_tokens],
+        ["总计", item.total_tokens],
+        ["缓存命中", item.cache_hit_tokens],
+      ]) {
+        const span = document.createElement("span");
+        span.append(`${label} `, makeTextElement("b", "", formatTokens(value)));
+        tokens.appendChild(span);
+      }
+      li.appendChild(tokens);
+    }
     if (item.error_type) {
       const error = document.createElement("div");
       error.className = "llm-error";
@@ -1291,10 +1364,14 @@ function renderLLMMetrics(items) {
 async function refreshLLMMetrics({ quiet = false } = {}) {
   if (!sessionId) return;
   try {
-    const data = await fetchJSON(`/api/llm-metrics?sid=${sessionId}&limit=30`);
-    renderLLMMetrics(data.requests || []);
+    const [data, stats] = await Promise.all([
+      fetchJSON(`/api/llm-metrics?sid=${encodeURIComponent(sessionId)}&limit=30`),
+      fetchJSON(`/api/agent-token-stats?sid=${encodeURIComponent(sessionId)}`),
+    ]);
+    renderLLMMetrics(data.requests || [], stats);
   } catch (e) {
     if (quiet) return;
+    llmTokenSummaryEl.classList.add("hidden");
     llmListEl.innerHTML = "";
     llmEmptyEl.textContent = `读取失败：${e.message}`;
     llmEmptyEl.classList.remove("hidden");
