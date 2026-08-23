@@ -2036,10 +2036,17 @@ def _director_payoff_messages(
         key: value for key, value in (state.get("character_state") or {}).items()
         if key != "updated_at"
     }
+    memory_texts = [
+        text
+        for memory in memories
+        if isinstance(memory, dict)
+        and isinstance((text := memory.get("text")), str)
+        and (text := text.strip())
+    ]
     world_layer = {
         "world_version": 1,
         "world_slice": world_context,
-        "protagonist_memories": memories,
+        "protagonist_memories": memory_texts,
     }
     payoff_content = "\n\n".join([
         f"【回合】\n{state['turns'] + 1}",

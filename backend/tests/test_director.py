@@ -896,11 +896,16 @@ class DirectorPlanTests(unittest.TestCase):
                 "trigger": "检查石像后遗骨",
                 "status": "pending",
             }},
-            [{"id": "m1", "type": "plot", "text": "已知事实"}],
+            [
+                {"id": "m1", "type": "plot", "text": "已知事实"},
+                {"id": "m2", "type": "plot", "text": "  "},
+            ],
         )
         pacing_messages = game._director_pacing_messages(state, "回家", _director())
 
         self.assertEqual([m["role"] for m in payoff_messages], ["system", "system", "user"])
+        world_layer = json.loads(payoff_messages[1]["content"].split("\n", 1)[1])
+        self.assertEqual(world_layer["protagonist_memories"], ["已知事实"])
         self.assertNotIn("updated_at", payoff_messages[-1]["content"])
         self.assertIn("当前待触发爽点", payoff_messages[-1]["content"])
         self.assertIn("前两轮正文", payoff_messages[-1]["content"])
