@@ -1519,6 +1519,39 @@ def _director_event_system_prompt(world_context: dict, memories: list[dict]) -> 
     return DIRECTOR_EVENT_SYSTEM_PROMPT.replace(marker, "\n\n" + context + marker, 1)
 
 
+def _director_causal_messages(
+    event_seed: dict,
+    world_context: dict,
+    memories: list[dict],
+    character: dict,
+    recent_story: str,
+) -> list[dict]:
+    memory_texts = [
+        text
+        for item in memories
+        if isinstance(item, dict)
+        if (text := str(item.get("text") or "").strip())
+    ]
+    stable_world = "【稳定世界】\n" + _stable_json(world_context)
+    marker = "\n\n# 固定修炼体系"
+    if marker in DIRECTOR_CAUSAL_SYSTEM_PROMPT:
+        system_prompt = DIRECTOR_CAUSAL_SYSTEM_PROMPT.replace(
+            marker, "\n\n" + stable_world + marker, 1
+        )
+    else:
+        system_prompt = DIRECTOR_CAUSAL_SYSTEM_PROMPT.rstrip() + "\n\n" + stable_world
+    user_content = "\n\n".join([
+        "【事件】\n" + _stable_json(event_seed),
+        "【近期世界记忆】\n" + _stable_json(memory_texts),
+        "【主角状态】\n" + _stable_json(character),
+        "【最近剧情】\n" + (recent_story or "（新存档尚无正文）"),
+    ])
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_content},
+    ]
+
+
 async def _ensure_event_foundation(
     state: dict,
     action: str,
@@ -1533,7 +1566,6 @@ async def _ensure_event_foundation(
                 state,
                 existing["id"],
                 _sanitize_event_creation(existing, world_context),
-                action,
                 world_context,
                 memories,
             )
@@ -1625,7 +1657,7 @@ async def _ensure_event_foundation(
     }
     if not reuse_existing or not event["causal_model"]:
         _schedule_causal_foundation(
-            state, event["id"], event_seed, action, world_context, memories
+            state, event["id"], event_seed, world_context, memories
         )
 
     viewpoint_model = event["viewpoint_model"]
@@ -1788,7 +1820,6 @@ def _schedule_causal_foundation(
     state: dict,
     event_id: str,
     event_seed: dict,
-    action: str,
     world_context: dict,
     memories: list[dict],
 ) -> None:
@@ -1799,16 +1830,10 @@ def _schedule_causal_foundation(
         key: value for key, value in (state.get("character_state") or {}).items()
         if key != "updated_at"
     }
-    context = "\n\n".join([
-        "【稳定世界与记忆】\n" + _stable_json({
-            "world_slice": world_context, "protagonist_memories": memories,
-        }),
-        "【主角状态】\n" + _stable_json(character),
-        "【最近剧情】\n" + (_recent_scene(state.get("transcript") or []) or "（新存档尚无正文）"),
-        "【当前输入】\n" + action,
-    ])
+    recent_story = _recent_scene(state.get("transcript") or [])
     task = asyncio.create_task(_run_causal_foundation(
-        state.get("session_id"), event_id, event_seed, context, world_context,
+        state.get("session_id"), event_id, event_seed, world_context, memories,
+        character, recent_story,
         int(state.get("turns") or 0) + 1,
     ))
     _CAUSAL_TASKS[event_id] = task
@@ -1821,8 +1846,10 @@ async def _run_causal_foundation(
     session_id: str,
     event_id: str,
     event_seed: dict,
-    context: str,
     world_context: dict,
+    memories: list[dict],
+    character: dict,
+    recent_story: str,
     turn: int,
 ) -> None:
     source = "llm"
@@ -1830,10 +1857,9 @@ async def _run_causal_foundation(
     reason = ""
     try:
         messages = _inject_story_seed_messages(
-            [
-                {"role": "system", "content": DIRECTOR_CAUSAL_SYSTEM_PROMPT},
-                {"role": "user", "content": "【事件】\n" + _stable_json(event_seed) + "\n\n" + context},
-            ],
+            _director_causal_messages(
+                event_seed, world_context, memories, character, recent_story
+            ),
             session_id,
             "director_causal",
         )

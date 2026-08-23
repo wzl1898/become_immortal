@@ -103,6 +103,27 @@ class DirectorPlanTests(unittest.TestCase):
         self.assertIn("若上一个事件是主角被追杀、追踪、搜捕或围堵", prompts.DIRECTOR_EVENT_SYSTEM_PROMPT)
         self.assertIn("不得继续保留被追杀、可能暴露或搜捕网收紧的压力", prompts.DIRECTOR_EVENT_SYSTEM_PROMPT)
 
+    def test_causal_messages_put_world_in_system_and_order_user_sections(self):
+        messages = game._director_causal_messages(
+            _event(),
+            _context(),
+            [{"id": "memory-1", "type": "plot", "text": "主角已经甩脱追兵。"}],
+            {"realm": "炼气一层"},
+            "主角在后山收功。",
+        )
+
+        system = messages[0]["content"]
+        user = messages[1]["content"]
+        self.assertIn("【稳定世界】", system)
+        self.assertNotIn("【稳定世界】", user)
+        self.assertLess(user.index("【事件】"), user.index("【近期世界记忆】"))
+        self.assertLess(user.index("【近期世界记忆】"), user.index("【主角状态】"))
+        self.assertLess(user.index("【主角状态】"), user.index("【最近剧情】"))
+        self.assertIn('["主角已经甩脱追兵。"]', user)
+        self.assertNotIn("memory-1", user)
+        self.assertNotIn('"type":"plot"', user)
+        self.assertNotIn("【当前输入】", user)
+
     def test_cultivation_rules_are_at_tail_of_story_event_and_causal_prompts(self):
         prompts_to_check = (
             prompts.SYSTEM_PROMPT,
