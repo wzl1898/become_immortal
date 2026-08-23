@@ -903,8 +903,18 @@ class DirectorPlanTests(unittest.TestCase):
         )
         pacing_director = _director()
         pacing_director["event"]["causal_model"] = "完整事件中的幕后因果"
-        pacing_director["event"]["viewpoint_model"] = "不应传入的主角视角"
+        pacing_director["event"]["viewpoint_model"] = "推进需要的主角视角"
         pacing_messages = game._director_pacing_messages(state, "回家", pacing_director)
+        progression_messages = game._director_progression_messages(
+            state,
+            "回家",
+            pacing_director,
+            {"intent": {"key": "安全回家"}, "resolved": True},
+            [
+                {"id": "m1", "type": "plot", "text": "主角已经甩脱追兵。"},
+                {"id": "m2", "type": "plot", "text": "  "},
+            ],
+        )
 
         self.assertEqual([m["role"] for m in payoff_messages], ["system", "system", "user"])
         world_layer = json.loads(payoff_messages[1]["content"].split("\n", 1)[1])
@@ -927,6 +937,13 @@ class DirectorPlanTests(unittest.TestCase):
             [line for line in pacing_content.splitlines() if line.startswith("【")],
             ["【完整事件】", "【最近一轮正文】", "【玩家本轮行动】"],
         )
+        progression_content = progression_messages[-1]["content"]
+        self.assertIn("推进需要的主角视角", progression_content)
+        self.assertIn('【召回记忆】\n["主角已经甩脱追兵。"]', progression_content)
+        self.assertNotIn('"id":"m1"', progression_content)
+        self.assertNotIn('"type":"plot"', progression_content)
+        self.assertIn("必须服从【主角视角模型】", progression_messages[0]["content"])
+        self.assertIn("必须与【召回记忆】中的既有事实一致", progression_messages[0]["content"])
         self.assertTrue(payoff_messages[-1]["content"].rstrip().endswith("【玩家本轮行动】\n回家"))
         self.assertTrue(pacing_content.rstrip().endswith("【玩家本轮行动】\n回家"))
 

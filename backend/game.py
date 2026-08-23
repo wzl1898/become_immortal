@@ -1346,7 +1346,9 @@ async def _plan_director_turn(
 
     pacing_decision = _sanitize_pacing_decision(pacing_result, prev, action)
     progression_result, progression_meta = await _call_director_agent(
-        _director_progression_messages(state, action, prev, pacing_decision),
+        _director_progression_messages(
+            state, action, prev, pacing_decision, compact_memories,
+        ),
         "director_progression", DIRECTOR_PROGRESSION_MAX_TOKENS, state.get("session_id"),
     )
     progression_decision = _sanitize_progression_decision(
@@ -2120,8 +2122,15 @@ def _director_progression_messages(
     action: str,
     prev: dict,
     pacing: dict,
+    memories: list[dict],
 ) -> list[dict]:
     event = prev.get("event") or {}
+    memory_texts = [
+        text
+        for item in memories
+        if isinstance(item, dict)
+        if (text := str(item.get("text") or "").strip())
+    ]
     content = "\n\n".join([
         "【当前事件】\n" + _stable_json({
             key: event.get(key)
@@ -2132,6 +2141,7 @@ def _director_progression_messages(
         }),
         "【幕后因果模型】\n" + _clean_markdown(event.get("causal_model")),
         "【主角视角模型】\n" + _clean_markdown(event.get("viewpoint_model")),
+        "【召回记忆】\n" + _stable_json(memory_texts),
         "【节奏 Agent的玩家意图结算要求】\n" + _stable_json(pacing),
         "【上一轮状态】\n" + _stable_json(_compact_director_state(prev)),
         "【最近一轮正文】\n" + (_latest_scene(state.get("transcript") or []) or "（暂无）"),
@@ -3003,7 +3013,17 @@ async def _run_audit_end_progression(
         },
         "resolved": True,
     }
-    messages = _director_progression_messages(state, action, director, pacing)
+    event_core = str((director.get("event") or {}).get("core") or "").strip()
+    recall_query = "\n\n".join(part for part in (
+        event_core,
+        _latest_scene(state.get("transcript") or []),
+        action,
+        evidence,
+    ) if part)
+    memories = _compact_memories(_recall_world_memory(state, recall_query))
+    messages = _director_progression_messages(
+        state, action, director, pacing, memories,
+    )
     messages.append({
         "role": "user",
         "content": (
