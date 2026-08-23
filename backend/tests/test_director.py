@@ -901,7 +901,10 @@ class DirectorPlanTests(unittest.TestCase):
                 {"id": "m2", "type": "plot", "text": "  "},
             ],
         )
-        pacing_messages = game._director_pacing_messages(state, "回家", _director())
+        pacing_director = _director()
+        pacing_director["event"]["causal_model"] = "完整事件中的幕后因果"
+        pacing_director["event"]["viewpoint_model"] = "不应传入的主角视角"
+        pacing_messages = game._director_pacing_messages(state, "回家", pacing_director)
 
         self.assertEqual([m["role"] for m in payoff_messages], ["system", "system", "user"])
         world_layer = json.loads(payoff_messages[1]["content"].split("\n", 1)[1])
@@ -911,8 +914,21 @@ class DirectorPlanTests(unittest.TestCase):
         self.assertIn("前两轮正文", payoff_messages[-1]["content"])
         self.assertIn("不得只复述玩家输入的动作或手段", pacing_messages[0]["content"])
         self.assertIn("摆脱追兵", pacing_messages[0]["content"])
+        pacing_content = pacing_messages[-1]["content"]
+        event_json = pacing_content.split("【完整事件】\n", 1)[1].split("\n\n【最近一轮正文】", 1)[0]
+        pacing_event = json.loads(event_json)
+        self.assertEqual(pacing_event["causal_model"], "完整事件中的幕后因果")
+        self.assertNotIn("viewpoint_model", pacing_event)
+        self.assertNotIn("主角视角", pacing_content)
+        self.assertNotIn("入口钩子", pacing_content)
+        self.assertNotIn("上一轮状态", pacing_content)
+        self.assertNotIn("场景状态", pacing_content)
+        self.assertEqual(
+            [line for line in pacing_content.splitlines() if line.startswith("【")],
+            ["【完整事件】", "【最近一轮正文】", "【玩家本轮行动】"],
+        )
         self.assertTrue(payoff_messages[-1]["content"].rstrip().endswith("【玩家本轮行动】\n回家"))
-        self.assertTrue(pacing_messages[-1]["content"].rstrip().endswith("【玩家本轮行动】\n回家"))
+        self.assertTrue(pacing_content.rstrip().endswith("【玩家本轮行动】\n回家"))
 
     def test_hook_and_story_are_bound_to_event_benefit_path(self):
         director = _director()

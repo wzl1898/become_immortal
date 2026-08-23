@@ -1313,9 +1313,7 @@ async def _plan_director_turn(
             "director_payoff", DIRECTOR_PAYOFF_MAX_TOKENS, state.get("session_id")
         ),
         _call_director_agent(
-            _director_pacing_messages(
-                state, action, prev, event_just_created=event_just_created,
-            ),
+            _director_pacing_messages(state, action, prev),
             "director_pacing", DIRECTOR_PACING_MAX_TOKENS, state.get("session_id")
         ),
     )
@@ -2100,28 +2098,14 @@ def _director_pacing_messages(
     state: dict,
     action: str,
     prev: dict,
-    *,
-    event_just_created: bool = False,
 ) -> list[dict]:
     event = prev.get("event") or {}
+    complete_event = {
+        key: value for key, value in event.items()
+        if key not in {"viewpoint_model", "cognition_model"}
+    }
     content = "\n\n".join([
-        "【事件】\n" + _stable_json({
-            key: event.get(key)
-            for key in (
-                "id", "title", "core", "benefit", "end_condition",
-                "status", "turns", "created_turn",
-            )
-        }),
-        "【幕后因果模型】\n" + _clean_markdown(event.get("causal_model")),
-        "【主角视角模型】\n" + _clean_markdown(event.get("viewpoint_model")),
-        "【入口钩子】\n" + _stable_json(prev.get("hook_state")),
-        f"【事件是否本轮刚创建】\n{event_just_created}",
-        "【上一轮状态】\n" + _stable_json(_compact_director_state(prev)),
-        "【场景状态】\n" + _stable_json({
-            "scene": prev.get("scene"),
-            "scene_turns": prev.get("scene_turns", 0),
-            "stale_after": DIRECTOR_SCENE_STALE_TURNS,
-        }),
+        "【完整事件】\n" + _stable_json(complete_event),
         "【最近一轮正文】\n" + (_latest_scene(state.get("transcript") or []) or "（暂无）"),
         "【玩家本轮行动】\n" + action,
     ])
