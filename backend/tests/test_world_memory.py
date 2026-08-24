@@ -113,6 +113,30 @@ class WorldMemoryParseTests(unittest.TestCase):
         ])
         self.assertIn("现状", dossier)
 
+    def test_keyword_search_returns_ranked_text_only(self):
+        state = {"world_memory": [
+            {
+                "id": "m1", "type": "character", "text": "陈九曾替吴三斤运送灵材。",
+                "entities": ["陈九", "吴三斤"], "importance": 0.5, "turn": 20,
+            },
+            {
+                "id": "m2", "type": "item", "text": "陈九短刀来自黑风坳独眼蛇。",
+                "entities": ["陈九", "陈九短刀"], "importance": 0.8, "turn": 30,
+            },
+            {
+                "id": "m3", "type": "location", "text": "白石村后山有隐蔽凹地。",
+                "entities": ["白石村后山"], "importance": 0.9, "turn": 40,
+            },
+        ]}
+
+        results = game._search_world_memory_by_keywords(state, ["陈九", "短刀"])
+
+        self.assertEqual(results, [
+            "陈九短刀来自黑风坳独眼蛇。",
+            "陈九曾替吴三斤运送灵材。",
+        ])
+        self.assertTrue(all(isinstance(item, str) for item in results))
+
 
 if __name__ == "__main__":
     unittest.main()

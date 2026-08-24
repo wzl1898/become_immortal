@@ -805,6 +805,64 @@ class DirectorPlanTests(unittest.TestCase):
             "resolved": True,
         })
 
+    def test_pacing_react_loop_searches_memory_and_returns_final_decision(self):
+        calls = []
+        state = {
+            "turns": 3,
+            "transcript": [{"role": "narration", "text": "陈九短刀放在桌边。"}],
+            "world_memory": [{
+                "id": "m1",
+                "type": "item",
+                "text": "陈九短刀来自黑风坳独眼蛇。",
+                "entities": ["陈九短刀", "独眼蛇"],
+                "importance": 0.8,
+            }],
+        }
+
+        async def fake_complete(messages, *args, **kwargs):
+            calls.append(messages)
+            if len(calls) == 1:
+                return json.dumps({
+                    "tool": "search_memory",
+                    "arguments": {"keywords": ["陈九短刀", "独眼蛇"]},
+                }, ensure_ascii=False)
+            tool_result = messages[-1]["content"]
+            self.assertIn("陈九短刀来自黑风坳独眼蛇。", tool_result)
+            self.assertNotIn('"id"', tool_result)
+            self.assertNotIn('"type"', tool_result)
+            return json.dumps({
+                "intent": {"key": "确认陈九短刀与独眼蛇的关系", "same_as_previous": False},
+                "resolved": True,
+            }, ensure_ascii=False)
+
+        with patch.object(game, "complete_chat", fake_complete):
+            result, meta = asyncio.run(game._run_pacing_agent(
+                state, "检查陈九短刀的来历", _director()
+            ))
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(result["intent"]["key"], "确认陈九短刀与独眼蛇的关系")
+        self.assertTrue(result["resolved"])
+        self.assertEqual(meta["tool_calls"][0]["keywords"], ["陈九短刀", "独眼蛇"])
+        self.assertEqual(meta["tool_calls"][0]["results"], ["陈九短刀来自黑风坳独眼蛇。"])
+
+    def test_pacing_react_loop_stops_at_tool_limit(self):
+        calls = 0
+        state = {"turns": 1, "transcript": [], "world_memory": []}
+
+        async def fake_complete(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return '{"tool":"search_memory","arguments":{"keywords":["旧事"]}}'
+
+        with patch.object(game, "complete_chat", fake_complete):
+            result, meta = asyncio.run(game._run_pacing_agent(state, "继续", _director()))
+
+        self.assertIsNone(result)
+        self.assertEqual(calls, game.PACING_REACT_MAX_TOOL_CALLS + 1)
+        self.assertEqual(meta["fallback_reason"], "tool_limit")
+        self.assertEqual(len(meta["tool_calls"]), game.PACING_REACT_MAX_TOOL_CALLS)
+
     def test_progression_returns_next_direction_and_end_marker(self):
         event = _event(status="active")
 

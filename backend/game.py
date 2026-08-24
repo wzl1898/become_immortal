@@ -106,6 +106,8 @@ DIRECTOR_VIEWPOINT_MAX_TOKENS = int(os.getenv(
 DIRECTOR_PACING_MAX_TOKENS = int(os.getenv(
     "DIRECTOR_PACING_MAX_TOKENS", _DIRECTOR_LEGACY_MAX_TOKENS or "450"
 ))
+PACING_REACT_MAX_TOOL_CALLS = 2
+PACING_MEMORY_SEARCH_MAX_RESULTS = 8
 DIRECTOR_SKELETON_MAX_TOKENS = int(os.getenv("DIRECTOR_SKELETON_MAX_TOKENS", "600"))
 DIRECTOR_LLM_CONFIG = config_from_env("DIRECTOR_LLM")
 DIRECTOR_CAUSAL_LLM_CONFIG = replace(DIRECTOR_LLM_CONFIG, timeout_seconds=None)
@@ -643,6 +645,46 @@ def _recall_world_memory(state: dict, query: str) -> list[dict]:
     return [world_memory[i] for i in idxs]
 
 
+def _search_world_memory_by_keywords(
+    state: dict, keywords: list[str] | str, limit: int = PACING_MEMORY_SEARCH_MAX_RESULTS
+) -> list[str]:
+    """Search durable memories by literal keywords and return text only."""
+    raw_keywords = [keywords] if isinstance(keywords, str) else keywords
+    normalized: list[str] = []
+    for keyword in raw_keywords if isinstance(raw_keywords, list) else []:
+        value = str(keyword or "").strip().casefold()
+        if value and value not in normalized:
+            normalized.append(value[:64])
+        if len(normalized) >= 6:
+            break
+    if not normalized:
+        return []
+
+    matches = []
+    for index, memory in enumerate(state.get("world_memory") or []):
+        text = _memory_text(memory)
+        if not text:
+            continue
+        candidate = _memory_candidate(memory).casefold()
+        hit_count = sum(keyword in candidate for keyword in normalized)
+        if hit_count:
+            matches.append((
+                hit_count,
+                _num(memory.get("importance")),
+                _num(memory.get("turn"), _num(memory.get("ts"))),
+                -index,
+                text,
+            ))
+    matches.sort(reverse=True)
+    results: list[str] = []
+    for *_score, text in matches:
+        if text not in results:
+            results.append(text)
+        if len(results) >= max(1, min(int(limit), PACING_MEMORY_SEARCH_MAX_RESULTS)):
+            break
+    return results
+
+
 def _world_memory_dossier(items: list[dict]) -> str:
     """把召回到的长期记忆拼成约束串，注入后续生成。空则返回 ""。"""
     if not items:
@@ -776,10 +818,7 @@ async def _prepare_action_eventless(
       因 plan 缺失安全早退，本轮不误改已结束事件、不跑审计。event 保留原样（已 resolved）。
     """
     session_id = state.get("session_id")
-    pacing_result, _pacing_meta = await _call_director_agent(
-        _director_pacing_messages(state, action, previous),
-        "director_pacing", DIRECTOR_PACING_MAX_TOKENS, session_id,
-    )
+    pacing_result, _pacing_meta = await _run_pacing_agent(state, action, previous)
     if pacing_result is None:
         pacing_result = _fallback_director_pacing(previous, action)
     pacing_decision = _sanitize_pacing_decision(pacing_result, previous, action)
@@ -1314,10 +1353,7 @@ async def _plan_director_turn(
             _director_payoff_messages(state, action, world_context, prev, compact_memories),
             "director_payoff", DIRECTOR_PAYOFF_MAX_TOKENS, state.get("session_id")
         ),
-        _call_director_agent(
-            _director_pacing_messages(state, action, prev),
-            "director_pacing", DIRECTOR_PACING_MAX_TOKENS, state.get("session_id")
-        ),
+        _run_pacing_agent(state, action, prev),
     )
     payoff_result, payoff_meta = payoff_call
     pacing_result, pacing_meta = pacing_call
@@ -1994,6 +2030,69 @@ async def _call_director_text_agent(
         "source": "llm" if result is not None else "fallback",
         "model": DIRECTOR_LLM_CONFIG.model if result is not None else "local",
         "fallback_reason": reason,
+    }
+
+
+def _pacing_memory_tool_keywords(result: dict) -> list[str] | None:
+    if result.get("tool") != "search_memory":
+        return None
+    arguments = result.get("arguments") if isinstance(result.get("arguments"), dict) else {}
+    keywords = arguments.get("keywords") or []
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    if not isinstance(keywords, list):
+        return []
+    return [str(keyword).strip() for keyword in keywords if str(keyword).strip()][:6]
+
+
+async def _run_pacing_agent(
+    state: dict, action: str, prev: dict
+) -> tuple[dict | None, dict]:
+    """Run the pacing Agent through a bounded search-memory ReAct loop."""
+    messages = _director_pacing_messages(state, action, prev)
+    tool_calls: list[dict] = []
+    for _step in range(PACING_REACT_MAX_TOOL_CALLS + 1):
+        result, meta = await _call_director_agent(
+            messages,
+            "director_pacing",
+            DIRECTOR_PACING_MAX_TOKENS,
+            state.get("session_id"),
+        )
+        if result is None:
+            return None, {**meta, "tool_calls": tool_calls}
+        keywords = _pacing_memory_tool_keywords(result)
+        if keywords is None:
+            return result, {**meta, "tool_calls": tool_calls}
+        if len(tool_calls) >= PACING_REACT_MAX_TOOL_CALLS:
+            return None, {
+                "source": "fallback",
+                "model": "local",
+                "fallback_reason": "tool_limit",
+                "tool_calls": tool_calls,
+            }
+        texts = _search_world_memory_by_keywords(state, keywords)
+        observation = {
+            "tool": "search_memory",
+            "keywords": keywords,
+            "results": texts,
+        }
+        tool_calls.append(observation)
+        messages.extend([
+            {"role": "assistant", "content": _stable_json(result)},
+            {
+                "role": "user",
+                "content": (
+                    "【工具结果：search_memory】\n"
+                    + _stable_json(observation)
+                    + "\n请基于工具结果继续判断；如信息已足够，输出最终 intent/resolved。"
+                ),
+            },
+        ])
+    return None, {
+        "source": "fallback",
+        "model": "local",
+        "fallback_reason": "tool_limit",
+        "tool_calls": tool_calls,
     }
 
 
