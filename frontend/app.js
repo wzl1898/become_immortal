@@ -12,6 +12,7 @@ const saveListEl = document.getElementById("save-list");
 const saveEmptyEl = document.getElementById("save-empty");
 const statusPanel = document.getElementById("status-panel");
 const statusToggle = document.getElementById("status-toggle");
+const statusReconcile = document.getElementById("status-reconcile");
 const tracePanel = document.getElementById("trace-panel");
 const traceList = document.getElementById("trace-list");
 const traceLiveState = document.getElementById("trace-live-state");
@@ -60,6 +61,27 @@ statusToggle.addEventListener("click", () => {
   setStatusCollapsed(!statusPanel.classList.contains("collapsed"));
 });
 
+statusReconcile.addEventListener("click", async () => {
+  if (!sessionId || statusReconcile.disabled) return;
+  statusReconcile.disabled = true;
+  statusReconcile.textContent = "校准中…";
+  try {
+    const data = await fetchJSON("/api/reconcile-character-state", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sid: sessionId }),
+    });
+    renderCharacterState(data.character_state || {});
+    const keys = Object.keys(data.updates || {});
+    addBlock("hint", keys.length ? `状态已校准：${keys.join("、")}` : "正文没有发现新的状态变化");
+  } catch (e) {
+    addBlock("error", `【状态校准失败】${e.message}`);
+  } finally {
+    statusReconcile.disabled = false;
+    statusReconcile.textContent = "校准状态";
+  }
+});
+
 let sessionId = null;
 let currentName = "";
 let busy = false;
@@ -90,6 +112,7 @@ const LLM_REQUEST_LABELS = {
   narrative: "剧情生成",
   memory_extract: "记忆提取",
   director_audit: "执行审计",
+  state_reconcile: "状态校准",
   inquiry: "记忆问询",
   legacy_director: "旧版导演",
 };

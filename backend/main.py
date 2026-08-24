@@ -266,6 +266,21 @@ async def character_state(sid: str):
     return {"character_state": state}
 
 
+@app.post("/api/reconcile-character-state")
+async def reconcile_character_state(body: SidBody):
+    if not game.exists(body.sid):
+        raise HTTPException(404, "存档不存在")
+    transcript = game.get_transcript(body.sid) or []
+    latest = next((blk.get("text", "") for blk in reversed(transcript)
+                   if blk.get("role") == "narration"), "")
+    if not latest.strip():
+        raise HTTPException(400, "还没有可校准的剧情正文")
+    try:
+        return await game.reconcile_character_state_from_text(body.sid, latest)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"状态校准失败：{exc}") from exc
+
+
 # ---- 世界记忆问询（旁路：不推进剧情，只补全背景）----
 
 class WorldMemoryDeleteBody(BaseModel):

@@ -24,13 +24,10 @@
     <aside id="status-panel" class="status-panel empty" aria-label="身体状态">
       <div class="status-head">
         <h2 class="status-title">状态与物品</h2>
-        <button
-          id="status-toggle"
-          class="status-toggle"
-          type="button"
-          aria-expanded="true"
-          title="收起状态与物品栏"
-        >‹</button>
+        <div class="status-actions">
+          <button id="status-reconcile" class="ghost status-reconcile" type="button" title="从最新正文校准状态栏">校准状态</button>
+          <button id="status-toggle" class="status-toggle" type="button" aria-expanded="true" title="收起状态与物品栏">‹</button>
+        </div>
       </div>
       <div id="status-body" class="status-body"></div>
       <p class="status-empty">尚未入世</p>

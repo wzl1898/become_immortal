@@ -109,6 +109,8 @@ html, body {
   border-bottom: 1px solid #23272f;
   padding-bottom: 8px;
 }
+.status-actions { display: flex; align-items: center; gap: 6px; }
+.status-reconcile { padding: 4px 8px; font-size: 11px; }
 .status-title {
   flex: 1;
   margin: 0;

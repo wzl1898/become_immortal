@@ -113,6 +113,13 @@ INQUIRY_MAX_TOKENS = int(os.getenv("INQUIRY_MAX_TOKENS", "350"))
 DIRECTOR_SKELETON_MAX_TOKENS = int(os.getenv("DIRECTOR_SKELETON_MAX_TOKENS", "600"))
 DIRECTOR_LLM_CONFIG = config_from_env("DIRECTOR_LLM")
 DIRECTOR_CAUSAL_LLM_CONFIG = replace(DIRECTOR_LLM_CONFIG, timeout_seconds=None)
+STATE_RECONCILE_LLM_CONFIG = replace(
+    config_from_env("STATE_RECONCILE_LLM"),
+    protocol=os.getenv("STATE_RECONCILE_LLM_PROTOCOL", "anthropic").strip().lower(),
+    base_url=os.getenv("STATE_RECONCILE_LLM_BASE_URL", "https://api.anthropic.com/v1").rstrip("/"),
+    api_key=os.getenv("STATE_RECONCILE_LLM_API_KEY", os.getenv("ANTHROPIC_API_KEY", "")),
+    model=os.getenv("STATE_RECONCILE_LLM_MODEL", "claude-3-5-haiku-latest"),
+)
 _CAUSAL_TASKS: dict[str, asyncio.Task] = {}
 _NEXT_EVENT_TASKS: dict[str, asyncio.Task] = {}
 
@@ -346,6 +353,56 @@ def _parse_character_state(status_text: str | None, turn: int) -> dict:
     character_state["turn"] = turn
     character_state["updated_at"] = time.time()
     return character_state
+
+
+async def reconcile_character_state_from_text(
+    session_id: str, assistant_content: str, *, audit: dict | None = None
+) -> dict:
+    """Extract only explicitly stated state changes from the latest narration."""
+    state = _get(session_id)
+    if state is None:
+        raise ValueError("存档不存在")
+    current = dict(state.get("character_state") or {})
+    fields = {key: label for key, label in _STATE_LABELS}
+    prompt = (
+        "你是状态校准器。只从给定剧情正文中提取主角明确陈述的状态变化，不能常识推断。\n"
+        "仅允许字段：" + _stable_json(fields) + "。\n"
+        "正文未提及的字段必须省略；与当前状态相同的字段必须省略。每个更新必须有正文原句作为 evidence。\n"
+        "只输出 JSON：{\"updates\":{字段:新值},\"evidence\":{字段:正文直接证据}}。没有变化则两个对象都为空。\n\n"
+        "【当前状态】\n" + _stable_json({k: current.get(k, "") for k in fields}) +
+        "\n【剧情正文】\n" + _narration_body(assistant_content)
+    )
+    raw = await complete_chat(
+        [{"role": "system", "content": "严格输出合法 JSON，不要 Markdown。"},
+         {"role": "user", "content": prompt}],
+        temperature=0,
+        max_tokens=300,
+        config=STATE_RECONCILE_LLM_CONFIG,
+        request_type="state_reconcile",
+        session_id=session_id,
+        turn=int(state.get("turns") or 0),
+    )
+    result = _extract_json_object(raw) or {}
+    proposed = result.get("updates") if isinstance(result.get("updates"), dict) else {}
+    evidence = result.get("evidence") if isinstance(result.get("evidence"), dict) else {}
+    updates = {}
+    clean_evidence = {}
+    body = _narration_body(assistant_content)
+    for key in fields:
+        value = proposed.get(key)
+        quote = evidence.get(key)
+        if isinstance(value, str) and value.strip() and value.strip() != str(current.get(key) or "").strip() \
+                and isinstance(quote, str) and quote.strip() and quote.strip() in body:
+            updates[key] = value.strip()
+            clean_evidence[key] = quote.strip()[:360]
+    if updates:
+        merged = dict(current)
+        merged.update(updates)
+        merged["turn"] = int(state.get("turns") or 0)
+        merged["updated_at"] = time.time()
+        state["character_state"] = merged
+        store.save_character_state(session_id, merged)
+    return {"character_state": state.get("character_state") or current, "updates": updates, "evidence": clean_evidence}
 
 
 def _character_state_dossier(character_state: dict) -> str:
@@ -3164,6 +3221,13 @@ async def _run_director_audit(
         state["director_state"] = director
         store.save_director_state(session_id, director)
         store.save_opportunity_reward_binding(session_id, director.get("last_payoff"))
+        # 状态校准严格排在审计完成并落盘之后，失败不影响本轮剧情。
+        try:
+            await reconcile_character_state_from_text(
+                session_id, assistant_content, audit=audit
+            )
+        except Exception:  # noqa: BLE001
+            _LOG.exception("character state reconciliation failed for session %s turn %s", session_id, turn)
     except Exception:  # noqa: BLE001
         _LOG.exception("director audit failed for session %s turn %s", session_id, turn)
 
