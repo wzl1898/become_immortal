@@ -355,13 +355,36 @@ html, body {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 @media (max-width: 600px) {
-  .topbar { align-items: flex-start; flex-wrap: wrap; gap: 10px; padding-bottom: 10px; }
-  .topbar h1 { width: 100%; }
+  html, body { overflow: hidden; }
+  .app { width: 100%; max-width: none; }
+  .topbar { align-items: center; gap: 8px; padding: 10px 12px; }
+  .topbar h1 { width: auto; flex: none; font-size: 20px; letter-spacing: 0.28em; }
   .actions {
-    width: 100%; overflow-x: auto; padding-bottom: 4px;
-    scrollbar-width: thin;
+    min-width: 0; flex: 1; justify-content: flex-end; overflow-x: auto;
+    padding-bottom: 2px; scrollbar-width: none;
   }
-  .actions > * { flex: none; }
+  .actions::-webkit-scrollbar { display: none; }
+  .actions > * { flex: none; font-size: 12px; padding: 6px 9px; }
+  .save-name { display: none; }
+  .status-panel {
+    margin: 8px 10px 0; padding: 9px 11px; border-radius: 8px;
+    max-height: 27vh; font-size: 12px;
+  }
+  .status-head { margin-bottom: 6px; padding-bottom: 6px; }
+  .status-title { font-size: 13px; }
+  .status-reconcile { font-size: 11px; padding: 4px 7px; }
+  .status-body { flex-direction: column; gap: 4px; overflow-y: auto; }
+  .status-row .k { width: 2.8em; }
+  .trace-panel { display: none; }
+  .story { padding: 14px 14px 8px; font-size: 16px; line-height: 1.85; }
+  .block { margin-bottom: 17px; }
+  .input-bar {
+    position: relative; flex: none; gap: 7px; padding: 8px 10px;
+    padding-bottom: max(8px, env(safe-area-inset-bottom));
+    background: var(--bg);
+  }
+  #action { min-width: 0; height: 44px; padding: 10px 12px; border-radius: 8px; }
+  #send { flex: none; height: 44px; padding: 0 16px; border-radius: 8px; }
 }
 
 /* 抽屉 */
@@ -373,6 +396,10 @@ html, body {
   background: var(--panel); border-left: 1px solid #2a2f38;
   padding: 20px; overflow-y: auto; z-index: 1;
   display: flex; flex-direction: column; gap: 14px;
+}
+@media (max-width: 600px) {
+  .drawer-panel { width: 100%; padding: 14px; padding-top: max(14px, env(safe-area-inset-top)); }
+  .drawer-head h2 { font-size: 17px; }
 }
 .drawer-head { display: flex; align-items: center; justify-content: space-between; }
 .drawer-head h2 { margin: 0; font-size: 18px; color: var(--accent-soft); letter-spacing: 0.1em; }
