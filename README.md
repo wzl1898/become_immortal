@@ -33,10 +33,11 @@ cp .env.example .env
 
 # 3. 启动
 cd backend
-../.venv/bin/python -m uvicorn main:app --reload --port 8888 --timeout-graceful-shutdown 3
+../.venv/bin/python -m uvicorn main:app --reload --host 0.0.0.0 --port 8888 --timeout-graceful-shutdown 3
 ```
 
-打开浏览器访问 http://127.0.0.1:8888 即可开玩。
+电脑本机访问 `http://127.0.0.1:8888`；同一局域网的手机访问电脑的局域网 IP，例如
+`http://192.168.1.251:8888`。手机和电脑需要连接同一个 Wi-Fi，且系统防火墙需允许 8888 端口。
 
 > `--timeout-graceful-shutdown 3`：`--reload` 检测到改动重启时，最多等 3 秒就断开旧连接。
 > 否则正在进行的 SSE 流式请求（开场/行动生成）会让重启卡在 "Waiting for connections to close"。
