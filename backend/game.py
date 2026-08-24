@@ -116,10 +116,19 @@ DIRECTOR_CAUSAL_LLM_CONFIG = replace(DIRECTOR_LLM_CONFIG, timeout_seconds=None)
 STATE_RECONCILE_LLM_CONFIG = replace(
     config_from_env("STATE_RECONCILE_LLM"),
     protocol=os.getenv("STATE_RECONCILE_LLM_PROTOCOL", "anthropic").strip().lower(),
-    base_url=os.getenv("STATE_RECONCILE_LLM_BASE_URL", "https://api.anthropic.com/v1").rstrip("/"),
+    base_url=os.getenv(
+        "STATE_RECONCILE_LLM_BASE_URL",
+        os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1"),
+    ).rstrip("/"),
     api_key=os.getenv(
         "STATE_RECONCILE_LLM_API_KEY",
-        os.getenv("ANTHROPIC_API_KEY", os.getenv("CLAUDE_API_KEY", os.getenv("CLAUDE_OPUS_API_KEY", ""))),
+        os.getenv(
+            "ANTHROPIC_API_KEY",
+            os.getenv(
+                "ANTHROPIC_AUTH_TOKEN",
+                os.getenv("CLAUDE_API_KEY", os.getenv("CLAUDE_OPUS_API_KEY", "")),
+            ),
+        ),
     ),
     model=os.getenv("STATE_RECONCILE_LLM_MODEL", "claude-3-5-haiku-latest"),
 )
