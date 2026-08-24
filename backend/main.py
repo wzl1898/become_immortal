@@ -113,15 +113,21 @@ def _narrate(messages: list[dict], sid: str, user_content: str | None):
     )
 
 
-def _answer_inquiry(messages: list[dict], sid: str, question: str):
-    """问询流：结束后只把问答追加进世界记忆，不推进剧情。"""
-    return _stream(
-        messages,
-        lambda text: game.commit_inquiry_memory(sid, question, text),
-        request_type="inquiry",
-        session_id=sid,
-        turn=game.get_turns(sid) or 0,
-    )
+async def _answer_inquiry(sid: str, question: str):
+    """问询 ReAct 流：工具循环结束后发送答案并写入世界记忆。"""
+    try:
+        answer, _tool_calls = await game.run_inquiry_react(sid, question)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        yield _sse("error", {"message": str(exc)})
+        return
+    if not answer.strip():
+        yield _sse("error", {"message": "模型没有返回可显示的问询答案，请重试。"})
+        return
+    yield _sse("delta", {"text": answer})
+    game.commit_inquiry_memory(sid, question, answer)
+    yield _sse("done", {})
 
 
 class NewGameBody(BaseModel):
@@ -273,9 +279,8 @@ def _inquiry_response(sid: str, q: str) -> StreamingResponse:
     q = (q or "").strip()
     if not q:
         raise HTTPException(400, "问题不能为空")
-    messages = game.messages_for_inquiry(sid, q)
     return StreamingResponse(
-        _answer_inquiry(messages, sid, q),
+        _answer_inquiry(sid, q),
         media_type="text/event-stream",
     )
 

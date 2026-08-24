@@ -1,6 +1,9 @@
+import asyncio
+import json
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import store
 import game
@@ -136,6 +139,52 @@ class WorldMemoryParseTests(unittest.TestCase):
             "陈九曾替吴三斤运送灵材。",
         ])
         self.assertTrue(all(isinstance(item, str) for item in results))
+
+    def test_inquiry_react_loop_searches_memory_and_answers(self):
+        sid = "inquiry-react-test"
+        state = {
+            "session_id": sid,
+            "turns": 8,
+            "messages": [{"role": "system", "content": "fixed"}],
+            "transcript": [{"role": "narration", "text": "你正在查看陈九短刀。"}],
+            "world_memory": [{
+                "id": "m1",
+                "type": "item",
+                "text": "陈九短刀来自黑风坳独眼蛇。",
+                "entities": ["陈九短刀", "独眼蛇"],
+                "importance": 0.8,
+            }],
+        }
+        game._CACHE[sid] = state
+        calls = []
+
+        async def fake_complete(messages, *args, **kwargs):
+            calls.append(messages)
+            if len(calls) == 1:
+                self.assertNotIn("陈九短刀来自黑风坳独眼蛇。", messages[-1]["content"])
+                return json.dumps({
+                    "tool": "search_memory",
+                    "arguments": {"keywords": ["陈九短刀", "独眼蛇"]},
+                }, ensure_ascii=False)
+            self.assertIn("陈九短刀来自黑风坳独眼蛇。", messages[-1]["content"])
+            self.assertNotIn('"id"', messages[-1]["content"])
+            return json.dumps({
+                "answer": "据你所知，陈九短刀来自黑风坳独眼蛇。"
+            }, ensure_ascii=False)
+
+        try:
+            with patch.object(game.constraints, "inquiry_constraints", return_value="knowledge"), patch.object(
+                game, "complete_chat", fake_complete
+            ):
+                answer, tool_calls = asyncio.run(game.run_inquiry_react(
+                    sid, "陈九短刀和独眼蛇有什么关系？"
+                ))
+        finally:
+            game._CACHE.pop(sid, None)
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(answer, "据你所知，陈九短刀来自黑风坳独眼蛇。")
+        self.assertEqual(tool_calls[0]["results"], ["陈九短刀来自黑风坳独眼蛇。"])
 
 
 if __name__ == "__main__":

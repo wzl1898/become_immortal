@@ -107,7 +107,9 @@ DIRECTOR_PACING_MAX_TOKENS = int(os.getenv(
     "DIRECTOR_PACING_MAX_TOKENS", _DIRECTOR_LEGACY_MAX_TOKENS or "450"
 ))
 PACING_REACT_MAX_TOOL_CALLS = 2
-PACING_MEMORY_SEARCH_MAX_RESULTS = 8
+MEMORY_SEARCH_MAX_RESULTS = 8
+INQUIRY_REACT_MAX_TOOL_CALLS = PACING_REACT_MAX_TOOL_CALLS
+INQUIRY_MAX_TOKENS = int(os.getenv("INQUIRY_MAX_TOKENS", "350"))
 DIRECTOR_SKELETON_MAX_TOKENS = int(os.getenv("DIRECTOR_SKELETON_MAX_TOKENS", "600"))
 DIRECTOR_LLM_CONFIG = config_from_env("DIRECTOR_LLM")
 DIRECTOR_CAUSAL_LLM_CONFIG = replace(DIRECTOR_LLM_CONFIG, timeout_seconds=None)
@@ -646,7 +648,7 @@ def _recall_world_memory(state: dict, query: str) -> list[dict]:
 
 
 def _search_world_memory_by_keywords(
-    state: dict, keywords: list[str] | str, limit: int = PACING_MEMORY_SEARCH_MAX_RESULTS
+    state: dict, keywords: list[str] | str, limit: int = MEMORY_SEARCH_MAX_RESULTS
 ) -> list[str]:
     """Search durable memories by literal keywords and return text only."""
     raw_keywords = [keywords] if isinstance(keywords, str) else keywords
@@ -680,7 +682,7 @@ def _search_world_memory_by_keywords(
     for *_score, text in matches:
         if text not in results:
             results.append(text)
-        if len(results) >= max(1, min(int(limit), PACING_MEMORY_SEARCH_MAX_RESULTS)):
+        if len(results) >= max(1, min(int(limit), MEMORY_SEARCH_MAX_RESULTS)):
             break
     return results
 
@@ -871,25 +873,74 @@ def _latest_scene(transcript: list[dict], limit: int = 300) -> str:
 def messages_for_inquiry(session_id: str, question: str) -> list[dict]:
     """构造用于"世界记忆"问询的独立消息数组（不复用 GM 历史）。
 
-    只给问询引擎：当前情境（最近情节正文）+ 相关世界记忆 + 玩家的问题，
-    让它基于"主角此刻理应知道的见识"作答，且与已发生剧情、长期记忆一致。
+    初始输入只含当前情境、知识边界和问题。长期记忆由问询 Agent 在
+    ReAct 循环中按需调用 search_memory，避免预先塞入无关召回结果。
     """
     state = _get(session_id)
     scene = _recent_scene(state["transcript"])
-    query = "\n\n".join(p for p in (question, scene) if p)
     knowledge = constraints.inquiry_constraints(session_id)
-    memory = _world_memory_dossier(_recall_world_memory(state, query))
     messages = [{"role": "system", "content": INQUIRY_SYSTEM_PROMPT}]
     if knowledge:
         messages.append({"role": "system", "content": knowledge.rstrip()})
     parts = []
     if scene:
         parts.append(f"【当前情境（主角所处的最近情节）】\n{scene}")
-    if memory:
-        parts.append(memory.rstrip())
     parts.append(f"【主角想打听的】\n{question}")
     messages.append({"role": "user", "content": "\n\n".join(parts)})
     return messages
+
+
+async def run_inquiry_react(
+    session_id: str, question: str
+) -> tuple[str, list[dict]]:
+    """Answer an inquiry through the same bounded keyword-memory tool loop."""
+    state = _get(session_id)
+    if state is None:
+        raise ValueError("存档不存在")
+    messages = messages_for_inquiry(session_id, question)
+    tool_calls: list[dict] = []
+    for _step in range(INQUIRY_REACT_MAX_TOOL_CALLS + 1):
+        raw = await complete_chat(
+            messages,
+            temperature=0.2,
+            max_tokens=INQUIRY_MAX_TOKENS,
+            request_type="inquiry",
+            session_id=session_id,
+            turn=int(state.get("turns") or 0),
+        )
+        result = _extract_json_object(raw)
+        if result is None:
+            answer = _clean_markdown(raw)
+            if answer:
+                return answer, tool_calls
+            raise ValueError("问询 Agent 返回了无效结果")
+        keywords = _memory_search_tool_keywords(result)
+        if keywords is None:
+            answer = str(result.get("answer") or "").strip()
+            if answer:
+                return answer, tool_calls
+            raise ValueError("问询 Agent 未返回 answer")
+        if len(tool_calls) >= INQUIRY_REACT_MAX_TOOL_CALLS:
+            raise RuntimeError("问询 Agent 超过记忆搜索次数上限")
+        texts = _search_world_memory_by_keywords(state, keywords)
+        observation = {
+            "tool": "search_memory",
+            "keywords": keywords,
+            "results": texts,
+        }
+        tool_calls.append(observation)
+        messages.extend([
+            {"role": "assistant", "content": _stable_json(result)},
+            {
+                "role": "user",
+                "content": (
+                    "【工具结果：search_memory】\n"
+                    + _stable_json(observation)
+                    + "\n请基于工具结果继续；如信息已足够，输出最终 answer。"
+                ),
+            },
+        ])
+    raise RuntimeError("问询 Agent 超过记忆搜索次数上限")
 
 
 def commit(session_id: str, user_content: str | None, assistant_content: str) -> None:
@@ -2033,7 +2084,7 @@ async def _call_director_text_agent(
     }
 
 
-def _pacing_memory_tool_keywords(result: dict) -> list[str] | None:
+def _memory_search_tool_keywords(result: dict) -> list[str] | None:
     if result.get("tool") != "search_memory":
         return None
     arguments = result.get("arguments") if isinstance(result.get("arguments"), dict) else {}
@@ -2060,7 +2111,7 @@ async def _run_pacing_agent(
         )
         if result is None:
             return None, {**meta, "tool_calls": tool_calls}
-        keywords = _pacing_memory_tool_keywords(result)
+        keywords = _memory_search_tool_keywords(result)
         if keywords is None:
             return result, {**meta, "tool_calls": tool_calls}
         if len(tool_calls) >= PACING_REACT_MAX_TOOL_CALLS:
