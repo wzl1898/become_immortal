@@ -1,5 +1,10 @@
 // 修仙文字冒险 —— 前端逻辑（含存档/读档）
 const storyEl = document.getElementById("story");
+const appEl = document.getElementById("app");
+const userGate = document.getElementById("user-gate");
+const userForm = document.getElementById("user-form");
+const userIdInput = document.getElementById("user-id-input");
+const userError = document.getElementById("user-error");
 const form = document.getElementById("input-form");
 const input = document.getElementById("action");
 const sendBtn = document.getElementById("send");
@@ -48,14 +53,12 @@ const llmTokenSummaryEl = document.getElementById("llm-token-summary");
 const llmListEl = document.getElementById("llm-list");
 const llmEmptyEl = document.getElementById("llm-empty");
 
-const USER_NAME_KEY = "become-immortal-user-name";
 const USER_ID_KEY = "become-immortal-user-id";
-let currentUserName = localStorage.getItem(USER_NAME_KEY) || "默认用户";
-let currentUserId = localStorage.getItem(USER_ID_KEY) || "default";
+let currentUserId = "";
 
 function renderCurrentUser() {
-  userBtn.textContent = currentUserName;
-  userBtn.title = `当前用户：${currentUserName}。点击切换`;
+  userBtn.textContent = currentUserId;
+  userBtn.title = `当前 userid：${currentUserId}。点击切换`;
 }
 
 function apiFetch(url, options = {}) {
@@ -64,12 +67,8 @@ function apiFetch(url, options = {}) {
   return fetch(url, { ...options, headers });
 }
 
-function userIdFromName(name) {
-  const normalized = name.trim().toLowerCase();
-  if (normalized === "默认用户") return "default";
-  return encodeURIComponent(normalized).replace(/[!'()*]/g, (char) =>
-    `%${char.charCodeAt(0).toString(16).toUpperCase()}`
-  );
+function validUserId(value) {
+  return /^[A-Za-z0-9._%~-]{1,64}$/.test(value);
 }
 
 function clearStatus() {
@@ -1503,19 +1502,6 @@ llmDrawer.querySelector(".drawer-mask").addEventListener("click", closeLLMDrawer
 // ---- 启动：有存档则续上最近一局，否则开新局 ----
 async function switchUser() {
   if (busy) return;
-  const name = prompt("切换用户（同名用户会看到同一组存档）：", currentUserName);
-  if (!name || !name.trim() || name.trim() === currentUserName) return;
-  const nextName = name.trim();
-  const nextId = userIdFromName(nextName);
-  if (!nextId || nextId.length > 64) {
-    alert("用户名过长，请控制在 20 个汉字或 64 个英文字符以内。");
-    return;
-  }
-  currentUserName = nextName;
-  currentUserId = nextId;
-  localStorage.setItem(USER_NAME_KEY, currentUserName);
-  localStorage.setItem(USER_ID_KEY, currentUserId);
-  renderCurrentUser();
   sessionId = null;
   setCurrent(null, "");
   storyEl.innerHTML = "";
@@ -1527,21 +1513,49 @@ async function switchUser() {
   closeDirectorDrawer();
   closeConstraintDrawer();
   closeLLMDrawer();
-  await boot();
+  currentUserId = "";
+  userIdInput.value = localStorage.getItem(USER_ID_KEY) || "";
+  appEl.classList.add("locked");
+  userGate.classList.remove("hidden");
+  userIdInput.focus();
 }
 
-async function boot() {
-  try {
-    const saves = await fetchSaves();
-    if (saves.length > 0) {
-      await loadGame(saves[0].id, saves[0].name);
-      return;
-    }
-  } catch (_) { /* 忽略，退回新局 */ }
+async function boot(saves) {
+  if (saves.length > 0) {
+    await loadGame(saves[0].id, saves[0].name);
+    return;
+  }
   await newGame();
 }
 
-renderCurrentUser();
+userForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const nextUserId = userIdInput.value.trim();
+  if (!validUserId(nextUserId)) {
+    userError.textContent = "请输入 1–64 位 userid，仅可使用字母、数字及 . _ % ~ -";
+    userIdInput.focus();
+    return;
+  }
+  userError.textContent = "";
+  const submit = userForm.querySelector("button[type=submit]");
+  submit.disabled = true;
+  currentUserId = nextUserId;
+  try {
+    const saves = await fetchSaves();
+    localStorage.setItem(USER_ID_KEY, currentUserId);
+    renderCurrentUser();
+    userGate.classList.add("hidden");
+    appEl.classList.remove("locked");
+    await boot(saves);
+  } catch (error) {
+    currentUserId = "";
+    userError.textContent = error.message;
+  } finally {
+    submit.disabled = false;
+  }
+});
+
+userIdInput.value = localStorage.getItem(USER_ID_KEY) || "";
 userBtn.addEventListener("click", switchUser);
-boot();
+userIdInput.focus();
 setInterval(refreshAgentTraces, 600);

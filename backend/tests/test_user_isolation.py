@@ -73,13 +73,18 @@ class UserIsolationTest(unittest.TestCase):
     def test_existing_saves_belong_to_default_user_after_migration(self):
         sid = store.create("旧存档", [])
 
-        default_saves = self.client.get("/api/saves").json()["saves"]
+        default_saves = self.client.get(
+            "/api/saves", headers=self.headers("default")
+        ).json()["saves"]
         other_saves = self.client.get(
             "/api/saves", headers=self.headers("other")
         ).json()["saves"]
 
         self.assertIn(sid, [item["id"] for item in default_saves])
         self.assertEqual([], other_saves)
+
+    def test_user_id_header_is_required(self):
+        self.assertEqual(422, self.client.get("/api/saves").status_code)
 
 
 if __name__ == "__main__":
