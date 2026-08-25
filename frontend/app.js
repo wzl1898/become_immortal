@@ -3,6 +3,7 @@ const storyEl = document.getElementById("story");
 const form = document.getElementById("input-form");
 const input = document.getElementById("action");
 const sendBtn = document.getElementById("send");
+const voiceInputBtn = document.getElementById("voice-input");
 const restartBtn = document.getElementById("restart");
 const savesBtn = document.getElementById("saves-btn");
 const saveNameEl = document.getElementById("save-name");
@@ -95,6 +96,58 @@ let loreBusy = false; // 问询独立忙态，不锁主行动
 const liveLLMRequests = new Map();
 let liveLLMTimer = null;
 let llmRefreshTimer = null;
+
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+let speechRecognition = null;
+let speechBaseText = "";
+if (SpeechRecognition) {
+  speechRecognition = new SpeechRecognition();
+  speechRecognition.lang = "zh-CN";
+  speechRecognition.continuous = false;
+  speechRecognition.interimResults = true;
+  speechRecognition.onstart = () => {
+    voiceInputBtn.classList.add("recording");
+    voiceInputBtn.textContent = "停止";
+    voiceInputBtn.title = "停止语音输入";
+  };
+  speechRecognition.onresult = (event) => {
+    let text = "";
+    for (let i = event.resultIndex; i < event.results.length; i += 1) {
+      text += event.results[i][0].transcript;
+    }
+    input.value = `${speechBaseText}${text}`.trimStart();
+    input.focus();
+  };
+  speechRecognition.onerror = (event) => {
+    if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+      addBlock("error", "【语音输入】浏览器没有授予麦克风权限，请在地址栏中允许麦克风访问。");
+    } else if (event.error !== "aborted" && event.error !== "no-speech") {
+      addBlock("error", `【语音输入】${event.error}`);
+    }
+  };
+  speechRecognition.onend = () => {
+    voiceInputBtn.classList.remove("recording");
+    voiceInputBtn.textContent = "麦克风";
+    voiceInputBtn.title = "语音输入";
+  };
+} else {
+  voiceInputBtn.disabled = true;
+  voiceInputBtn.title = "当前浏览器不支持语音输入";
+}
+
+voiceInputBtn.addEventListener("click", () => {
+  if (!speechRecognition || busy || input.disabled) return;
+  if (voiceInputBtn.classList.contains("recording")) {
+    speechRecognition.stop();
+    return;
+  }
+  speechBaseText = input.value ? `${input.value.trim()} ` : "";
+  try {
+    speechRecognition.start();
+  } catch (error) {
+    if (error.name !== "InvalidStateError") addBlock("error", `【语音输入】${error.message}`);
+  }
+});
 
 const LLM_REQUEST_LABELS = {
   opening: "开场生成",
