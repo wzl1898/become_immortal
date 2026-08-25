@@ -18,6 +18,7 @@ import uuid
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 DB_PATH = os.path.join(DATA_DIR, "saves.db")
+DEFAULT_USER_ID = "default"
 DEFAULT_WORLD_SEASON = "\u6df1\u79cb"
 DEFAULT_CALENDAR_LABEL = "\u4ed9\u5386"
 
@@ -36,6 +37,7 @@ def init() -> None:
             """
             CREATE TABLE IF NOT EXISTS saves (
                 id          TEXT PRIMARY KEY,
+                user_id     TEXT NOT NULL DEFAULT 'default',
                 name        TEXT NOT NULL,
                 messages    TEXT NOT NULL,   -- JSON: list[dict]
                 transcript  TEXT NOT NULL,   -- JSON: list[dict{role,text}]
@@ -55,6 +57,10 @@ def init() -> None:
         )
         # 老库迁移：改动前建的表没有 lore/inventory 列，幂等补上
         cols = {row["name"] for row in conn.execute("PRAGMA table_info(saves)")}
+        if "user_id" not in cols:
+            conn.execute(
+                "ALTER TABLE saves ADD COLUMN user_id TEXT NOT NULL DEFAULT 'default'"
+            )
         if "lore" not in cols:
             conn.execute("ALTER TABLE saves ADD COLUMN lore TEXT NOT NULL DEFAULT '[]'")
         if "inventory" not in cols:
@@ -71,6 +77,10 @@ def init() -> None:
             conn.execute("ALTER TABLE saves ADD COLUMN stage_summary TEXT NOT NULL DEFAULT ''")
         if "summary_turn" not in cols:
             conn.execute("ALTER TABLE saves ADD COLUMN summary_turn INTEGER NOT NULL DEFAULT 0")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_saves_user_updated "
+            "ON saves(user_id, updated_at DESC)"
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS llm_request_metrics (
@@ -265,15 +275,17 @@ def _migrate_lore_to_world_memory(conn: sqlite3.Connection) -> None:
             )
 
 
-def create(name: str, messages: list[dict]) -> str:
+def create(
+    name: str, messages: list[dict], user_id: str = DEFAULT_USER_ID
+) -> str:
     """新建存档，返回 save_id。"""
     sid = uuid.uuid4().hex
     now = time.time()
     with _conn() as conn:
         conn.execute(
-            "INSERT INTO saves (id, name, messages, transcript, turns, lore, inventory, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, 0, '[]', '[]', ?, ?)",
-            (sid, name, json.dumps(messages, ensure_ascii=False), "[]", now, now),
+            "INSERT INTO saves (id, user_id, name, messages, transcript, turns, lore, inventory, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, 0, '[]', '[]', ?, ?)",
+            (sid, user_id, name, json.dumps(messages, ensure_ascii=False), "[]", now, now),
         )
         _ensure_default_save_world_state(conn, sid)
     return sid
@@ -1233,12 +1245,22 @@ def exists(sid: str) -> bool:
     return row is not None
 
 
-def list_saves() -> list[dict]:
-    """列出所有存档的摘要（不含完整 messages/transcript），按最近更新排序。"""
+def owned_by(sid: str, user_id: str) -> bool:
+    """Return whether a save belongs to the given local user."""
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM saves WHERE id=? AND user_id=?", (sid, user_id)
+        ).fetchone()
+    return row is not None
+
+
+def list_saves(user_id: str = DEFAULT_USER_ID) -> list[dict]:
+    """列出当前用户的存档摘要，按最近更新排序。"""
     with _conn() as conn:
         rows = conn.execute(
             "SELECT id, name, turns, transcript, created_at, updated_at "
-            "FROM saves ORDER BY updated_at DESC"
+            "FROM saves WHERE user_id=? ORDER BY updated_at DESC",
+            (user_id,),
         ).fetchall()
     result = []
     for r in rows:
@@ -1261,20 +1283,26 @@ def list_saves() -> list[dict]:
     return result
 
 
-def rename(sid: str, name: str) -> bool:
+def rename(sid: str, name: str, user_id: str = DEFAULT_USER_ID) -> bool:
     with _conn() as conn:
         cur = conn.execute(
-            "UPDATE saves SET name=?, updated_at=? WHERE id=?",
-            (name, time.time(), sid),
+            "UPDATE saves SET name=?, updated_at=? WHERE id=? AND user_id=?",
+            (name, time.time(), sid, user_id),
         )
     return cur.rowcount > 0
 
 
-def delete(sid: str) -> bool:
+def delete(sid: str, user_id: str = DEFAULT_USER_ID) -> bool:
     with _conn() as conn:
+        if conn.execute(
+            "SELECT 1 FROM saves WHERE id=? AND user_id=?", (sid, user_id)
+        ).fetchone() is None:
+            return False
         conn.execute("DELETE FROM save_opportunity_rewards WHERE save_id=?", (sid,))
         conn.execute("DELETE FROM save_world_time WHERE save_id=?", (sid,))
         conn.execute("DELETE FROM llm_request_metrics WHERE save_id=?", (sid,))
         conn.execute("DELETE FROM agent_traces WHERE save_id=?", (sid,))
-        cur = conn.execute("DELETE FROM saves WHERE id=?", (sid,))
+        cur = conn.execute(
+            "DELETE FROM saves WHERE id=? AND user_id=?", (sid, user_id)
+        )
     return cur.rowcount > 0

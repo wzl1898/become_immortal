@@ -154,10 +154,12 @@ def init() -> None:
     store.init()
 
 
-def create_session(name: str = DEFAULT_NAME) -> str:
+def create_session(
+    name: str = DEFAULT_NAME, user_id: str = store.DEFAULT_USER_ID
+) -> str:
     """新建一局并落库，返回 save_id。"""
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    sid = store.create(name, messages)
+    sid = store.create(name, messages, user_id)
     _CACHE[sid] = {
         "session_id": sid,
         "messages": messages,
@@ -177,6 +179,10 @@ def create_session(name: str = DEFAULT_NAME) -> str:
 
 def exists(session_id: str) -> bool:
     return session_id in _CACHE or store.exists(session_id)
+
+
+def owned_by(session_id: str, user_id: str) -> bool:
+    return store.owned_by(session_id, user_id)
 
 
 def _get(session_id: str) -> dict | None:
@@ -3747,14 +3753,20 @@ def delete_lore(session_id: str, index: int) -> list[dict] | None:
 
 # ---- 存档管理（转发到 store）----
 
-def list_saves() -> list[dict]:
-    return store.list_saves()
+def list_saves(user_id: str = store.DEFAULT_USER_ID) -> list[dict]:
+    return store.list_saves(user_id)
 
 
-def rename(session_id: str, name: str) -> bool:
-    return store.rename(session_id, name)
+def rename(
+    session_id: str, name: str, user_id: str = store.DEFAULT_USER_ID
+) -> bool:
+    return store.rename(session_id, name, user_id)
 
 
-def delete(session_id: str) -> bool:
-    _CACHE.pop(session_id, None)
-    return store.delete(session_id)
+def delete(
+    session_id: str, user_id: str = store.DEFAULT_USER_ID
+) -> bool:
+    deleted = store.delete(session_id, user_id)
+    if deleted:
+        _CACHE.pop(session_id, None)
+    return deleted

@@ -7,6 +7,7 @@ const voiceInputBtn = document.getElementById("voice-input");
 const restartBtn = document.getElementById("restart");
 const savesBtn = document.getElementById("saves-btn");
 const saveNameEl = document.getElementById("save-name");
+const userBtn = document.getElementById("user-btn");
 const drawer = document.getElementById("drawer");
 const drawerClose = document.getElementById("drawer-close");
 const saveListEl = document.getElementById("save-list");
@@ -46,6 +47,30 @@ const llmLiveEl = document.getElementById("llm-live");
 const llmTokenSummaryEl = document.getElementById("llm-token-summary");
 const llmListEl = document.getElementById("llm-list");
 const llmEmptyEl = document.getElementById("llm-empty");
+
+const USER_NAME_KEY = "become-immortal-user-name";
+const USER_ID_KEY = "become-immortal-user-id";
+let currentUserName = localStorage.getItem(USER_NAME_KEY) || "默认用户";
+let currentUserId = localStorage.getItem(USER_ID_KEY) || "default";
+
+function renderCurrentUser() {
+  userBtn.textContent = currentUserName;
+  userBtn.title = `当前用户：${currentUserName}。点击切换`;
+}
+
+function apiFetch(url, options = {}) {
+  const headers = new Headers(options.headers || {});
+  headers.set("X-User-ID", currentUserId);
+  return fetch(url, { ...options, headers });
+}
+
+function userIdFromName(name) {
+  const normalized = name.trim().toLowerCase();
+  if (normalized === "默认用户") return "default";
+  return encodeURIComponent(normalized).replace(/[!'()*]/g, (char) =>
+    `%${char.charCodeAt(0).toString(16).toUpperCase()}`
+  );
+}
 
 function clearStatus() {
   statusBodyEl.innerHTML = "";
@@ -348,7 +373,7 @@ async function refreshAgentTraces() {
 
 // ---- SSE 流式 ----
 async function streamSSE(url, onDelta, options = {}, onStage = null) {
-  const resp = await fetch(url, options);
+  const resp = await apiFetch(url, options);
   if (!resp.ok) {
     let msg = `请求失败 ${resp.status}`;
     try { msg = (await resp.json()).detail || msg; } catch (_) {}
@@ -377,7 +402,7 @@ async function streamSSE(url, onDelta, options = {}, onStage = null) {
 }
 
 async function fetchJSON(url, options = {}) {
-  const resp = await fetch(url, options);
+  const resp = await apiFetch(url, options);
   let data = {};
   try { data = await resp.json(); } catch (_) {}
   if (!resp.ok) throw new Error(data.detail || `请求失败 ${resp.status}`);
@@ -658,8 +683,8 @@ function openDrawer() { drawer.classList.remove("hidden"); renderSaves(); }
 function closeDrawer() { drawer.classList.add("hidden"); }
 
 async function fetchSaves() {
-  const resp = await fetch("/api/saves");
-  return (await resp.json()).saves || [];
+  const data = await fetchJSON("/api/saves");
+  return data.saves || [];
 }
 
 function fmtTime(ts) {
@@ -1476,6 +1501,35 @@ llmRefresh.addEventListener("click", refreshLLMMetrics);
 llmDrawer.querySelector(".drawer-mask").addEventListener("click", closeLLMDrawer);
 
 // ---- 启动：有存档则续上最近一局，否则开新局 ----
+async function switchUser() {
+  if (busy) return;
+  const name = prompt("切换用户（同名用户会看到同一组存档）：", currentUserName);
+  if (!name || !name.trim() || name.trim() === currentUserName) return;
+  const nextName = name.trim();
+  const nextId = userIdFromName(nextName);
+  if (!nextId || nextId.length > 64) {
+    alert("用户名过长，请控制在 20 个汉字或 64 个英文字符以内。");
+    return;
+  }
+  currentUserName = nextName;
+  currentUserId = nextId;
+  localStorage.setItem(USER_NAME_KEY, currentUserName);
+  localStorage.setItem(USER_ID_KEY, currentUserId);
+  renderCurrentUser();
+  sessionId = null;
+  setCurrent(null, "");
+  storyEl.innerHTML = "";
+  clearStatus();
+  worldMemory = [];
+  renderConstraint(null);
+  closeDrawer();
+  closeLoreDrawer();
+  closeDirectorDrawer();
+  closeConstraintDrawer();
+  closeLLMDrawer();
+  await boot();
+}
+
 async function boot() {
   try {
     const saves = await fetchSaves();
@@ -1487,5 +1541,7 @@ async function boot() {
   await newGame();
 }
 
+renderCurrentUser();
+userBtn.addEventListener("click", switchUser);
 boot();
 setInterval(refreshAgentTraces, 600);

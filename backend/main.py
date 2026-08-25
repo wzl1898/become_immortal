@@ -18,12 +18,13 @@
 import asyncio
 import json
 import os
+import re
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
-from fastapi import FastAPI, HTTPException  # noqa: E402
+from fastapi import FastAPI, Header, HTTPException  # noqa: E402
 from fastapi.responses import HTMLResponse, StreamingResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
@@ -36,6 +37,8 @@ app = FastAPI(title="become_immortal")
 # 开发用前端热更新：设 LIVE_RELOAD=1 时，后端监视 frontend/ 变化并让页面自动刷新。
 # 不设则完全无影响，正常游玩。
 LIVE_RELOAD = os.getenv("LIVE_RELOAD") == "1"
+DEFAULT_USER_ID = "default"
+_USER_ID_RE = re.compile(r"^[A-Za-z0-9._%~-]{1,64}$")
 
 
 @app.on_event("startup")
@@ -153,20 +156,41 @@ class InquiryBody(BaseModel):
     q: str
 
 
+def _user_id(x_user_id: str) -> str:
+    user_id = x_user_id.strip()
+    if not _USER_ID_RE.fullmatch(user_id):
+        raise HTTPException(400, "用户标识格式无效")
+    return user_id
+
+
+def _require_owned(sid: str, user_id: str) -> None:
+    # Return 404 for foreign saves so their existence is not disclosed.
+    if not game.owned_by(sid, user_id):
+        raise HTTPException(404, "存档不存在")
+
+
 @app.post("/api/new")
-async def new_game(body: NewGameBody | None = None):
+async def new_game(
+    body: NewGameBody | None = None,
+    user_id: str = Header(DEFAULT_USER_ID, alias="X-User-ID"),
+):
+    user_id = _user_id(user_id)
     name = (body.name.strip() if body and body.name else "") or game.DEFAULT_NAME
-    sid = game.create_session(name)
+    sid = game.create_session(name, user_id)
     return {"session_id": sid}
 
 
 @app.get("/api/saves")
-async def saves():
-    return {"saves": game.list_saves()}
+async def saves(user_id: str = Header(DEFAULT_USER_ID, alias="X-User-ID")):
+    user_id = _user_id(user_id)
+    return {"saves": game.list_saves(user_id)}
 
 
 @app.get("/api/load")
-async def load(sid: str):
+async def load(
+    sid: str, user_id: str = Header(DEFAULT_USER_ID, alias="X-User-ID")
+):
+    _require_owned(sid, _user_id(user_id))
     transcript = game.get_transcript(sid)
     if transcript is None:
         raise HTTPException(404, "存档不存在")
@@ -183,25 +207,34 @@ async def load(sid: str):
 
 
 @app.post("/api/rename")
-async def rename(body: RenameBody):
+async def rename(
+    body: RenameBody,
+    user_id: str = Header(DEFAULT_USER_ID, alias="X-User-ID"),
+):
+    user_id = _user_id(user_id)
     name = body.name.strip()
     if not name:
         raise HTTPException(400, "名字不能为空")
-    if not game.rename(body.sid, name):
+    if not game.rename(body.sid, name, user_id):
         raise HTTPException(404, "存档不存在")
     return {"ok": True}
 
 
 @app.post("/api/delete")
-async def delete(body: SidBody):
-    if not game.delete(body.sid):
+async def delete(
+    body: SidBody,
+    user_id: str = Header(DEFAULT_USER_ID, alias="X-User-ID"),
+):
+    if not game.delete(body.sid, _user_id(user_id)):
         raise HTTPException(404, "存档不存在")
     return {"ok": True}
 
 
 @app.get("/api/opening")
-async def opening(sid: str):
-    if not game.exists(sid):
+async def opening(
+    sid: str, user_id: str = Header(DEFAULT_USER_ID, alias="X-User-ID")
+):
+    if not game.owned_by(sid, _user_id(user_id)):
         raise HTTPException(404, "会话不存在，请重新开始")
     return StreamingResponse(
         _opening_stream(sid),
@@ -236,8 +269,8 @@ async def _action_stream(sid: str, text: str):
         yield chunk
 
 
-def _action_response(sid: str, text: str) -> StreamingResponse:
-    if not game.exists(sid):
+def _action_response(sid: str, text: str, user_id: str) -> StreamingResponse:
+    if not game.owned_by(sid, user_id):
         raise HTTPException(404, "会话不存在，请重新开始")
     text = (text or "").strip()
     if not text:
@@ -249,17 +282,27 @@ def _action_response(sid: str, text: str) -> StreamingResponse:
 
 
 @app.post("/api/action")
-async def action(body: ActionBody):
-    return _action_response(body.sid, body.text)
+async def action(
+    body: ActionBody,
+    user_id: str = Header(DEFAULT_USER_ID, alias="X-User-ID"),
+):
+    return _action_response(body.sid, body.text, _user_id(user_id))
 
 
 @app.get("/api/action")
-async def action_legacy(sid: str, text: str):
-    return _action_response(sid, text)
+async def action_legacy(
+    sid: str,
+    text: str,
+    user_id: str = Header(DEFAULT_USER_ID, alias="X-User-ID"),
+):
+    return _action_response(sid, text, _user_id(user_id))
 
 
 @app.get("/api/character-state")
-async def character_state(sid: str):
+async def character_state(
+    sid: str, user_id: str = Header(DEFAULT_USER_ID, alias="X-User-ID")
+):
+    _require_owned(sid, _user_id(user_id))
     state = game.get_character_state(sid)
     if state is None:
         raise HTTPException(404, "存档不存在")
@@ -267,8 +310,11 @@ async def character_state(sid: str):
 
 
 @app.post("/api/reconcile-character-state")
-async def reconcile_character_state(body: SidBody):
-    if not game.exists(body.sid):
+async def reconcile_character_state(
+    body: SidBody,
+    user_id: str = Header(DEFAULT_USER_ID, alias="X-User-ID"),
+):
+    if not game.owned_by(body.sid, _user_id(user_id)):
         raise HTTPException(404, "存档不存在")
     transcript = game.get_transcript(body.sid) or []
     latest = next((blk.get("text", "") for blk in reversed(transcript)
@@ -288,8 +334,8 @@ class WorldMemoryDeleteBody(BaseModel):
     index: int
 
 
-def _inquiry_response(sid: str, q: str) -> StreamingResponse:
-    if not game.exists(sid):
+def _inquiry_response(sid: str, q: str, user_id: str) -> StreamingResponse:
+    if not game.owned_by(sid, user_id):
         raise HTTPException(404, "会话不存在，请重新开始")
     q = (q or "").strip()
     if not q:
@@ -301,17 +347,27 @@ def _inquiry_response(sid: str, q: str) -> StreamingResponse:
 
 
 @app.post("/api/inquiry")
-async def inquiry(body: InquiryBody):
-    return _inquiry_response(body.sid, body.q)
+async def inquiry(
+    body: InquiryBody,
+    user_id: str = Header(DEFAULT_USER_ID, alias="X-User-ID"),
+):
+    return _inquiry_response(body.sid, body.q, _user_id(user_id))
 
 
 @app.get("/api/inquiry")
-async def inquiry_legacy(sid: str, q: str):
-    return _inquiry_response(sid, q)
+async def inquiry_legacy(
+    sid: str,
+    q: str,
+    user_id: str = Header(DEFAULT_USER_ID, alias="X-User-ID"),
+):
+    return _inquiry_response(sid, q, _user_id(user_id))
 
 
 @app.get("/api/world-memory")
-async def world_memory(sid: str):
+async def world_memory(
+    sid: str, user_id: str = Header(DEFAULT_USER_ID, alias="X-User-ID")
+):
+    _require_owned(sid, _user_id(user_id))
     items = game.get_world_memory(sid)
     if items is None:
         raise HTTPException(404, "存档不存在")
@@ -319,8 +375,11 @@ async def world_memory(sid: str):
 
 
 @app.get("/api/director")
-async def director(sid: str):
+async def director(
+    sid: str, user_id: str = Header(DEFAULT_USER_ID, alias="X-User-ID")
+):
     """读取实时事件骨架与异步执行审计状态。"""
+    _require_owned(sid, _user_id(user_id))
     state = game.get_director_state(sid)
     if state is None:
         raise HTTPException(404, "存档不存在")
@@ -328,8 +387,13 @@ async def director(sid: str):
 
 
 @app.get("/api/llm-metrics")
-async def llm_metrics(sid: str, limit: int = 30):
+async def llm_metrics(
+    sid: str,
+    limit: int = 30,
+    user_id: str = Header(DEFAULT_USER_ID, alias="X-User-ID"),
+):
     """Read recent LLM request categories, statuses, and timings."""
+    _require_owned(sid, _user_id(user_id))
     items = game.get_llm_request_metrics(sid, limit)
     if items is None:
         raise HTTPException(404, "存档不存在")
@@ -337,8 +401,11 @@ async def llm_metrics(sid: str, limit: int = 30):
 
 
 @app.get("/api/agent-token-stats")
-async def agent_token_stats(sid: str):
+async def agent_token_stats(
+    sid: str, user_id: str = Header(DEFAULT_USER_ID, alias="X-User-ID")
+):
     """Return persisted token totals overall and grouped by Agent type."""
+    _require_owned(sid, _user_id(user_id))
     stats = game.get_agent_token_stats(sid)
     if stats is None:
         raise HTTPException(404, "存档不存在")
@@ -349,8 +416,10 @@ async def agent_token_stats(sid: str):
 async def agent_traces(
     sid: str, turn: int | None = None, limit: int = 100,
     include_content: bool = False, updated_after: float | None = None,
+    user_id: str = Header(DEFAULT_USER_ID, alias="X-User-ID"),
 ):
     """Read Agent traces, optionally returning only records changed since a cursor."""
+    _require_owned(sid, _user_id(user_id))
     items = game.get_agent_traces(
         sid, turn=turn, limit=limit,
         include_content=include_content or turn is not None,
@@ -363,8 +432,11 @@ async def agent_traces(
 
 
 @app.get("/api/world-state")
-async def world_state(sid: str):
+async def world_state(
+    sid: str, user_id: str = Header(DEFAULT_USER_ID, alias="X-User-ID")
+):
     """读取主角当前位置与知识视野（不展示行动菜单）。"""
+    _require_owned(sid, _user_id(user_id))
     state = game.get_world_state(sid)
     if state is None:
         raise HTTPException(404, "存档不存在")
@@ -372,7 +444,11 @@ async def world_state(sid: str):
 
 
 @app.post("/api/world-memory/delete")
-async def world_memory_delete(body: WorldMemoryDeleteBody):
+async def world_memory_delete(
+    body: WorldMemoryDeleteBody,
+    user_id: str = Header(DEFAULT_USER_ID, alias="X-User-ID"),
+):
+    _require_owned(body.sid, _user_id(user_id))
     items = game.delete_world_memory(body.sid, body.index)
     if items is None:
         raise HTTPException(404, "世界记忆不存在")
@@ -380,13 +456,18 @@ async def world_memory_delete(body: WorldMemoryDeleteBody):
 
 
 @app.get("/api/lore")
-async def lore_compat(sid: str):
-    return await world_memory(sid)
+async def lore_compat(
+    sid: str, user_id: str = Header(DEFAULT_USER_ID, alias="X-User-ID")
+):
+    return await world_memory(sid, user_id)
 
 
 @app.post("/api/lore/delete")
-async def lore_delete_compat(body: WorldMemoryDeleteBody):
-    return await world_memory_delete(body)
+async def lore_delete_compat(
+    body: WorldMemoryDeleteBody,
+    user_id: str = Header(DEFAULT_USER_ID, alias="X-User-ID"),
+):
+    return await world_memory_delete(body, user_id)
 
 
 # ---- 开发用前端热更新（LIVE_RELOAD=1 时启用）----

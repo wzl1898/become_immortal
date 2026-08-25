@@ -365,6 +365,8 @@ html, body {
 #send:not(:disabled):hover { background: var(--accent-soft); }
 
 .actions { display: flex; align-items: center; gap: 10px; }
+.user-btn { color: var(--player); max-width: 112px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
 .save-name { color: var(--accent-soft); font-size: 14px; max-width: 140px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -374,7 +376,7 @@ html, body {
   .topbar { align-items: center; gap: 8px; padding: 10px 12px; }
   .topbar h1 { width: auto; flex: none; font-size: 20px; letter-spacing: 0.28em; }
   .actions {
-    min-width: 0; flex: 1; justify-content: flex-end; overflow-x: auto;
+    min-width: 0; flex: 1; justify-content: flex-start; overflow-x: auto;
     padding-bottom: 2px; scrollbar-width: none;
   }
   .actions::-webkit-scrollbar { display: none; }
