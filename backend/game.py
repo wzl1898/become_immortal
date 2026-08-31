@@ -1181,9 +1181,20 @@ async def _generate_conflict_guidance(
         return
     world_context = constraints.director_context(session_id, "")
     recent_story = _recent_scene(state.get("transcript") or [])
+    recent_events = [
+        item for item in (director.get("event_history") or [])
+        if isinstance(item, dict)
+    ][-3:]
+    current_event = director.get("event")
+    if isinstance(current_event, dict):
+        recent_events = (recent_events + [{
+            "core": current_event.get("core", ""),
+            "benefit": current_event.get("benefit", ""),
+        }])[-3:]
     prompt = "\n\n".join([
         f"【连续无冲突回合数】\n{streak}",
         "【观察结果】\n" + _stable_json(observation),
+        "【最近3次事件的core与benefit】\n" + _stable_json(recent_events),
         "【稳定世界】\n" + _stable_json(world_context),
         "【主角状态】\n" + _stable_json(state.get("character_state") or {}),
         "【最近剧情】\n" + (recent_story or "（暂无）"),
@@ -1500,6 +1511,7 @@ def _dynamic_director_state(raw: dict | None) -> dict:
         normalized.setdefault("agent_outputs", {})
         normalized.setdefault("next_event_seed", None)
         normalized.setdefault("event_guidance", None)
+        normalized.setdefault("event_history", [])
         if isinstance(normalized.get("story_seed"), dict):
             normalized["story_seed"] = copy.deepcopy(normalized["story_seed"])
         return normalized
@@ -1514,6 +1526,7 @@ def _dynamic_director_state(raw: dict | None) -> dict:
         "agent_outputs": {},
         "next_event_seed": None,
         "event_guidance": None,
+        "event_history": [],
         "story_seed": copy.deepcopy(raw.get("story_seed")) if isinstance(raw.get("story_seed"), dict) else None,
         "last_audit": None,
         "needs_repair": False,
@@ -1934,6 +1947,17 @@ async def _ensure_event_foundation(
             event_result = _fallback_event_creation(world_context)
     event_seed = _sanitize_event_creation(event_result, world_context)
 
+    event_history = [
+        item for item in (prev.get("event_history") or [])
+        if isinstance(item, dict)
+    ]
+    if not reuse_existing and existing:
+        event_history.append({
+            "core": existing.get("core", ""),
+            "benefit": existing.get("benefit", ""),
+        })
+    event_history = event_history[-3:]
+
     event = {
         **(existing if reuse_existing else {}),
         "id": existing.get("id") if reuse_existing else uuid.uuid4().hex,
@@ -2028,6 +2052,7 @@ async def _ensure_event_foundation(
         **prev,
         "next_event_seed": None,
         "event_guidance": None,
+        "event_history": event_history,
         "event": event,
         "intent": None if not reuse_existing else prev.get("intent"),
         "current_plan": None if not reuse_existing else prev.get("current_plan"),
