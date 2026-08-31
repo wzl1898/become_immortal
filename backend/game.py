@@ -249,6 +249,13 @@ async def prepare_opening(session_id: str) -> list[dict]:
     try:
         world_context = constraints.director_context(session_id, "")
         recalled_memories = _compact_memories(state.get("world_memory") or [])
+        # 每个新存档开局都由引导层预置一个冲突种子，再交给事件 Agent创建首个事件。
+        await _generate_conflict_guidance(
+            session_id,
+            0,
+            {"conflict_present": False, "reason": "新存档开局"},
+            0,
+        )
         foundation = await _ensure_event_foundation(
             state, "（新存档开场）", world_context, recalled_memories
         )
