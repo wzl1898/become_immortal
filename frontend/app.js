@@ -189,6 +189,8 @@ const LLM_REQUEST_LABELS = {
   narrative: "剧情生成",
   memory_extract: "记忆提取",
   director_audit: "执行审计",
+  narrative_observer: "观察层",
+  guidance_conflict: "引导层",
   state_reconcile: "状态校准",
   inquiry: "记忆问询",
   legacy_director: "旧版导演",
@@ -949,8 +951,10 @@ function renderAgentOutputs(outputs) {
     pacing: "节奏",
     director: "骨架",
     audit: "审计",
+    observer: "观察层",
+    guidance: "引导层",
   };
-  const available = ["event", "next_event", "causal", "viewpoint", "cognition", "progression", "hook", "payoff", "pacing", "director", "audit"]
+  const available = ["event", "next_event", "causal", "viewpoint", "cognition", "progression", "hook", "payoff", "pacing", "director", "audit", "observer", "guidance"]
     .filter((key) => outputs[key] && typeof outputs[key] === "object");
   if (!available.length) return;
 
@@ -1028,6 +1032,26 @@ function renderDynamicDirector(state) {
   note.textContent = event?.core || "当前没有正式事件";
   phaseWrap.appendChild(note);
   directorBodyEl.appendChild(phaseWrap);
+
+  const guidance = state.event_guidance && typeof state.event_guidance === "object"
+    ? state.event_guidance : null;
+  const guidanceCard = document.createElement("section");
+  guidanceCard.className = "dir-guidance";
+  const guidanceHead = document.createElement("div");
+  guidanceHead.className = "dir-section-head";
+  guidanceHead.textContent = "引导层";
+  guidanceCard.appendChild(guidanceHead);
+  guidanceCard.appendChild(field(
+    "连续无冲突回合",
+    `${Number(state.observer_no_conflict_turns) || 0} / 3`,
+    Number(state.observer_no_conflict_turns) >= 3 ? "trigger" : "",
+  ));
+  guidanceCard.appendChild(field(
+    "待消费冲突种子",
+    guidance?.conflict_seed || "暂无（事件 Agent自主生成）",
+    guidance?.conflict_seed ? "desc" : "",
+  ));
+  directorBodyEl.appendChild(guidanceCard);
   renderAgentOutputs(state.agent_outputs || state.planner?.agents);
 
   if (event) {
