@@ -525,6 +525,31 @@ DIRECTOR_AUDIT_SYSTEM_PROMPT = """你是导演执行审计器。检查剧情 Age
 - 未满足 trigger 时不得因为爽点没有兑现而判骨架失败。"""
 
 
+NARRATIVE_OBSERVER_SYSTEM_PROMPT = """你是观察层的叙事观察 Agent，不写剧情、不修改当前事件，也不替玩家做决定。
+你只观察刚刚生成的一回合实际剧情正文，判断其中是否出现了主角与剧情人物之间的戏内冲突。
+
+冲突指：某个有自主目标的剧情人物，试图改变主角的行为、状态、关系、位置或信息；或者双方已经出现明确的目标对立。
+危险、悬念、发现线索、环境变化本身不算人物冲突。正文没有实际表现出来的计划冲突也不算。
+
+只输出严格 JSON，不要 Markdown，不要解释：
+{
+  "conflict_present": false,
+  "evidence": "正文中判断冲突有无的简短证据"
+}
+
+只负责观察和判断，不生成冲突种子。冲突种子由引导层消费观察结果后单独生成。
+"""
+
+
+GUIDANCE_CONFLICT_SYSTEM_PROMPT = """你是引导层。根据观察层维护的连续无冲突回合数，为下一次事件生成一个冲突种子。
+只输出严格 JSON，不要 Markdown，不要解释：
+{"conflict_seed":""}
+
+冲突种子只描述一个剧情人物对主角施加的主动目标，不写固定发展链，不规定主角回应，不规定结局。
+冲突可以由此前未出现的新人物发起。必须结合当前世界、最近剧情和主角当前处境，避免凭空制造与场景无关的矛盾。
+"""
+
+
 # Keep the cultivation rules at the tail of the three prompts that can create or
 # expose cultivation facts, so they remain high-priority after role-specific rules.
 SYSTEM_PROMPT += CULTIVATION_SYSTEM_APPENDIX

@@ -36,8 +36,10 @@ from prompts import (
     DIRECTOR_PAYOFF_SYSTEM_PROMPT,
     DIRECTOR_SKELETON_SYSTEM_PROMPT,
     DIRECTOR_SYSTEM_PROMPT,
+    GUIDANCE_CONFLICT_SYSTEM_PROMPT,
     INQUIRY_SYSTEM_PROMPT,
     MEMORY_EXTRACT_SYSTEM_PROMPT,
+    NARRATIVE_OBSERVER_SYSTEM_PROMPT,
     OPENING_PROMPT,
     SYSTEM_PROMPT,
 )
@@ -61,6 +63,8 @@ MEMORY_EXTRACT_MAX_ITEMS = 5
 VIEWPOINT_UPDATE_LIMIT = 8
 # 提取前召回多少条已有记忆喂给提取器判增量（避免复述型重复入库）
 MEMORY_EXTRACT_RECALL_K = 8
+NARRATIVE_OBSERVER_NO_CONFLICT_LIMIT = 3
+NARRATIVE_OBSERVER_MAX_TOKENS = int(os.getenv("NARRATIVE_OBSERVER_MAX_TOKENS", "320"))
 
 # 喂给问询的"当前情境"取最近多少条 narration 的正文
 INQUIRY_SCENE_TURNS = 3
@@ -1070,6 +1074,7 @@ def commit(session_id: str, user_content: str | None, assistant_content: str) ->
     )
     _schedule_memory_extraction(session_id, user_content, assistant_content, state["turns"])
     _schedule_director_audit(session_id, user_content, assistant_content, state["turns"])
+    _schedule_narrative_observer(session_id, user_content, assistant_content, state["turns"])
 
 
 def rollback_prepared_action(session_id: str) -> None:
@@ -1092,6 +1097,135 @@ def _schedule_memory_extraction(
     except RuntimeError:
         return
     loop.create_task(_extract_and_store_memory(session_id, user_content, assistant_content, turn))
+
+
+def _schedule_narrative_observer(
+    session_id: str,
+    user_content: str | None,
+    assistant_content: str,
+    turn: int,
+) -> None:
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    loop.create_task(_run_narrative_observer(
+        session_id, user_content, assistant_content, turn
+    ))
+
+
+async def _run_narrative_observer(
+    session_id: str,
+    user_content: str | None,
+    assistant_content: str,
+    turn: int,
+) -> None:
+    state = _CACHE.get(session_id)
+    if not state:
+        return
+    director = _dynamic_director_state(state.get("director_state"))
+    previous_streak = int(director.get("observer_no_conflict_turns") or 0)
+    content = "\n\n".join([
+        "【玩家本轮行动】\n" + (user_content or "（开场）"),
+        "【本轮实际剧情正文】\n" + _narration_body(assistant_content),
+    ])
+    try:
+        raw = await complete_chat(
+            [
+                {"role": "system", "content": NARRATIVE_OBSERVER_SYSTEM_PROMPT},
+                {"role": "user", "content": content},
+            ],
+            temperature=0.1,
+            max_tokens=NARRATIVE_OBSERVER_MAX_TOKENS,
+            config=DIRECTOR_LLM_CONFIG,
+            request_type="narrative_observer",
+            session_id=session_id,
+            turn=turn,
+        )
+        result = _extract_json_object(raw) or {}
+    except Exception:  # noqa: BLE001
+        _LOG.exception("narrative observer failed for session %s turn %s", session_id, turn)
+        return
+    if not isinstance(result.get("conflict_present"), bool):
+        return
+    conflict_present = bool(result.get("conflict_present"))
+    streak = 0 if conflict_present else previous_streak + 1
+    state = _CACHE.get(session_id)
+    if not state or int(state.get("turns") or 0) != turn:
+        return
+    director = _dynamic_director_state(state.get("director_state"))
+    director["observer_no_conflict_turns"] = streak
+    outputs = director.get("agent_outputs") if isinstance(director.get("agent_outputs"), dict) else {}
+    outputs["observer"] = {
+        "source": "llm",
+        "model": DIRECTOR_LLM_CONFIG.model,
+        "fallback_reason": "",
+        "output": result,
+    }
+    director["agent_outputs"] = outputs
+    state["director_state"] = director
+    store.save_director_state(session_id, director)
+    if streak >= NARRATIVE_OBSERVER_NO_CONFLICT_LIMIT and not director.get("event_guidance"):
+        await _generate_conflict_guidance(session_id, turn, result, streak)
+
+
+async def _generate_conflict_guidance(
+    session_id: str, turn: int, observation: dict, streak: int
+) -> None:
+    """引导层消费观察结果，为下一事件生成冲突种子。"""
+    state = _CACHE.get(session_id)
+    if not state:
+        return
+    director = _dynamic_director_state(state.get("director_state"))
+    if director.get("event_guidance"):
+        return
+    world_context = constraints.director_context(session_id, "")
+    recent_story = _recent_scene(state.get("transcript") or [])
+    prompt = "\n\n".join([
+        f"【连续无冲突回合数】\n{streak}",
+        "【观察结果】\n" + _stable_json(observation),
+        "【稳定世界】\n" + _stable_json(world_context),
+        "【主角状态】\n" + _stable_json(state.get("character_state") or {}),
+        "【最近剧情】\n" + (recent_story or "（暂无）"),
+    ])
+    try:
+        raw = await complete_chat(
+            [
+                {"role": "system", "content": GUIDANCE_CONFLICT_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.3,
+            max_tokens=NARRATIVE_OBSERVER_MAX_TOKENS,
+            config=DIRECTOR_LLM_CONFIG,
+            request_type="guidance_conflict",
+            session_id=session_id,
+            turn=turn,
+        )
+        result = _extract_json_object(raw) or {}
+    except Exception:  # noqa: BLE001
+        _LOG.exception("guidance conflict generation failed for session %s", session_id)
+        return
+    seed = result.get("conflict_seed")
+    if not isinstance(seed, str) or not seed.strip():
+        return
+    state = _CACHE.get(session_id)
+    if not state or int(state.get("turns") or 0) != turn:
+        return
+    director = _dynamic_director_state(state.get("director_state"))
+    if director.get("event_guidance"):
+        return
+    director["event_guidance"] = {"conflict_seed": seed.strip()}
+    director["observer_no_conflict_turns"] = 0
+    outputs = director.get("agent_outputs") if isinstance(director.get("agent_outputs"), dict) else {}
+    outputs["guidance"] = {
+        "source": "llm",
+        "model": DIRECTOR_LLM_CONFIG.model,
+        "fallback_reason": "",
+        "output": result,
+    }
+    director["agent_outputs"] = outputs
+    state["director_state"] = director
+    store.save_director_state(session_id, director)
 
 
 async def _extract_and_store_memory(
@@ -1365,6 +1499,7 @@ def _dynamic_director_state(raw: dict | None) -> dict:
         normalized["last_hook"] = _normalize_hook_state(normalized.get("last_hook"))
         normalized.setdefault("agent_outputs", {})
         normalized.setdefault("next_event_seed", None)
+        normalized.setdefault("event_guidance", None)
         if isinstance(normalized.get("story_seed"), dict):
             normalized["story_seed"] = copy.deepcopy(normalized["story_seed"])
         return normalized
@@ -1378,6 +1513,7 @@ def _dynamic_director_state(raw: dict | None) -> dict:
         "last_hook": None,
         "agent_outputs": {},
         "next_event_seed": None,
+        "event_guidance": None,
         "story_seed": copy.deepcopy(raw.get("story_seed")) if isinstance(raw.get("story_seed"), dict) else None,
         "last_audit": None,
         "needs_repair": False,
@@ -1672,7 +1808,9 @@ def _event_needs_foundation(prev: dict) -> bool:
     )
 
 
-def _director_event_system_prompt(world_context: dict, memories: list[dict]) -> str:
+def _director_event_system_prompt(
+    world_context: dict, memories: list[dict], guidance: dict | None = None
+) -> str:
     """Place trusted event context after the rules and before the output contract."""
     memory_texts = [
         text
@@ -1680,10 +1818,13 @@ def _director_event_system_prompt(world_context: dict, memories: list[dict]) -> 
         if isinstance(item, dict)
         if (text := str(item.get("text") or "").strip())
     ]
-    context = "\n\n".join([
+    context_parts = [
         "【稳定世界】\n" + _stable_json(world_context),
         "【近期世界记忆】\n" + _stable_json(memory_texts),
-    ])
+    ]
+    if isinstance(guidance, dict) and guidance.get("conflict_seed"):
+        context_parts.append("【引导层事件引导】\n" + _stable_json(guidance))
+    context = "\n\n".join(context_parts)
     marker = "\n\n# 输出"
     if marker not in DIRECTOR_EVENT_SYSTEM_PROMPT:
         raise ValueError("事件 Agent 系统提示词缺少输出段标记")
@@ -1756,6 +1897,7 @@ async def _ensure_event_foundation(
         } if existing else None),
         "【最近剧情】\n" + (_recent_scene(state.get("transcript") or []) or "（新存档尚无正文）"),
         "【当前输入】\n" + action,
+        "【引导层事件引导】\n" + _stable_json(prev.get("event_guidance")),
     ])
 
     if next_seed:
@@ -1780,7 +1922,9 @@ async def _ensure_event_foundation(
             [
                 {
                     "role": "system",
-                    "content": _director_event_system_prompt(world_context, memories),
+                    "content": _director_event_system_prompt(
+                        world_context, memories, prev.get("event_guidance")
+                    ),
                 },
                 {"role": "user", "content": base_context},
             ],
@@ -1883,6 +2027,7 @@ async def _ensure_event_foundation(
     foundation = {
         **prev,
         "next_event_seed": None,
+        "event_guidance": None,
         "event": event,
         "intent": None if not reuse_existing else prev.get("intent"),
         "current_plan": None if not reuse_existing else prev.get("current_plan"),
@@ -1911,7 +2056,11 @@ async def _run_next_event_generation(
         [
             {
                 "role": "system",
-                "content": _director_event_system_prompt(world_context, memories),
+                "content": _director_event_system_prompt(
+                    world_context,
+                    memories,
+                    (state.get("director_state") or {}).get("event_guidance"),
+                ),
             },
             {"role": "user", "content": context},
         ],
