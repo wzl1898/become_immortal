@@ -293,8 +293,46 @@ def create(
 
 # ---- 固定世界库 + 存档世界状态 ----
 
-WORLD_VERSION = 1
+WORLD_VERSION = 2
 WORLD_NAME = "玄苍大陆"
+
+_CULTIVATION_DEMOGRAPHICS = [
+    (
+        "mortal", "凡人/未入修行", 0, "普遍",
+        "凡俗村镇的绝大多数人口；普通店主、郎中、农户、伙计和差役默认属于此层。",
+        "凡俗职业 NPC 默认是凡人，除非已有事实或事件因果明确说明其修行来源。",
+    ),
+    (
+        "qi_early", "炼气一至三层", 1, "少见",
+        "初入修行者，多见于散修、宗门杂役或学徒、坊市低阶护卫；在凡俗村镇已属异于常人。",
+        "凡俗职业 NPC 只有在身份、经历和所在地支持时才能处于此层，不能把修为当作随手添加的特色。",
+    ),
+    (
+        "qi_middle", "炼气四至六层", 2, "稀少",
+        "有稳定传承和多年积累的修士，可担任小势力骨干、资深散修或坊市重要执事。",
+        "不得赋予普通村民或普通凡俗商户；必须有与修为相称的修行身份、资源来源和活动理由。",
+    ),
+    (
+        "qi_late", "炼气七至九层", 3, "罕见",
+        "炼气期中的强者，通常是小势力首脑、宗门资深弟子或执事、成名散修。",
+        "不得作为无特殊背景的药店老板、掌柜、郎中、路人或普通护卫；出场必须有明确身份与因果。",
+    ),
+    (
+        "foundation", "筑基", 4, "极罕见",
+        "足以坐镇一方小势力，在青梧郡属于有名有号的重要人物。",
+        "只能用于宗门长老、势力之主等匹配身份；现身凡俗地点必须有重要原因并产生相称影响。",
+    ),
+    (
+        "golden_core", "金丹", 5, "凤毛麟角",
+        "可影响一郡乃至更大范围格局的高阶修士，普通修士也难以亲见。",
+        "不得作为日常事件的普通 NPC；必须有固定势力、重大机缘或区域级事件支撑其身份与出场。",
+    ),
+    (
+        "nascent_soul", "元婴", 6, "传说级",
+        "大陆顶层强者，行踪和决断足以影响大宗门与大片地域。",
+        "只能在后期重大世界事件中出现，禁止作为地方人物、普通任务发布者或便利性救场角色。",
+    ),
+]
 
 _REGIONS = [
     ("qingwu_county", "青梧郡", "凡人与低阶修士边界", "灵气稀薄，村镇、山野、低阶坊市与小宗门交错。"),
@@ -518,6 +556,18 @@ def _init_world_tables(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS world_cultivation_demographics (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            sort_order INTEGER NOT NULL,
+            rarity TEXT NOT NULL,
+            prevalence TEXT NOT NULL,
+            npc_rule TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS save_player_location (
             save_id TEXT PRIMARY KEY,
             region_id TEXT NOT NULL,
@@ -622,6 +672,11 @@ def _seed_world(conn: sqlite3.Connection) -> None:
         "(id, name, entrance_location_id, kind, opening_rule, entry_limit) VALUES (?, ?, ?, ?, ?, ?)",
         _REALMS,
     )
+    conn.executemany(
+        "INSERT OR REPLACE INTO world_cultivation_demographics "
+        "(id, name, sort_order, rarity, prevalence, npc_rule) VALUES (?, ?, ?, ?, ?, ?)",
+        _CULTIVATION_DEMOGRAPHICS,
+    )
     conn.execute("INSERT OR REPLACE INTO world_meta (key, value) VALUES ('world_name', ?)", (WORLD_NAME,))
     conn.execute("INSERT OR REPLACE INTO world_meta (key, value) VALUES ('world_version', ?)", (str(WORLD_VERSION),))
 
@@ -713,6 +768,9 @@ def world_snapshot(sid: str) -> dict | None:
         arts = conn.execute("SELECT * FROM world_arts ORDER BY rowid").fetchall()
         opportunities = conn.execute("SELECT * FROM world_opportunities ORDER BY rowid").fetchall()
         realms = conn.execute("SELECT * FROM world_realms ORDER BY rowid").fetchall()
+        cultivation_demographics = conn.execute(
+            "SELECT * FROM world_cultivation_demographics ORDER BY sort_order"
+        ).fetchall()
     return {
         "location": dict(loc),
         "time": dict(world_time),
@@ -724,6 +782,7 @@ def world_snapshot(sid: str) -> dict | None:
         "arts": [dict(row) for row in arts],
         "opportunities": [dict(row) for row in opportunities],
         "realms": [dict(row) for row in realms],
+        "cultivation_demographics": [dict(row) for row in cultivation_demographics],
     }
 
 

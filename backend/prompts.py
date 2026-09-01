@@ -5,6 +5,9 @@ CULTIVATION_SYSTEM_APPENDIX = """\n\n# 固定修炼体系（必须严格遵守�
 - 正式境界只有：凡人/未入修行、炼气、筑基、金丹、元婴及其明确小层级（如炼气一层、炼气三层）。不得创造“引气期”“纳气期”或其他未定义境界。
 - “引气诀”是固定世界中的功法名称，不是境界名称；“引气入体”“引气门径”只能描述修炼过程，不能写成境界。
 - 小境界可在持续修炼、功法和状态允许时推进；跨越炼气到筑基等大境界必须有固定世界中的资源、机缘或明确剧情条件，不得无因突破。
+- NPC 修为必须服从稳定世界层中的 `cultivation_demographics`。创建人物时优先采用其身份能够解释的最低合理修为；不能为了制造压力、神秘感或便利剧情而抬高修为。
+- 凡俗村镇的普通店主、药店老板、郎中、农户、伙计、差役和路人默认是凡人。若设为修士，必须同时有与所在地、职业和修为相称的修行来源与身份因果。
+- 炼气七至九层已属罕见强者，不得包装成无特殊背景的普通商户或路人；筑基及以上人物更必须具备与稀有度相称的势力身份、出场原因和世界影响。
 - 功法、机缘、资源和修炼方向必须使用固定世界中的标准名称；不得把功法名改写成境界名，也不得临时创造新的修炼体系。
 - 若输入、正文或已有记忆出现非标准境界术语，统一按最近的正式境界理解并使用正式名称；不得继续扩散该错误术语。"""
 
@@ -581,3 +584,4 @@ CHARACTER_SETTING_SYSTEM_PROMPT = """你是观察层的人物设定 Agent。
 SYSTEM_PROMPT += CULTIVATION_SYSTEM_APPENDIX
 DIRECTOR_EVENT_SYSTEM_PROMPT += CULTIVATION_SYSTEM_APPENDIX
 DIRECTOR_CAUSAL_SYSTEM_PROMPT += CULTIVATION_SYSTEM_APPENDIX
+GUIDANCE_CONFLICT_SYSTEM_PROMPT += CULTIVATION_SYSTEM_APPENDIX

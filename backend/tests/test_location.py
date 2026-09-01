@@ -30,6 +30,32 @@ class StructuredLocationTests(unittest.TestCase):
         self.assertEqual(location["site_name"], "村西老槐树")
         self.assertEqual(location["intended_destination_id"], "baishi_ruined_temple")
 
+    def test_fixed_world_contains_ordered_cultivation_demographics(self):
+        tiers = store.world_snapshot(self.sid)["cultivation_demographics"]
+
+        self.assertEqual(
+            [row["name"] for row in tiers],
+            ["凡人/未入修行", "炼气一至三层", "炼气四至六层", "炼气七至九层", "筑基", "金丹", "元婴"],
+        )
+        late_qi = next(row for row in tiers if row["id"] == "qi_late")
+        self.assertEqual(late_qi["rarity"], "罕见")
+        self.assertIn("药店老板", late_qi["npc_rule"])
+
+    def test_all_world_constraints_include_npc_realm_rarity(self):
+        blocks = (
+            constraints.opening_constraints(self.sid),
+            constraints.action_constraints(self.sid, "去药店问问"),
+            constraints.inquiry_constraints(self.sid),
+        )
+
+        for block in blocks:
+            self.assertIn("固定修为人口分布", block)
+            self.assertIn("炼气七至九层（罕见）", block)
+            self.assertIn("药店老板", block)
+
+        context = constraints.director_context(self.sid, "去药店问问")
+        self.assertEqual(context["cultivation_demographics"][3]["id"], "qi_late")
+
     def test_confirmed_arrival_updates_actual_location(self):
         constraints.action_constraints(self.sid, "前往村外破庙")
         constraints.reconcile_location(self.sid, "日落之前，你终于赶到了村外破庙，推门而入。")

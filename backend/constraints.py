@@ -86,6 +86,7 @@ def opening_constraints(session_id: str) -> str:
             "主角开局只知道白石村、白石村后山、村外破庙、青溪镇；只听闻黑风山、青木集、玄霄宗。",
             "不要展示可前往地点列表；只能在叙事中自然露出道路、传闻和环境线索。",
             "不要给固定主线；只给当前处境和可被玩家自由回应的契机。",
+            _cultivation_demographics_line(snap),
             _location_line(snap),
             _time_line(snap),
             _knowledge_line(snap, "location", "confirmed", "已确认地点", limit=8),
@@ -109,6 +110,7 @@ def action_constraints(session_id: str, action: str) -> str:
         lines=[
             "你是剧情生成 Agent。必须服从本规格书；它高于自由发挥。",
             "固定规则：地点、功法、机缘、秘境、势力只能来自 SQLite 固定库；玩家未知内容不得直接暴露。",
+            _cultivation_demographics_line(snap),
             "显示规则：不要列出“可前往地点”菜单；可在叙事中自然提到道路、传闻、人物反应或线索。",
             _location_line(snap),
             _time_line(snap),
@@ -140,6 +142,7 @@ def inquiry_constraints(session_id: str) -> str:
         lines=[
             "这是主角当前知识视野，回答问询时必须以它为准；若它与旧世界记忆冲突，以本边界为准。",
             "status=confirmed 表示主角确认知道；status=rumored 表示主角只听闻过名字或模糊传闻，不等于掌握细节。",
+            _cultivation_demographics_line(snap),
             _location_line(snap),
             _time_line(snap),
             _knowledge_detail_line(snap, "location", "地点知识", limit=14),
@@ -181,6 +184,7 @@ def get_world_state(session_id: str) -> dict | None:
             "known_arts": _names_for_knowledge(snap, knowledge, "art", None),
             "known_opportunities": _names_for_knowledge(snap, knowledge, "opportunity", None),
         },
+        "cultivation_demographics": snap["cultivation_demographics"],
     }
 
 
@@ -405,6 +409,7 @@ def director_context(session_id: str, action: str) -> dict:
         "opportunities": opportunities,
         "reward_candidates": reward_candidates,
         "existing_reward_bindings": existing_reward_bindings,
+        "cultivation_demographics": snap["cultivation_demographics"],
         "allowed_reference_ids": sorted(allowed_reference_ids),
         "forbidden_reveals": [
             "切片之外的地点、路线、势力、功法、机缘和秘境",
@@ -741,6 +746,15 @@ def _entity_line(matches: dict[str, list[dict]]) -> str:
         names = "、".join(row["name"] for row in rows[:6])
         parts.append(f"{labels.get(kind, kind)}={names}")
     return "命中的固定实体：" + ("；".join(parts) if parts else "无")
+
+
+def _cultivation_demographics_line(snap: dict) -> str:
+    tiers = snap.get("cultivation_demographics") or []
+    rendered = "；".join(
+        f"{row['name']}（{row['rarity']}）：{row['prevalence']} NPC限制：{row['npc_rule']}"
+        for row in tiers
+    )
+    return "固定修为人口分布（生成 NPC 时必须服从，优先采用身份可解释的最低合理修为）：" + rendered
 
 
 def _local_context(snap: dict, matches: dict[str, list[dict]]) -> dict:

@@ -149,10 +149,13 @@ class DirectorPlanTests(unittest.TestCase):
             prompts.SYSTEM_PROMPT,
             prompts.DIRECTOR_EVENT_SYSTEM_PROMPT,
             prompts.DIRECTOR_CAUSAL_SYSTEM_PROMPT,
+            prompts.GUIDANCE_CONFLICT_SYSTEM_PROMPT,
         )
         for prompt in prompts_to_check:
             self.assertIn("“引气诀”是固定世界中的功法名称，不是境界名称", prompt)
             self.assertIn("不得创造“引气期”“纳气期”或其他未定义境界", prompt)
+            self.assertIn("普通店主、药店老板、郎中", prompt)
+            self.assertIn("炼气七至九层已属罕见强者", prompt)
             self.assertTrue(prompt.rstrip().endswith("不得继续扩散该错误术语。"))
 
     def test_player_avoidance_replans_event_without_resetting_it(self):
