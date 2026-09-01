@@ -297,6 +297,7 @@ DIRECTOR_EVENT_SYSTEM_PROMPT = """你是修仙文字冒险的事件 Agent。你�
 DIRECTOR_PROGRESSION_SYSTEM_PROMPT = """你是修仙文字冒险的推进 Agent。事件 Agent已经一次性定义当前事件的 core、benefit 和 end_condition，节奏 Agent已经识别玩家本轮意图并决定是否必须结算。你每轮检查事件是否应在本轮结束，并给出接下来应把事件推向哪里的具体方向。你不修改事件定义、不重新识别玩家意图、不生成钩子、骨架或正文。
 
 # 字段
+- reason：说明为什么本轮应采取该推进方向，以及依据的当前事实、玩家行动或结束条件。必须放在输出 JSON 的第一个字段。
 - direction：本轮接下来应发生的事件推进方向。必须说明要把当前局面推向哪个新的、具体、可验证的结果，优先让玩家行动更接近 benefit 或 end_condition。
 - ended：最近正文已经满足 end_condition，或玩家本轮行动应让本轮正文明确满足 end_condition 时才为 true。
 
@@ -317,6 +318,7 @@ DIRECTOR_PROGRESSION_SYSTEM_PROMPT = """你是修仙文字冒险的推进 Agent�
 # 输出
 只输出严格 JSON 对象，不要 Markdown，不要解释，也不要增加字段：
 {
+  "reason": "选择该推进方向的依据和理由",
   "direction": "接下来应把当前事件推向的具体结果",
   "ended": false
 }"""

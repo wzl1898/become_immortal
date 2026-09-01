@@ -1745,6 +1745,7 @@ async def _plan_director_turn(
         "route_key": "none",
         "intent": pacing_decision["intent"],
         "intent_resolved": pacing_decision["resolved"],
+        "progression_reason": progression_decision["reason"],
         "progression_direction": progression_decision["direction"],
         "event_ended": progression_decision["ended"],
         "stage": "",
@@ -2649,6 +2650,7 @@ def _director_hook_messages(
             "resolved": plan.get("intent_resolved"),
         }),
         "【本轮意图完成后的预计结果】\n" + _stable_json({
+            "reason": plan.get("progression_reason"),
             "direction": plan.get("progression_direction"),
             "ended": plan.get("event_ended"),
         }),
@@ -2686,6 +2688,7 @@ def _director_skeleton_messages(
             "forced_reasons": plan.get("forced_reasons"),
         }),
         "【推进 Agent结果】\n" + _stable_json({
+            "reason": plan.get("progression_reason"),
             "direction": plan.get("progression_direction"),
             "ended": plan.get("event_ended"),
         }),
@@ -2737,13 +2740,15 @@ def _sanitize_pacing_decision(result: dict | None, prev: dict, action: str) -> d
 
 
 def _sanitize_progression_decision(result: dict | None, event: dict) -> dict:
+    fallback_reason = "依据当前事件、玩家本轮行动和可见局势，推动事件产生明确且可验证的变化"
     fallback_direction = (
         f"让玩家行动对“{_clean_text(event.get('core'), 160) or '当前事件'}”产生一个明确变化，"
         f"并接近“{_clean_text(event.get('benefit'), 120) or '事件可获好处'}”"
     )
     if not isinstance(result, dict):
-        return {"direction": fallback_direction, "ended": False}
+        return {"reason": fallback_reason, "direction": fallback_direction, "ended": False}
     return {
+        "reason": _clean_text(result.get("reason"), 360) or fallback_reason,
         "direction": _clean_text(result.get("direction"), 360) or fallback_direction,
         "ended": bool(result.get("ended")),
     }
@@ -3045,6 +3050,7 @@ def _sanitize_director_plan(
             "same_as_previous": bool(intent.get("same_as_previous")),
         },
         "intent_resolved": bool(result.get("intent_resolved")),
+        "progression_reason": _clean_text(result.get("progression_reason"), 360),
         "progression_direction": _clean_text(result.get("progression_direction"), 360),
         "event_ended": bool(result.get("event_ended")),
         "stage": _clean_text(result.get("stage"), 180),
@@ -3197,6 +3203,7 @@ def _render_director_plan(state: dict, world_context: dict) -> str:
         f"玩家意图：{(state.get('intent') or {}).get('key') or '未归类'}（第 {(state.get('intent') or {}).get('attempts', 1)} 次）",
         f"玩家意图本轮结算：{'是' if plan.get('intent_resolved') else '否'}",
         f"事件本轮结束：{'是' if plan.get('event_ended') else '否'}",
+        f"事件推进理由：{plan.get('progression_reason') or '依据当前局势推动事件产生明确变化'}",
         f"事件推进方向：{plan.get('progression_direction') or '让玩家行动产生明确的事件变化'}",
         "信息边界：不得超出主角视角模型",
         f"本轮目标：{plan.get('turn_objective') or plan.get('current_goal') or '直接回应玩家行动'}",
@@ -3456,6 +3463,9 @@ async def _run_director_audit(
             current["turn_mode"] = "resolve"
             current["progression_direction"] = progression.get("direction") or (
                 "当前事件已满足结束条件，收束当前事件"
+            )
+            current["progression_reason"] = progression.get("reason") or (
+                "审计已确认事件结束条件满足，因此收束当前事件"
             )
             event["status"] = "resolved"
             event["ended_turn"] = turn

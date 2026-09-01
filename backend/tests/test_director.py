@@ -867,17 +867,21 @@ class DirectorPlanTests(unittest.TestCase):
         event = _event(status="active")
 
         ongoing = game._sanitize_progression_decision({
+            "reason": "赵横的补给已暴露，山匪当前处境出现可验证变化",
             "direction": "让赵横因粮袋被截获而暴露黑风寨的补给缺口",
             "ended": False,
         }, event)
         ending = game._sanitize_progression_decision({
+            "reason": "山匪已让出山路，事件结束条件得到满足",
             "direction": "让赵横带领山匪撤离山路并恢复白石村通行",
             "ended": True,
         }, event)
 
+        self.assertEqual(list(ongoing), ["reason", "direction", "ended"])
         self.assertIn("补给缺口", ongoing["direction"])
         self.assertFalse(ongoing["ended"])
         self.assertEqual(ending, {
+            "reason": "山匪已让出山路，事件结束条件得到满足",
             "direction": "让赵横带领山匪撤离山路并恢复白石村通行",
             "ended": True,
         })
