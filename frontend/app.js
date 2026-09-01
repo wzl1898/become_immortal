@@ -191,6 +191,7 @@ const LLM_REQUEST_LABELS = {
   director_audit: "执行审计",
   narrative_observer: "观察层",
   guidance_conflict: "引导层",
+  character_setting: "人物设定 Agent",
   state_reconcile: "状态校准",
   inquiry: "记忆问询",
   legacy_director: "旧版导演",
@@ -953,8 +954,9 @@ function renderAgentOutputs(outputs) {
     audit: "审计",
     observer: "观察层",
     guidance: "引导层",
+    character_setting: "人物设定",
   };
-  const available = ["event", "next_event", "causal", "viewpoint", "cognition", "progression", "hook", "payoff", "pacing", "director", "audit", "observer", "guidance"]
+  const available = ["event", "next_event", "causal", "viewpoint", "cognition", "progression", "hook", "payoff", "pacing", "director", "audit", "observer", "guidance", "character_setting"]
     .filter((key) => outputs[key] && typeof outputs[key] === "object");
   if (!available.length) return;
 

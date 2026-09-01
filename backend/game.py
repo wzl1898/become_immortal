@@ -37,6 +37,7 @@ from prompts import (
     DIRECTOR_SKELETON_SYSTEM_PROMPT,
     DIRECTOR_SYSTEM_PROMPT,
     GUIDANCE_CONFLICT_SYSTEM_PROMPT,
+    CHARACTER_SETTING_SYSTEM_PROMPT,
     INQUIRY_SYSTEM_PROMPT,
     MEMORY_EXTRACT_SYSTEM_PROMPT,
     NARRATIVE_OBSERVER_SYSTEM_PROMPT,
@@ -240,6 +241,44 @@ def _narrative_context_messages(state: dict) -> list[dict]:
     return messages
 
 
+async def _run_character_setting_agent(state: dict, user_input: str) -> dict:
+    """Generate the NPC-to-protagonist relation setting for the next event."""
+    previous = _dynamic_director_state(state.get("director_state"))
+    event = previous.get("event") if isinstance(previous.get("event"), dict) else {}
+    narrations = [
+        str(item.get("text") or "")
+        for item in (state.get("transcript") or [])
+        if item.get("role") == "narration"
+    ][-3:]
+    content = "\n\n".join([
+        "【上一次事件 core】\n" + str(event.get("core") or "（暂无）"),
+        "【最近3轮剧情文本】\n" + ("\n\n".join(narrations) or "（暂无）"),
+        "【本次用户输入】\n" + (user_input or "（暂无）"),
+    ])
+    try:
+        raw = await complete_chat(
+            [
+                {"role": "system", "content": CHARACTER_SETTING_SYSTEM_PROMPT},
+                {"role": "user", "content": content},
+            ],
+            temperature=0.25,
+            max_tokens=260,
+            config=DIRECTOR_LLM_CONFIG,
+            request_type="character_setting",
+            session_id=state.get("session_id"),
+            turn=int(state.get("turns") or 0) + 1,
+        )
+        result = _extract_json_object(raw) or {}
+    except Exception:  # noqa: BLE001
+        _LOG.exception("character setting agent failed for session %s", state.get("session_id"))
+        result = {}
+    return {
+        "reason": _clean_text(result.get("reason"), 360),
+        "attitude": _clean_text(result.get("attitude"), 240),
+        "goal": _clean_text(result.get("goal"), 360),
+    }
+
+
 async def prepare_opening(session_id: str) -> list[dict]:
     """Initialize the first event models, then build opening narrative messages."""
     state = _get(session_id)
@@ -249,6 +288,13 @@ async def prepare_opening(session_id: str) -> list[dict]:
     try:
         world_context = constraints.director_context(session_id, "")
         recalled_memories = _compact_memories(state.get("world_memory") or [])
+        character_setting = await _run_character_setting_agent(
+            state, "（新存档开场，玩家尚未行动）"
+        )
+        state["director_state"] = {
+            **_dynamic_director_state(state.get("director_state")),
+            "character_setting": character_setting,
+        }
         # 每个新存档开局都由引导层预置一个冲突种子，再交给事件 Agent创建首个事件。
         await _generate_conflict_guidance(
             session_id,
@@ -845,6 +891,12 @@ async def prepare_action(session_id: str, action: str) -> list[dict]:
     try:
         world_constraints = constraints.action_constraints(session_id, action)
         world_context = constraints.director_context(session_id, action)
+        previous = _dynamic_director_state(state.get("director_state"))
+        character_setting = await _run_character_setting_agent(state, action)
+        state["director_state"] = {
+            **previous,
+            "character_setting": character_setting,
+        }
         previous = _dynamic_director_state(state.get("director_state"))
         event_core = ((previous.get("event") or {}).get("core") or "").strip()
         latest_scene = _latest_scene(state.get("transcript") or [])
@@ -1519,6 +1571,7 @@ def _dynamic_director_state(raw: dict | None) -> dict:
         normalized.setdefault("next_event_seed", None)
         normalized.setdefault("event_guidance", None)
         normalized.setdefault("event_history", [])
+        normalized.setdefault("character_setting", None)
         if isinstance(normalized.get("story_seed"), dict):
             normalized["story_seed"] = copy.deepcopy(normalized["story_seed"])
         return normalized
@@ -1534,6 +1587,7 @@ def _dynamic_director_state(raw: dict | None) -> dict:
         "next_event_seed": None,
         "event_guidance": None,
         "event_history": [],
+        "character_setting": None,
         "story_seed": copy.deepcopy(raw.get("story_seed")) if isinstance(raw.get("story_seed"), dict) else None,
         "last_audit": None,
         "needs_repair": False,
@@ -1918,6 +1972,7 @@ async def _ensure_event_foundation(
         "【最近剧情】\n" + (_recent_scene(state.get("transcript") or []) or "（新存档尚无正文）"),
         "【当前输入】\n" + action,
         "【引导层事件引导】\n" + _stable_json(prev.get("event_guidance")),
+        "【人物设定 Agent结果】\n" + _stable_json(prev.get("character_setting")),
     ])
 
     if next_seed:
