@@ -1,0 +1,1 @@
+当前世界时间：${calendar}第${day}日 ${clock}（${period}），季节：${season}

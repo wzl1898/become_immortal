@@ -1,0 +1,1 @@
+动态机缘关联：${opportunity} → ${reward}

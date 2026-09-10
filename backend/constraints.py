@@ -12,6 +12,7 @@ import re
 from collections import defaultdict
 
 import store
+from prompts import render_prompt
 
 
 MOVE_WORDS = ("去", "前往", "赶往", "回", "返回", "离开", "沿", "往", "进", "进入", "赶路", "找路")
@@ -78,20 +79,13 @@ def opening_constraints(session_id: str) -> str:
     snap = store.world_snapshot(session_id)
     if not snap:
         return ""
-    return _render_constraint_block(
-        title="世界约束 Agent（开场）",
-        lines=[
-            "本局世界事实固定在 SQLite，地点、势力、功法、机缘、秘境不得临时生成。",
-            "开场必须锚定在玄苍大陆 / 青梧郡 / 白石村，主角是凡人村镇开局。",
-            "主角开局只知道白石村、白石村后山、村外破庙、青溪镇；只听闻黑风山、青木集、玄霄宗。",
-            "不要展示可前往地点列表；只能在叙事中自然露出道路、传闻和环境线索。",
-            "不要给固定主线；只给当前处境和可被玩家自由回应的契机。",
-            _cultivation_demographics_line(snap),
-            _location_line(snap),
-            _time_line(snap),
-            _knowledge_line(snap, "location", "confirmed", "已确认地点", limit=8),
-            _knowledge_line(snap, "location", "rumored", "听闻地点", limit=8),
-        ],
+    return render_prompt(
+        'constraints/opening',
+        cultivation=_cultivation_demographics_line(snap),
+        location=_location_line(snap),
+        time=_time_line(snap),
+        confirmed_locations=_knowledge_line(snap, 'location', 'confirmed', '已确认地点', limit=8),
+        rumored_locations=_knowledge_line(snap, 'location', 'rumored', '听闻地点', limit=8),
     )
 
 
@@ -105,30 +99,24 @@ def action_constraints(session_id: str, action: str) -> str:
     action_type = _infer_action_type(action)
     verdict = _adjudicate(session_id, snap, action, action_type, matches)
     local = _local_context(snap, matches)
-    return _render_constraint_block(
-        title="世界约束 Agent（本回合剧情规格书）",
-        lines=[
-            "你是剧情生成 Agent。必须服从本规格书；它高于自由发挥。",
-            "固定规则：地点、功法、机缘、秘境、势力只能来自 SQLite 固定库；玩家未知内容不得直接暴露。",
-            _cultivation_demographics_line(snap),
-            "显示规则：不要列出“可前往地点”菜单；可在叙事中自然提到道路、传闻、人物反应或线索。",
-            _location_line(snap),
-            _time_line(snap),
-            _intent_line(action_type, verdict),
-            _entity_line(matches),
-            _knowledge_line(snap, "location", "confirmed", "已确认地点", limit=10),
-            _knowledge_line(snap, "location", "rumored", "听闻地点", limit=10),
-            _knowledge_line(snap, "route", "confirmed", "已确认路线", limit=10),
-            _knowledge_line(snap, "art", "rumored", "已听闻功法", limit=8),
-            _knowledge_line(snap, "opportunity", "rumored", "已知机缘线索", limit=8),
-            _local_line(local),
-            f"动作裁判：{verdict['verdict']}。{verdict['reason']}",
-            f"本回合核心结果边界：{verdict['core_result']}",
-            f"允许揭示：{_join_or_none(verdict['allowed_reveals'])}",
-            f"禁止揭示：{_join_or_none(verdict['forbidden_reveals'])}",
-            "若玩家说出库中不存在的核心地点/功法/机缘/势力，不得补造；只能写成主角无从确认、无人听过或需要另行打听。",
-            "时间必须从当前世界时间向前发展，不得倒退；若行动明显耗时，应在正文自然体现经过的时间。",
-        ],
+    return render_prompt(
+        'constraints/action',
+        cultivation=_cultivation_demographics_line(snap),
+        location=_location_line(snap),
+        time=_time_line(snap),
+        intent=_intent_line(action_type, verdict),
+        entities=_entity_line(matches),
+        confirmed_locations=_knowledge_line(snap, 'location', 'confirmed', '已确认地点', limit=10),
+        rumored_locations=_knowledge_line(snap, 'location', 'rumored', '听闻地点', limit=10),
+        routes=_knowledge_line(snap, 'route', 'confirmed', '已确认路线', limit=10),
+        arts=_knowledge_line(snap, 'art', 'rumored', '已听闻功法', limit=8),
+        opportunities=_knowledge_line(snap, 'opportunity', 'rumored', '已知机缘线索', limit=8),
+        local_context=("\n" + local_text if (local_text := _local_line(local)) else ""),
+        verdict=verdict['verdict'],
+        reason=verdict['reason'],
+        core_result=verdict['core_result'],
+        allowed_reveals=_join_or_none(verdict['allowed_reveals']),
+        forbidden_reveals=_join_or_none(verdict['forbidden_reveals']),
     )
 
 
@@ -137,21 +125,16 @@ def inquiry_constraints(session_id: str) -> str:
     snap = store.world_snapshot(session_id)
     if not snap:
         return ""
-    return _render_constraint_block(
-        title="世界约束 Agent（问询知识边界）",
-        lines=[
-            "这是主角当前知识视野，回答问询时必须以它为准；若它与旧世界记忆冲突，以本边界为准。",
-            "status=confirmed 表示主角确认知道；status=rumored 表示主角只听闻过名字或模糊传闻，不等于掌握细节。",
-            _cultivation_demographics_line(snap),
-            _location_line(snap),
-            _time_line(snap),
-            _knowledge_detail_line(snap, "location", "地点知识", limit=14),
-            _knowledge_detail_line(snap, "route", "路线知识", limit=12),
-            _knowledge_detail_line(snap, "faction", "势力知识", limit=10),
-            _knowledge_detail_line(snap, "art", "功法知识", limit=10),
-            _knowledge_detail_line(snap, "opportunity", "机缘线索", limit=10),
-            "回答分寸：若主角仅 rumored 某功法，只能说听过名字/大概用途/来源传闻，不能说已经会修，也不能说完全不知道。",
-        ],
+    return render_prompt(
+        'constraints/inquiry',
+        cultivation=_cultivation_demographics_line(snap),
+        location=_location_line(snap),
+        time=_time_line(snap),
+        locations=_knowledge_detail_line(snap, 'location', '地点知识', limit=14),
+        routes=_knowledge_detail_line(snap, 'route', '路线知识', limit=12),
+        factions=_knowledge_detail_line(snap, 'faction', '势力知识', limit=10),
+        arts=_knowledge_detail_line(snap, 'art', '功法知识', limit=10),
+        opportunities=_knowledge_detail_line(snap, 'opportunity', '机缘线索', limit=10),
     )
 
 
@@ -443,7 +426,7 @@ def selected_director_facts(context: dict, reference_ids: list[str]) -> list[dic
 
 def _render_constraint_block(title: str, lines: list[str]) -> str:
     body = "\n".join(line for line in lines if line)
-    return f"【{title}】\n{body}\n【/世界约束 Agent】\n\n"
+    return render_prompt('constraints/block', title=title, body=body)
 
 
 def _infer_action_type(action: str) -> str:
@@ -651,9 +634,14 @@ def _location_line(snap: dict) -> str:
     intended = loc.get("intended_destination_id")
     name_by_id = _names_by_table(snap)
     dest = f"；行动意图：{name_by_id.get(intended, intended)}" if intended else ""
-    return (
-        f"当前真实位置：玄苍大陆 / {loc['region_name']} / {loc['location_name']}{site}"
-        f"；状态：{loc['location_state']}；迷路风险：{loc['lost_risk']}{dest}"
+    return render_prompt(
+        'constraints/location',
+        region=loc['region_name'],
+        location=loc['location_name'],
+        site=site,
+        state=loc['location_state'],
+        lost_risk=loc['lost_risk'],
+        destination=dest,
     )
 
 
@@ -672,9 +660,13 @@ def _public_time(world_time: dict) -> dict:
 
 def _time_line(snap: dict) -> str:
     value = _public_time(snap["time"])
-    return (
-        f"当前世界时间：{value['calendar_label']}第{value['day']}日 "
-        f"{value['clock']}（{value['period']}），季节：{value['season']}"
+    return render_prompt(
+        'constraints/time',
+        calendar=value['calendar_label'],
+        day=value['day'],
+        clock=value['clock'],
+        period=value['period'],
+        season=value['season'],
     )
 
 
@@ -730,7 +722,7 @@ def _elapsed_minutes(action: str, narrative: str, world_time: dict) -> int:
 
 
 def _intent_line(action_type: str, verdict: dict) -> str:
-    return f"玩家行动类型：{action_type}；裁判结论：{verdict['verdict']}"
+    return render_prompt('constraints/intent', action_type=action_type, verdict=verdict['verdict'])
 
 
 def _entity_line(matches: dict[str, list[dict]]) -> str:
@@ -745,7 +737,7 @@ def _entity_line(matches: dict[str, list[dict]]) -> str:
     for kind, rows in matches.items():
         names = "、".join(row["name"] for row in rows[:6])
         parts.append(f"{labels.get(kind, kind)}={names}")
-    return "命中的固定实体：" + ("；".join(parts) if parts else "无")
+    return render_prompt('constraints/entities', entities='；'.join(parts) if parts else '无')
 
 
 def _cultivation_demographics_line(snap: dict) -> str:
@@ -754,7 +746,7 @@ def _cultivation_demographics_line(snap: dict) -> str:
         f"{row['name']}（{row['rarity']}）：{row['prevalence']} NPC限制：{row['npc_rule']}"
         for row in tiers
     )
-    return "固定修为人口分布（生成 NPC 时必须服从，优先采用身份可解释的最低合理修为）：" + rendered
+    return render_prompt('constraints/cultivation', demographics=rendered)
 
 
 def _local_context(snap: dict, matches: dict[str, list[dict]]) -> dict:

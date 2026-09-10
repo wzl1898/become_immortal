@@ -1,0 +1,1 @@
+玩家行动类型：${action_type}；裁判结论：${verdict}

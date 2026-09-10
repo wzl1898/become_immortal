@@ -89,7 +89,8 @@ backend/
   game.py      # 会话状态管理（内存态）
   llm.py       # OpenAI 兼容的流式客户端
   embed.py     # 本地 embedding 召回（可降级）
-  prompts.py   # 修仙 Game Master 系统提示词
+  prompts.py   # 模板加载、变量校验和系统规则组合
+  prompt_templates/  # 按层与 Agent 拆分的 Markdown 提示词模板
 frontend/
   index.html   # 页面
   style.css    # 古风暗色主题
@@ -114,5 +115,5 @@ frontend/
 ## 说明与后续
 
 - 上下文默认保留最近 40 轮（见 `game.py` 的 `MAX_TURNS`），防止过长。
-- 提示词在 `backend/prompts.py`，想改题材/风格直接改这里。
+- 提示词在 `backend/prompt_templates/`，按层与 Agent 独立编辑；变量使用 `${name}`。修改后需重启后端，存档内已有的剧情系统提示词保持原样。目录索引、生效范围与验证方法见 [提示词维护说明](docs/PROMPTS.md)。
 - 当前用户区分是本地隔离机制；公网部署仍需接入账号认证，并由服务端签发、校验身份。

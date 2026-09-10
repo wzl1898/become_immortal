@@ -1,0 +1,1 @@
+- 若玩家本轮做到「${trigger}」，即当场顺势兑现：${description}

@@ -1,0 +1,2 @@
+# Prompt fragments intentionally preserve trailing blank lines between blocks.
+backend/prompt_templates/** whitespace=-blank-at-eof

@@ -1,0 +1,1 @@
+当前真实位置：玄苍大陆 / ${region} / ${location}${site}；状态：${state}；迷路风险：${lost_risk}${destination}

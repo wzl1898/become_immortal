@@ -1,0 +1,1 @@
+严格输出合法 JSON，不要 Markdown。
