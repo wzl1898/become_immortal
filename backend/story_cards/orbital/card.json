@@ -1,0 +1,314 @@
+{
+  "id": "orbital",
+  "version": 1,
+  "name": "星港余波",
+  "genre": "科幻生存",
+  "description": "轨道站在风暴后失联。作为初级维修员，你要在有限资源、技术故障与各方诉求之间寻找出路。",
+  "default_save_name": "值班维修员",
+  "status_fields": [
+    {
+      "key": "role",
+      "label": "岗位",
+      "kind": "text",
+      "initial": "初级维修员"
+    },
+    {
+      "key": "health",
+      "label": "健康",
+      "kind": "text",
+      "initial": "良好"
+    },
+    {
+      "key": "energy",
+      "label": "体力",
+      "kind": "text",
+      "initial": "充足"
+    },
+    {
+      "key": "expertise",
+      "label": "技能",
+      "kind": "text",
+      "initial": "基础电气检修"
+    },
+    {
+      "key": "condition",
+      "label": "状态",
+      "kind": "text",
+      "initial": "清醒"
+    },
+    {
+      "key": "supplies",
+      "label": "补给",
+      "kind": "resources",
+      "initial": "饮水 1 袋"
+    },
+    {
+      "key": "equipment",
+      "label": "装备",
+      "kind": "equipment",
+      "initial": "多功能维修工具（绝缘握柄，可测电压）"
+    }
+  ],
+  "world": {
+    "name": "晨曦轨道站",
+    "regions": [
+      {
+        "id": "dawn_station",
+        "name": "晨曦轨道站",
+        "role": "轨道居住站",
+        "summary": "风暴后与地面失联的民用轨道站，设施受损而秩序尚存。"
+      }
+    ],
+    "locations": [
+      {
+        "id": "maintenance_bay",
+        "region_id": "dawn_station",
+        "name": "维修舱",
+        "kind": "site",
+        "parent_id": null,
+        "summary": "主角工作的维修区，工具柜和局部空气循环装置仍能使用。"
+      },
+      {
+        "id": "central_hub",
+        "region_id": "dawn_station",
+        "name": "中央大厅",
+        "kind": "town",
+        "parent_id": null,
+        "summary": "居民集合和补给配给的公共区域。"
+      },
+      {
+        "id": "relay_room",
+        "region_id": "dawn_station",
+        "name": "通信机房",
+        "kind": "site",
+        "parent_id": null,
+        "summary": "需要值班授权才能进入的通信区，保留风暴前的发报记录。"
+      }
+    ],
+    "routes": [
+      {
+        "id": "bay_to_hub",
+        "from_location_id": "maintenance_bay",
+        "to_location_id": "central_hub",
+        "name": "维修舱至中央大厅走廊",
+        "difficulty": "low",
+        "risk": "low",
+        "summary": "应急照明下的公共通道，步行十分钟可通过。"
+      },
+      {
+        "id": "hub_to_relay",
+        "from_location_id": "central_hub",
+        "to_location_id": "relay_room",
+        "name": "中央大厅至通信机房通道",
+        "difficulty": "low",
+        "risk": "medium",
+        "summary": "防火门后的工作通道，需要值班授权。"
+      }
+    ],
+    "factions": [
+      {
+        "id": "station_ops",
+        "name": "站务组",
+        "kind": "administration",
+        "region_id": "dawn_station",
+        "summary": "负责生命维持、配给和维修排班。"
+      },
+      {
+        "id": "cargo_union",
+        "name": "货运互助会",
+        "kind": "merchant",
+        "region_id": "dawn_station",
+        "summary": "由滞留货运船员组成，保存部分备件和运输设备。"
+      }
+    ],
+    "rewards": [
+      {
+        "id": "diagnostic_access",
+        "name": "高级诊断权限",
+        "rank": "专业级",
+        "category": "权限",
+        "summary": "可以读取本站设备的完整故障记录，需要站务组授权。",
+        "visibility": "restricted",
+        "source_location_id": "central_hub",
+        "source_label": "站务组",
+        "reward_kind": "identity"
+      },
+      {
+        "id": "repair_drone",
+        "name": "便携维修无人机",
+        "rank": "专业级",
+        "category": "设备",
+        "summary": "可在狭小管道内执行检测和简单修复，耗电且需要备件。",
+        "visibility": "public",
+        "source_location_id": "maintenance_bay",
+        "source_label": "维修舱封存设备柜",
+        "reward_kind": "equipment"
+      }
+    ],
+    "opportunities": [
+      {
+        "id": "air_loop_fault",
+        "name": "空气循环故障排查",
+        "location_id": "maintenance_bay",
+        "kind": "task",
+        "clue": "循环装置的读数与检修日志存在差异。",
+        "danger": "low",
+        "default_state": "unknown"
+      }
+    ],
+    "special_locations": [
+      {
+        "id": "relay_archive",
+        "name": "通信机房记录库",
+        "entrance_location_id": "relay_room",
+        "kind": "受限设施",
+        "opening_rule": "获得值班授权并完成设备检查",
+        "entry_limit": "持有合法权限者"
+      }
+    ],
+    "power_levels": [
+      {
+        "id": "civilian",
+        "name": "普通居民",
+        "sort_order": 0,
+        "rarity": "常见",
+        "prevalence": "大部分站内人员，只拥有日常生活知识。",
+        "npc_rule": "不能无依据地精通设备修复、驾驶和医疗等所有领域。"
+      },
+      {
+        "id": "specialist",
+        "name": "专业人员",
+        "sort_order": 1,
+        "rarity": "少数",
+        "prevalence": "经过培训的技术员、医护和驾驶员。",
+        "npc_rule": "能力必须对应培训领域，权限由岗位决定。"
+      }
+    ],
+    "characters": [
+      {
+        "id": "lin_che",
+        "name": "林澈",
+        "location_id": "maintenance_bay",
+        "summary": "当班检修主管，优先保证生命维持系统稳定，要求所有操作留有记录。",
+        "visibility": "public"
+      },
+      {
+        "id": "zhou_he",
+        "name": "周禾",
+        "location_id": "central_hub",
+        "summary": "货运互助会联络员，希望用库存备件换取公平配给。",
+        "visibility": "public"
+      }
+    ],
+    "items": [
+      {
+        "id": "multitool",
+        "name": "多功能维修工具",
+        "location_id": "maintenance_bay",
+        "summary": "主角登记领用的基础工具，不具备破解权限的能力。",
+        "attrs": "绝缘握柄，可测电压",
+        "kind": "装备",
+        "visibility": "public"
+      },
+      {
+        "id": "sealed_battery",
+        "name": "密封电池",
+        "location_id": "maintenance_bay",
+        "summary": "封存设备柜里的标准电池，需要办理领用手续。",
+        "attrs": "标准接口",
+        "kind": "补给",
+        "visibility": "public"
+      }
+    ],
+    "location_aliases": {
+      "maintenance_bay": [
+        "维修区"
+      ],
+      "central_hub": [
+        "大厅"
+      ]
+    },
+    "site_aliases": {
+      "maintenance_bay": {
+        "工具柜旁": [
+          "工具柜旁"
+        ],
+        "循环装置旁": [
+          "循环装置旁"
+        ]
+      }
+    },
+    "faction_homes": {
+      "station_ops": "central_hub",
+      "cargo_union": "central_hub"
+    }
+  },
+  "initial": {
+    "location": {
+      "region_id": "dawn_station",
+      "location_id": "maintenance_bay",
+      "site_name": "工具柜旁",
+      "location_state": "安全",
+      "lost_risk": "无"
+    },
+    "time": {
+      "day": 1,
+      "minute_of_day": 480,
+      "season": "轨道标准周期",
+      "calendar_label": "站历"
+    },
+    "knowledge": [
+      {
+        "knowledge_type": "location",
+        "target_id": "maintenance_bay",
+        "status": "confirmed",
+        "reliability": "high",
+        "source": "岗位培训",
+        "notes": "熟悉所在区域。"
+      },
+      {
+        "knowledge_type": "location",
+        "target_id": "central_hub",
+        "status": "confirmed",
+        "reliability": "high",
+        "source": "岗位培训",
+        "notes": "熟悉所在区域。"
+      },
+      {
+        "knowledge_type": "route",
+        "target_id": "bay_to_hub",
+        "status": "confirmed",
+        "reliability": "high",
+        "source": "日常通勤",
+        "notes": "可步行往返。"
+      },
+      {
+        "knowledge_type": "character",
+        "target_id": "lin_che",
+        "status": "confirmed",
+        "reliability": "high",
+        "source": "同事关系",
+        "notes": "认识当班检修主管林澈。"
+      },
+      {
+        "knowledge_type": "item",
+        "target_id": "multitool",
+        "status": "confirmed",
+        "reliability": "high",
+        "source": "登记领用",
+        "notes": "持有多功能维修工具。"
+      }
+    ],
+    "inventory": [
+      "multitool"
+    ]
+  },
+  "prompts": {
+    "premise": "premise.md",
+    "style": "style.md",
+    "rules": "rules.md",
+    "rewards": "rewards.md",
+    "opening": "opening.md",
+    "example": "example.md"
+  }
+}

@@ -1,0 +1,1112 @@
+{
+  "id": "xiuxian",
+  "version": 1,
+  "name": "问道 · 玄苍大陆",
+  "genre": "修仙",
+  "description": "从白石村的凡人生活出发，在既定世界中寻找机缘，走出自己的修行之路。",
+  "default_save_name": "无名修士",
+  "status_fields": [
+    {
+      "key": "realm",
+      "label": "境界",
+      "kind": "text",
+      "initial": "凡人"
+    },
+    {
+      "key": "health",
+      "label": "气血",
+      "kind": "text",
+      "initial": "充盈"
+    },
+    {
+      "key": "spiritual_power",
+      "label": "灵力",
+      "kind": "text",
+      "initial": "尚未引气"
+    },
+    {
+      "key": "cultivation",
+      "label": "修为",
+      "kind": "text",
+      "initial": "未入修行"
+    },
+    {
+      "key": "condition",
+      "label": "状态",
+      "kind": "text",
+      "initial": "无伤"
+    },
+    {
+      "key": "resources",
+      "label": "资源",
+      "kind": "resources",
+      "initial": "无"
+    },
+    {
+      "key": "artifacts",
+      "label": "法宝",
+      "kind": "equipment",
+      "initial": "无"
+    }
+  ],
+  "world": {
+    "regions": [
+      {
+        "id": "qingwu_county",
+        "name": "青梧郡",
+        "role": "凡人与低阶修士边界",
+        "summary": "灵气稀薄，村镇、山野、低阶坊市与小宗门交错。"
+      },
+      {
+        "id": "chiyuan_ridge",
+        "name": "赤渊岭",
+        "role": "矿脉、火脉与散修争夺",
+        "summary": "赤铁矿场、地火裂隙和散修黑市密布。"
+      },
+      {
+        "id": "hanshui_marsh",
+        "name": "寒水泽",
+        "role": "水域、妖族与魂道遗迹",
+        "summary": "湖泽岛屿连绵，水府、沉船和阴魂传闻极多。"
+      },
+      {
+        "id": "central_lingdu",
+        "name": "中州灵都",
+        "role": "宗门、世家与仙城秩序",
+        "summary": "大宗门、仙族、万宝楼与散修登记体系的中心。"
+      },
+      {
+        "id": "wanzang_waste",
+        "name": "万葬荒原",
+        "role": "古战场与禁地",
+        "summary": "古战场阴气沉积，剑冢、碑林与古宗废墟散落其间。"
+      },
+      {
+        "id": "tianduan_mountains",
+        "name": "天断山脉",
+        "role": "大陆边界与后期险地",
+        "summary": "雷泽、妖岭与空间裂隙横亘在大陆边缘。"
+      }
+    ],
+    "locations": [
+      {
+        "id": "baishi_village",
+        "region_id": "qingwu_county",
+        "name": "白石村",
+        "kind": "village",
+        "parent_id": null,
+        "summary": "偏僻凡人村落，主角开局之地。"
+      },
+      {
+        "id": "baishi_back_mountain",
+        "region_id": "qingwu_county",
+        "name": "白石村后山",
+        "kind": "wild",
+        "parent_id": "baishi_village",
+        "summary": "草木繁密，夜里偶有微光。"
+      },
+      {
+        "id": "baishi_ruined_temple",
+        "region_id": "qingwu_county",
+        "name": "村外破庙",
+        "kind": "site",
+        "parent_id": "baishi_village",
+        "summary": "荒废多年，香火断绝。"
+      },
+      {
+        "id": "qingxi_town",
+        "region_id": "qingwu_county",
+        "name": "青溪镇",
+        "kind": "town",
+        "parent_id": null,
+        "summary": "白石村外最近的大镇，有药铺、武馆和散修传闻。"
+      },
+      {
+        "id": "qingmu_market",
+        "region_id": "qingwu_county",
+        "name": "青木集",
+        "kind": "market",
+        "parent_id": null,
+        "summary": "半公开的低阶散修交易地。"
+      },
+      {
+        "id": "black_wind_mountain",
+        "region_id": "qingwu_county",
+        "name": "黑风山",
+        "kind": "wild",
+        "parent_id": null,
+        "summary": "山势阴沉，外围有猎道，深处有妖兽。"
+      },
+      {
+        "id": "black_wind_outer",
+        "region_id": "qingwu_county",
+        "name": "黑风山外围",
+        "kind": "wild",
+        "parent_id": "black_wind_mountain",
+        "summary": "乱石坡与密林交错，常有采药人失踪。"
+      },
+      {
+        "id": "xuanxiao_outer_gate",
+        "region_id": "qingwu_county",
+        "name": "玄霄宗外山门",
+        "kind": "sect",
+        "parent_id": null,
+        "summary": "青梧郡一带有名的修仙宗门入口。"
+      },
+      {
+        "id": "qinglian_valley",
+        "region_id": "qingwu_county",
+        "name": "青莲谷",
+        "kind": "secret_entrance",
+        "parent_id": null,
+        "summary": "谷中常年雾锁，少有人能深入。"
+      },
+      {
+        "id": "red_iron_mine",
+        "region_id": "chiyuan_ridge",
+        "name": "赤铁矿场",
+        "kind": "mine",
+        "parent_id": null,
+        "summary": "赤渊岭最大的赤铁矿脉。"
+      },
+      {
+        "id": "lieyang_market",
+        "region_id": "chiyuan_ridge",
+        "name": "烈阳坊市",
+        "kind": "market",
+        "parent_id": null,
+        "summary": "散修与矿修交易之地。"
+      },
+      {
+        "id": "bloodsha_cave_ruin",
+        "region_id": "chiyuan_ridge",
+        "name": "血煞洞遗址",
+        "kind": "ruin",
+        "parent_id": null,
+        "summary": "旧魔修洞府残址。"
+      },
+      {
+        "id": "earthfire_cavern",
+        "region_id": "chiyuan_ridge",
+        "name": "地火窟",
+        "kind": "site",
+        "parent_id": null,
+        "summary": "天然地火汇聚之处。"
+      },
+      {
+        "id": "hanshui_market",
+        "region_id": "hanshui_marsh",
+        "name": "寒水坊",
+        "kind": "market",
+        "parent_id": null,
+        "summary": "寒水泽水路坊市。"
+      },
+      {
+        "id": "mist_conch_island",
+        "region_id": "hanshui_marsh",
+        "name": "雾螺岛",
+        "kind": "island",
+        "parent_id": null,
+        "summary": "散修聚居岛。"
+      },
+      {
+        "id": "sunken_star_lake",
+        "region_id": "hanshui_marsh",
+        "name": "沉星湖",
+        "kind": "lake",
+        "parent_id": null,
+        "summary": "湖底传有古沉船与水府残址。"
+      },
+      {
+        "id": "white_bone_ferry",
+        "region_id": "hanshui_marsh",
+        "name": "白骨渡",
+        "kind": "ferry",
+        "parent_id": null,
+        "summary": "阴气重的古渡口。"
+      },
+      {
+        "id": "lingdu_city",
+        "region_id": "central_lingdu",
+        "name": "灵都仙城",
+        "kind": "city",
+        "parent_id": null,
+        "summary": "玄苍大陆中部最大仙城。"
+      },
+      {
+        "id": "tianheng_sect",
+        "region_id": "central_lingdu",
+        "name": "天衡宗",
+        "kind": "sect",
+        "parent_id": null,
+        "summary": "中州正道大宗。"
+      },
+      {
+        "id": "taixuan_academy",
+        "region_id": "central_lingdu",
+        "name": "太玄书院",
+        "kind": "academy",
+        "parent_id": null,
+        "summary": "以功法、阵符和典籍闻名。"
+      },
+      {
+        "id": "wanbao_tower",
+        "region_id": "central_lingdu",
+        "name": "万宝楼总阁",
+        "kind": "market",
+        "parent_id": null,
+        "summary": "拍卖、交易和情报势力总阁。"
+      },
+      {
+        "id": "wanzang_camp",
+        "region_id": "wanzang_waste",
+        "name": "万葬原外围营地",
+        "kind": "camp",
+        "parent_id": null,
+        "summary": "进入万葬荒原前的修士落脚处。"
+      },
+      {
+        "id": "broken_sword_mound",
+        "region_id": "wanzang_waste",
+        "name": "断剑冢",
+        "kind": "ruin",
+        "parent_id": null,
+        "summary": "古战场中的剑修遗迹。"
+      },
+      {
+        "id": "soul_stele_forest",
+        "region_id": "wanzang_waste",
+        "name": "镇魂碑林",
+        "kind": "ruin",
+        "parent_id": null,
+        "summary": "碑林封着残魂与旧战记忆。"
+      },
+      {
+        "id": "nameless_old_sect",
+        "region_id": "wanzang_waste",
+        "name": "无名古宗废墟",
+        "kind": "ruin",
+        "parent_id": null,
+        "summary": "失落古宗门遗址。"
+      },
+      {
+        "id": "tianduan_pass",
+        "region_id": "tianduan_mountains",
+        "name": "天断关",
+        "kind": "pass",
+        "parent_id": null,
+        "summary": "通往天断山脉的要塞。"
+      },
+      {
+        "id": "thunder_marsh_peak",
+        "region_id": "tianduan_mountains",
+        "name": "雷泽峰",
+        "kind": "peak",
+        "parent_id": null,
+        "summary": "雷气常年不散。"
+      },
+      {
+        "id": "sky_demon_ridge",
+        "region_id": "tianduan_mountains",
+        "name": "天妖岭",
+        "kind": "wild",
+        "parent_id": null,
+        "summary": "高阶妖族活动区域。"
+      },
+      {
+        "id": "rift_gorge",
+        "region_id": "tianduan_mountains",
+        "name": "裂天峡",
+        "kind": "rift",
+        "parent_id": null,
+        "summary": "传有空间裂隙。"
+      }
+    ],
+    "routes": [
+      {
+        "id": "baishi_to_qingxi",
+        "from_location_id": "baishi_village",
+        "to_location_id": "qingxi_town",
+        "name": "白石村至青溪镇土路",
+        "difficulty": "low",
+        "risk": "low",
+        "summary": "村口土路通往青溪镇。"
+      },
+      {
+        "id": "baishi_to_back_mountain",
+        "from_location_id": "baishi_village",
+        "to_location_id": "baishi_back_mountain",
+        "name": "白石村后山小径",
+        "difficulty": "low",
+        "risk": "low",
+        "summary": "村后柴道入山。"
+      },
+      {
+        "id": "baishi_to_ruined_temple",
+        "from_location_id": "baishi_village",
+        "to_location_id": "baishi_ruined_temple",
+        "name": "村外破庙岔路",
+        "difficulty": "low",
+        "risk": "low",
+        "summary": "村西荒草路通向破庙。"
+      },
+      {
+        "id": "qingxi_to_qingmu",
+        "from_location_id": "qingxi_town",
+        "to_location_id": "qingmu_market",
+        "name": "青溪镇至青木集商道",
+        "difficulty": "low",
+        "risk": "medium",
+        "summary": "跟着商队最稳。"
+      },
+      {
+        "id": "qingxi_to_black_wind",
+        "from_location_id": "qingxi_town",
+        "to_location_id": "black_wind_outer",
+        "name": "青溪镇至黑风山外围猎道",
+        "difficulty": "medium",
+        "risk": "medium",
+        "summary": "猎户和采药人偶尔走此道。"
+      },
+      {
+        "id": "black_wind_outer_to_mountain",
+        "from_location_id": "black_wind_outer",
+        "to_location_id": "black_wind_mountain",
+        "name": "黑风山入山路",
+        "difficulty": "medium",
+        "risk": "high",
+        "summary": "越往深处越容易迷路。"
+      },
+      {
+        "id": "qingmu_to_xuanxiao",
+        "from_location_id": "qingmu_market",
+        "to_location_id": "xuanxiao_outer_gate",
+        "name": "青木集至玄霄宗外山门",
+        "difficulty": "medium",
+        "risk": "medium",
+        "summary": "散修地图上常见的山门方向。"
+      },
+      {
+        "id": "qingmu_to_qinglian",
+        "from_location_id": "qingmu_market",
+        "to_location_id": "qinglian_valley",
+        "name": "青木集至青莲谷旧路",
+        "difficulty": "medium",
+        "risk": "medium",
+        "summary": "旧路常年雾锁。"
+      },
+      {
+        "id": "qingmu_to_lieyang",
+        "from_location_id": "qingmu_market",
+        "to_location_id": "lieyang_market",
+        "name": "青木集至烈阳坊市远商道",
+        "difficulty": "high",
+        "risk": "medium",
+        "summary": "跨郡商道，需地图或商队。"
+      },
+      {
+        "id": "lieyang_to_bloodsha",
+        "from_location_id": "lieyang_market",
+        "to_location_id": "bloodsha_cave_ruin",
+        "name": "烈阳坊市至血煞洞遗址",
+        "difficulty": "high",
+        "risk": "high",
+        "summary": "散修间流传的险路。"
+      },
+      {
+        "id": "lieyang_to_earthfire",
+        "from_location_id": "lieyang_market",
+        "to_location_id": "earthfire_cavern",
+        "name": "烈阳坊市至地火窟",
+        "difficulty": "medium",
+        "risk": "medium",
+        "summary": "炼器师常走。"
+      },
+      {
+        "id": "lingdu_to_wanbao",
+        "from_location_id": "lingdu_city",
+        "to_location_id": "wanbao_tower",
+        "name": "灵都内城至万宝楼",
+        "difficulty": "low",
+        "risk": "low",
+        "summary": "仙城内路线。"
+      },
+      {
+        "id": "lingdu_to_tianheng",
+        "from_location_id": "lingdu_city",
+        "to_location_id": "tianheng_sect",
+        "name": "灵都至天衡宗山门",
+        "difficulty": "medium",
+        "risk": "low",
+        "summary": "中州正道山道。"
+      },
+      {
+        "id": "lingdu_to_taixuan",
+        "from_location_id": "lingdu_city",
+        "to_location_id": "taixuan_academy",
+        "name": "灵都至太玄书院",
+        "difficulty": "low",
+        "risk": "low",
+        "summary": "官道清晰。"
+      },
+      {
+        "id": "wanzang_to_sword",
+        "from_location_id": "wanzang_camp",
+        "to_location_id": "broken_sword_mound",
+        "name": "万葬营地至断剑冢",
+        "difficulty": "high",
+        "risk": "high",
+        "summary": "古战场外围险路。"
+      },
+      {
+        "id": "tianduan_to_thunder",
+        "from_location_id": "tianduan_pass",
+        "to_location_id": "thunder_marsh_peak",
+        "name": "天断关至雷泽峰",
+        "difficulty": "high",
+        "risk": "high",
+        "summary": "山路险峻，雷雨频繁。"
+      }
+    ],
+    "factions": [
+      {
+        "id": "xuanxiao_sect",
+        "name": "玄霄宗",
+        "kind": "sect",
+        "region_id": "qingwu_county",
+        "summary": "青梧郡修仙宗门，收徒严格。"
+      },
+      {
+        "id": "wanbao_tower",
+        "name": "万宝楼",
+        "kind": "merchant",
+        "region_id": "central_lingdu",
+        "summary": "经营拍卖、交易与情报。"
+      },
+      {
+        "id": "tianheng_sect",
+        "name": "天衡宗",
+        "kind": "sect",
+        "region_id": "central_lingdu",
+        "summary": "中州正道大宗。"
+      },
+      {
+        "id": "taixuan_academy",
+        "name": "太玄书院",
+        "kind": "academy",
+        "region_id": "central_lingdu",
+        "summary": "典籍、阵符与功法传承势力。"
+      },
+      {
+        "id": "danxia_valley",
+        "name": "丹霞谷",
+        "kind": "alchemy",
+        "region_id": "central_lingdu",
+        "summary": "丹道势力。"
+      },
+      {
+        "id": "shen_clan",
+        "name": "沈氏仙族",
+        "kind": "clan",
+        "region_id": "central_lingdu",
+        "summary": "中州修仙世家。"
+      },
+      {
+        "id": "red_crow_fort",
+        "name": "赤鸦寨",
+        "kind": "loose",
+        "region_id": "chiyuan_ridge",
+        "summary": "赤渊岭半匪半修士势力。"
+      }
+    ],
+    "rewards": [
+      {
+        "id": "yin_qi_jue",
+        "name": "引气诀",
+        "rank": "黄阶下品",
+        "category": "吐纳",
+        "primary_element": "neutral",
+        "realm_cap": "炼气三层",
+        "summary": "凡人入门吐纳法，流传很广。",
+        "visibility": "common",
+        "source_location_id": "qingxi_town",
+        "source_label": "散修流通",
+        "reward_kind": "art"
+      },
+      {
+        "id": "small_zhoutian",
+        "name": "小周天吐纳法",
+        "rank": "黄阶中品",
+        "category": "吐纳",
+        "primary_element": "neutral",
+        "realm_cap": "炼气六层",
+        "summary": "散修常见功法。",
+        "visibility": "common",
+        "source_location_id": "qingmu_market",
+        "source_label": "散修流通",
+        "reward_kind": "art"
+      },
+      {
+        "id": "qingxin_naling",
+        "name": "清心纳灵功",
+        "rank": "黄阶上品",
+        "category": "吐纳",
+        "primary_element": "neutral",
+        "realm_cap": "炼气九层",
+        "summary": "稳妥但进境偏慢。",
+        "visibility": "common",
+        "source_location_id": "xuanxiao_sect",
+        "source_label": "宗门外门",
+        "reward_kind": "art"
+      },
+      {
+        "id": "qingmu_yangqi",
+        "name": "青木养气诀",
+        "rank": "黄阶上品",
+        "category": "五行",
+        "primary_element": "wood",
+        "realm_cap": "炼气九层",
+        "summary": "木行入门正法。",
+        "visibility": "common",
+        "source_location_id": "qingmu_market",
+        "source_label": "坊市流通",
+        "reward_kind": "art"
+      },
+      {
+        "id": "hanyuan_water",
+        "name": "寒渊凝水诀",
+        "rank": "玄阶下品",
+        "category": "五行",
+        "primary_element": "water",
+        "realm_cap": "筑基初期",
+        "summary": "水行功法。",
+        "visibility": "hidden",
+        "source_location_id": "hanshui_market",
+        "source_label": "寒水坊",
+        "reward_kind": "art"
+      },
+      {
+        "id": "lieyang_fire",
+        "name": "烈阳吐火经",
+        "rank": "玄阶下品",
+        "category": "五行",
+        "primary_element": "fire",
+        "realm_cap": "筑基中期",
+        "summary": "火行功法。",
+        "visibility": "hidden",
+        "source_location_id": "lieyang_market",
+        "source_label": "烈阳坊市",
+        "reward_kind": "art"
+      },
+      {
+        "id": "small_wuxing_guiyuan",
+        "name": "小五行归元功",
+        "rank": "玄阶中品",
+        "category": "五行",
+        "primary_element": "five_elements",
+        "realm_cap": "筑基圆满",
+        "summary": "五行均衡，资源消耗较大。",
+        "visibility": "restricted",
+        "source_location_id": "xuanxiao_sect",
+        "source_label": "玄霄宗",
+        "reward_kind": "art"
+      },
+      {
+        "id": "qingfeng_sword",
+        "name": "青锋剑诀",
+        "rank": "黄阶上品",
+        "category": "剑修",
+        "primary_element": "metal",
+        "realm_cap": "炼气九层",
+        "summary": "低阶剑诀。",
+        "visibility": "common",
+        "source_location_id": "qingmu_market",
+        "source_label": "散修流通",
+        "reward_kind": "art"
+      },
+      {
+        "id": "xuanxiao_sword",
+        "name": "玄霄剑经",
+        "rank": "玄阶上品",
+        "category": "剑修",
+        "primary_element": "metal",
+        "realm_cap": "金丹初期",
+        "summary": "玄霄宗剑修传承。",
+        "visibility": "restricted",
+        "source_location_id": "xuanxiao_sect",
+        "source_label": "玄霄宗",
+        "reward_kind": "art"
+      },
+      {
+        "id": "iron_bone",
+        "name": "铁骨功",
+        "rank": "黄阶中品",
+        "category": "炼体",
+        "primary_element": "earth",
+        "realm_cap": "炼气期",
+        "summary": "低阶炼体法。",
+        "visibility": "common",
+        "source_location_id": "qingxi_town",
+        "source_label": "武馆流通",
+        "reward_kind": "art"
+      },
+      {
+        "id": "grasswood_alchemy",
+        "name": "草木丹经",
+        "rank": "黄阶上品",
+        "category": "丹道",
+        "primary_element": "wood",
+        "realm_cap": "炼气期",
+        "summary": "炼丹入门典籍。",
+        "visibility": "common",
+        "source_location_id": "qingmu_market",
+        "source_label": "坊市流通",
+        "reward_kind": "art"
+      },
+      {
+        "id": "basic_talisman",
+        "name": "基础符箓录",
+        "rank": "黄阶中品",
+        "category": "符箓",
+        "primary_element": "neutral",
+        "realm_cap": "炼气期",
+        "summary": "基础符箓典籍。",
+        "visibility": "common",
+        "source_location_id": "qingmu_market",
+        "source_label": "坊市流通",
+        "reward_kind": "art"
+      },
+      {
+        "id": "redsha_blood",
+        "name": "赤煞炼血经",
+        "rank": "玄阶下品",
+        "category": "魔道",
+        "primary_element": "blood",
+        "realm_cap": "筑基后期",
+        "summary": "血道速成法。",
+        "visibility": "forbidden",
+        "source_location_id": "bloodsha_cave_ruin",
+        "source_label": "血煞洞遗址",
+        "reward_kind": "art"
+      },
+      {
+        "id": "yin_soul_nian",
+        "name": "阴魂寄念术",
+        "rank": "玄阶上品",
+        "category": "魂道",
+        "primary_element": "soul",
+        "realm_cap": "金丹初期",
+        "summary": "魂道秘术。",
+        "visibility": "hidden",
+        "source_location_id": "white_bone_ferry",
+        "source_label": "白骨渡",
+        "reward_kind": "art"
+      },
+      {
+        "id": "qinglian_upper",
+        "name": "青莲化生诀·上篇",
+        "rank": "地阶残篇",
+        "category": "古法",
+        "primary_element": "wood",
+        "realm_cap": "筑基圆满",
+        "summary": "青莲古法残篇。",
+        "visibility": "lost",
+        "source_location_id": "qinglian_valley",
+        "source_label": "青莲秘境",
+        "reward_kind": "art"
+      },
+      {
+        "id": "taixu_fragment",
+        "name": "太虚观想录·残页",
+        "rank": "天阶残篇",
+        "category": "古法",
+        "primary_element": "soul",
+        "realm_cap": "未知",
+        "summary": "观想古法残页。",
+        "visibility": "lost",
+        "source_location_id": "nameless_old_sect",
+        "source_label": "无名古宗废墟",
+        "reward_kind": "art"
+      }
+    ],
+    "opportunities": [
+      {
+        "id": "baishi_spirit_spring",
+        "name": "白石后山灵泉",
+        "location_id": "baishi_back_mountain",
+        "kind": "resource",
+        "clue": "后山夜里偶有青光。",
+        "danger": "low",
+        "default_state": "unknown"
+      },
+      {
+        "id": "ruined_temple_bones",
+        "name": "破庙道人遗骨",
+        "location_id": "baishi_ruined_temple",
+        "kind": "art",
+        "clue": "破庙石像后有旧物痕迹。",
+        "danger": "low",
+        "default_state": "unknown"
+      },
+      {
+        "id": "black_wind_cave",
+        "name": "黑风山筑基洞府",
+        "location_id": "black_wind_mountain",
+        "kind": "cave",
+        "clue": "黑风山深处有旧阵封痕。",
+        "danger": "medium",
+        "default_state": "unknown"
+      },
+      {
+        "id": "qingwu_fair",
+        "name": "青梧小会",
+        "location_id": "qingmu_market",
+        "kind": "market",
+        "clue": "低阶散修定期聚集交易。",
+        "danger": "low",
+        "default_state": "unknown"
+      },
+      {
+        "id": "qinglian_secret",
+        "name": "青莲秘境",
+        "location_id": "qinglian_valley",
+        "kind": "realm",
+        "clue": "青莲谷雾锁，传有周期性开启。",
+        "danger": "high",
+        "default_state": "unknown"
+      },
+      {
+        "id": "bloodsha_manual_cache",
+        "name": "血煞洞传承暗格",
+        "location_id": "bloodsha_cave_ruin",
+        "kind": "art",
+        "clue": "遗址中残留血纹石室。",
+        "danger": "high",
+        "default_state": "unknown"
+      },
+      {
+        "id": "sunken_star_water_mansion",
+        "name": "沉星湖水府",
+        "location_id": "sunken_star_lake",
+        "kind": "realm",
+        "clue": "湖底有旧水府传闻。",
+        "danger": "high",
+        "default_state": "unknown"
+      },
+      {
+        "id": "broken_sword_inheritance",
+        "name": "断剑冢剑意传承",
+        "location_id": "broken_sword_mound",
+        "kind": "inheritance",
+        "clue": "断剑冢内剑气不散。",
+        "danger": "high",
+        "default_state": "unknown"
+      }
+    ],
+    "special_locations": [
+      {
+        "id": "qinglian_realm",
+        "name": "青莲秘境",
+        "entrance_location_id": "qinglian_valley",
+        "kind": "周期型秘境",
+        "opening_rule": "十年一开",
+        "entry_limit": "炼气后期至筑基初期"
+      },
+      {
+        "id": "black_wind_foundation_cave",
+        "name": "黑风山筑基洞府",
+        "entrance_location_id": "black_wind_mountain",
+        "kind": "洞府",
+        "opening_rule": "封印松动后可入",
+        "entry_limit": "炼气后期至筑基期"
+      },
+      {
+        "id": "sunken_star_mansion",
+        "name": "沉星湖水府",
+        "entrance_location_id": "sunken_star_lake",
+        "kind": "水府",
+        "opening_rule": "需水路线索",
+        "entry_limit": "筑基至金丹"
+      },
+      {
+        "id": "nameless_old_sect_realm",
+        "name": "无名古宗废墟",
+        "entrance_location_id": "nameless_old_sect",
+        "kind": "古宗遗迹",
+        "opening_rule": "灾变/残图",
+        "entry_limit": "金丹以上"
+      }
+    ],
+    "power_levels": [
+      {
+        "id": "mortal",
+        "name": "凡人/未入修行",
+        "sort_order": 0,
+        "rarity": "普遍",
+        "prevalence": "凡俗村镇的绝大多数人口；普通店主、郎中、农户、伙计和差役默认属于此层。",
+        "npc_rule": "凡俗职业 NPC 默认是凡人，除非已有事实或事件因果明确说明其修行来源。"
+      },
+      {
+        "id": "qi_early",
+        "name": "炼气一至三层",
+        "sort_order": 1,
+        "rarity": "少见",
+        "prevalence": "初入修行者，多见于散修、宗门杂役或学徒、坊市低阶护卫；在凡俗村镇已属异于常人。",
+        "npc_rule": "凡俗职业 NPC 只有在身份、经历和所在地支持时才能处于此层，不能把修为当作随手添加的特色。"
+      },
+      {
+        "id": "qi_middle",
+        "name": "炼气四至六层",
+        "sort_order": 2,
+        "rarity": "稀少",
+        "prevalence": "有稳定传承和多年积累的修士，可担任小势力骨干、资深散修或坊市重要执事。",
+        "npc_rule": "不得赋予普通村民或普通凡俗商户；必须有与修为相称的修行身份、资源来源和活动理由。"
+      },
+      {
+        "id": "qi_late",
+        "name": "炼气七至九层",
+        "sort_order": 3,
+        "rarity": "罕见",
+        "prevalence": "炼气期中的强者，通常是小势力首脑、宗门资深弟子或执事、成名散修。",
+        "npc_rule": "不得作为无特殊背景的药店老板、掌柜、郎中、路人或普通护卫；出场必须有明确身份与因果。"
+      },
+      {
+        "id": "foundation",
+        "name": "筑基",
+        "sort_order": 4,
+        "rarity": "极罕见",
+        "prevalence": "足以坐镇一方小势力，在青梧郡属于有名有号的重要人物。",
+        "npc_rule": "只能用于宗门长老、势力之主等匹配身份；现身凡俗地点必须有重要原因并产生相称影响。"
+      },
+      {
+        "id": "golden_core",
+        "name": "金丹",
+        "sort_order": 5,
+        "rarity": "凤毛麟角",
+        "prevalence": "可影响一郡乃至更大范围格局的高阶修士，普通修士也难以亲见。",
+        "npc_rule": "不得作为日常事件的普通 NPC；必须有固定势力、重大机缘或区域级事件支撑其身份与出场。"
+      },
+      {
+        "id": "nascent_soul",
+        "name": "元婴",
+        "sort_order": 6,
+        "rarity": "传说级",
+        "prevalence": "大陆顶层强者，行踪和决断足以影响大宗门与大片地域。",
+        "npc_rule": "只能在后期重大世界事件中出现，禁止作为地方人物、普通任务发布者或便利性救场角色。"
+      }
+    ],
+    "name": "玄苍大陆",
+    "location_aliases": {
+      "baishi_village": [
+        "村里",
+        "村中",
+        "村内"
+      ],
+      "baishi_back_mountain": [
+        "后山"
+      ],
+      "baishi_ruined_temple": [
+        "破庙"
+      ],
+      "xuanxiao_outer_gate": [
+        "玄霄宗山门",
+        "外山门"
+      ]
+    },
+    "site_aliases": {
+      "baishi_village": {
+        "村西老槐树": [
+          "村西老槐树",
+          "老槐树下",
+          "老槐树旁"
+        ],
+        "村西小径": [
+          "村西小径"
+        ],
+        "白石村村口": [
+          "白石村村口",
+          "村口"
+        ],
+        "白石村村中": [
+          "白石村村中",
+          "村中",
+          "村里",
+          "村内"
+        ],
+        "张婶家": [
+          "张婶家"
+        ]
+      },
+      "baishi_back_mountain": {
+        "后山入口": [
+          "后山入口",
+          "后山山脚"
+        ],
+        "后山林中": [
+          "后山林中",
+          "后山密林",
+          "林间空地"
+        ]
+      },
+      "baishi_ruined_temple": {
+        "破庙门前": [
+          "破庙门前",
+          "破庙外"
+        ],
+        "破庙内": [
+          "破庙内",
+          "破庙里",
+          "庙内"
+        ]
+      }
+    },
+    "faction_homes": {
+      "xuanxiao_sect": "xuanxiao_outer_gate",
+      "wanbao_tower": "wanbao_tower",
+      "tianheng_sect": "tianheng_sect",
+      "taixuan_academy": "taixuan_academy"
+    },
+    "characters": [
+      {
+        "id": "zhang_shen",
+        "name": "张婶",
+        "location_id": "baishi_village",
+        "summary": "白石村村民，熟悉村中的日常人情。",
+        "visibility": "public"
+      }
+    ],
+    "items": [
+      {
+        "id": "dry_food",
+        "name": "干粮",
+        "location_id": "baishi_village",
+        "summary": "村民出门携带的寻常食物。",
+        "attrs": "耐存放",
+        "kind": "资源",
+        "visibility": "public"
+      }
+    ]
+  },
+  "initial": {
+    "location": {
+      "region_id": "qingwu_county",
+      "location_id": "baishi_village",
+      "site_name": "村西老槐树",
+      "location_state": "安全",
+      "lost_risk": "无"
+    },
+    "time": {
+      "day": 1,
+      "minute_of_day": 930,
+      "season": "深秋",
+      "calendar_label": "仙历"
+    },
+    "knowledge": [
+      {
+        "knowledge_type": "location",
+        "target_id": "baishi_village",
+        "status": "confirmed",
+        "reliability": "high",
+        "source": "亲身所在",
+        "notes": "已确认白石村。"
+      },
+      {
+        "knowledge_type": "location",
+        "target_id": "baishi_back_mountain",
+        "status": "confirmed",
+        "reliability": "high",
+        "source": "村中生活",
+        "notes": "知道后山小径。"
+      },
+      {
+        "knowledge_type": "location",
+        "target_id": "baishi_ruined_temple",
+        "status": "confirmed",
+        "reliability": "medium",
+        "source": "村中传闻",
+        "notes": "知道村外有座破庙。"
+      },
+      {
+        "knowledge_type": "location",
+        "target_id": "qingxi_town",
+        "status": "confirmed",
+        "reliability": "high",
+        "source": "村民往来",
+        "notes": "知道青溪镇大致方向。"
+      },
+      {
+        "knowledge_type": "route",
+        "target_id": "baishi_to_qingxi",
+        "status": "confirmed",
+        "reliability": "high",
+        "source": "村民往来",
+        "notes": "村口土路可到青溪镇。"
+      },
+      {
+        "knowledge_type": "route",
+        "target_id": "baishi_to_back_mountain",
+        "status": "confirmed",
+        "reliability": "high",
+        "source": "村中生活",
+        "notes": "柴道入后山。"
+      },
+      {
+        "knowledge_type": "route",
+        "target_id": "baishi_to_ruined_temple",
+        "status": "confirmed",
+        "reliability": "medium",
+        "source": "村中生活",
+        "notes": "荒草岔路通破庙。"
+      },
+      {
+        "knowledge_type": "location",
+        "target_id": "black_wind_mountain",
+        "status": "rumored",
+        "reliability": "medium",
+        "source": "村民传闻",
+        "notes": "听过黑风山之名，但不知深处路径。"
+      },
+      {
+        "knowledge_type": "location",
+        "target_id": "xuanxiao_outer_gate",
+        "status": "rumored",
+        "reliability": "low",
+        "source": "仙师传闻",
+        "notes": "听过玄霄宗招收弟子的传闻。"
+      },
+      {
+        "knowledge_type": "location",
+        "target_id": "qingmu_market",
+        "status": "rumored",
+        "reliability": "low",
+        "source": "散修传闻",
+        "notes": "听过青木集有修士交易。"
+      },
+      {
+        "knowledge_type": "faction",
+        "target_id": "xuanxiao_sect",
+        "status": "rumored",
+        "reliability": "low",
+        "source": "仙师传闻",
+        "notes": "听过玄霄宗。"
+      },
+      {
+        "knowledge_type": "art",
+        "target_id": "yin_qi_jue",
+        "status": "rumored",
+        "reliability": "low",
+        "source": "凡间传闻",
+        "notes": "听过入门吐纳法。"
+      }
+    ],
+    "inventory": []
+  },
+  "prompts": {
+    "premise": "premise.md",
+    "style": "style.md",
+    "rules": "rules.md",
+    "rewards": "rewards.md",
+    "opening": "opening.md",
+    "example": "example.md"
+  }
+}

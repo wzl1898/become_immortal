@@ -9,6 +9,7 @@ ${routes}
 ${factions}
 ${arts}
 ${opportunities}
-回答分寸：若主角仅 rumored 某功法，只能说听过名字/大概用途/来源传闻，不能说已经会修，也不能说完全不知道。
+${characters}
+${items}
+回答分寸：若主角仅 rumored 某技能，只能说听过名字/大概用途/来源传闻，不能说已经会修，也不能说完全不知道。
 【/世界约束 Agent】
-

@@ -118,8 +118,8 @@ class DirectorPlanTests(unittest.TestCase):
         rule = "玩家提出目标就让世界百依百顺"
 
         self.assertIn(rule, prompts.DIRECTOR_PROGRESSION_SYSTEM_PROMPT)
-        self.assertIn("鲁莽可以受伤、失败、损失资源甚至陨落", prompts.DIRECTOR_PROGRESSION_SYSTEM_PROMPT)
-        self.assertIn("机敏可以避险或抓住已有机缘", prompts.DIRECTOR_PROGRESSION_SYSTEM_PROMPT)
+        self.assertIn("鲁莽可以受伤、失败、损失资源甚至死亡", prompts.DIRECTOR_PROGRESSION_SYSTEM_PROMPT)
+        self.assertIn("机敏可以避险或抓住已有机会", prompts.DIRECTOR_PROGRESSION_SYSTEM_PROMPT)
         self.assertNotIn("玩家的选择要有真实后果", prompts.SYSTEM_PROMPT)
         self.assertNotIn(rule, prompts.SYSTEM_PROMPT)
 
@@ -144,7 +144,7 @@ class DirectorPlanTests(unittest.TestCase):
         self.assertNotIn('"type":"plot"', user)
         self.assertNotIn("【当前输入】", user)
 
-    def test_cultivation_rules_are_at_tail_of_story_event_and_causal_prompts(self):
+    def test_default_card_cultivation_rules_are_in_story_event_and_causal_prompts(self):
         prompts_to_check = (
             prompts.SYSTEM_PROMPT,
             prompts.DIRECTOR_EVENT_SYSTEM_PROMPT,
@@ -156,7 +156,7 @@ class DirectorPlanTests(unittest.TestCase):
             self.assertIn("不得创造“引气期”“纳气期”或其他未定义境界", prompt)
             self.assertIn("普通店主、药店老板、郎中", prompt)
             self.assertIn("炼气七至九层已属罕见强者", prompt)
-            self.assertTrue(prompt.rstrip().endswith("不得继续扩散该错误术语。"))
+            self.assertIn("不得继续扩散该错误术语。", prompt)
 
     def test_player_avoidance_replans_event_without_resetting_it(self):
         first = game._apply_director_plan(_director(), _plan(), "迎战", _context(), 1)

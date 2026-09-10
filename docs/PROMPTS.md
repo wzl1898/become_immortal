@@ -1,6 +1,6 @@
 # 项目内提示词模板
 
-提示词正文位于 `backend/prompt_templates/`，以 UTF-8 Markdown 文件管理。`backend/prompts.py` 只负责读取、校验变量和组合公共规则；`game.py`、`constraints.py` 负责准备上下文、判断是否注入可选块，以及构造消息列表。
+通用提示词正文位于 `backend/prompt_templates/`，题材相关内容位于 `backend/story_cards/<id>/`，均以 UTF-8 Markdown 文件管理。`backend/prompts.py` 负责读取、校验变量和组合当前存档的故事卡规则；`game.py`、`constraints.py` 负责准备上下文、判断是否注入可选块，以及构造消息列表。完整世界包格式见 [故事卡编写说明](STORY_CARDS.md)。
 
 ## 按用途查找
 
@@ -16,7 +16,7 @@
 | `observation/conflict/`、`observation/character/`、`observation/state/` | 冲突观察、人物设定和状态校准 |
 | `memory/inquiry/`、`memory/extract/` | 世界记忆问询、搜索工具反馈和记忆提取 |
 | `constraints/` | 开场、行动、问询的世界约束呈现模板 |
-| `shared/` | 公共修炼规则、主角状态、物品、记忆、历史种子与面板片段 |
+| `shared/` | 故事卡注入格式、动态状态字段、物品、记忆、历史种子与面板片段 |
 | `legacy/director/` | 保留兼容的旧导演提示词；新生成链路不调用旧导演 |
 
 `system.md` 是系统规则，`user.md` 是主要输入；其余文件按使用场景命名。可选内容采用独立片段，例如只有确实召回记忆时，才使用对应记忆模板。模板里的换行也是最终提示词的一部分。
@@ -54,15 +54,17 @@ content = render_prompt(
 - 修改已有文案不需要改 Python。新增、删除或重命名槽位时，需要同步修改调用处传入的变量。
 - 文件的前后空白会原样保留；`.gitattributes` 允许这些模板保留用于拼接的尾部空行。不要在模板里添加供维护者阅读、却不打算发送给模型的备注。
 
-事件系统模板用 `${context}` 明确指定世界、记忆和引导的注入位置；因果系统模板也使用显式上下文槽位。注入不依赖 `# 输出` 等标题文字。`${cultivation_rules}` 用于引用共享修炼规则，放置顺序由各系统模板决定。
+事件系统模板用 `${context}` 明确指定世界、记忆和引导的注入位置；因果系统模板也使用显式上下文槽位。注入不依赖 `# 输出` 等标题文字。`${story_rules}` 引用当前存档故事卡的背景和规则；事件、冲突引导和爽点 Agent 另外消费奖励规则，剧情 Agent 另外消费风格、状态字段和格式示例。放置顺序由各系统模板决定。
+
+原 `shared/cultivation.md` 已移到 `story_cards/xiuxian/rules.md`。故事卡 Markdown 是纯文本，不解析 `${...}`；无需转义美元符号。
 
 ## 生效与存档
 
 所有模板在进程启动时读取，运行期间使用同一份快照。修改模板后需要重启后端；普通的 uvicorn `--reload` 默认只监听 Python 文件，不保证 Markdown 修改会触发重启。
 
-本次拆分保留原有存档行为：存档 `messages[0]` 中保存的剧情系统提示词继续用于该存档。修改 `engine/narrative/system.md` 后，新建存档使用新规则；已有存档不会被自动改写。其他 Agent 的模板在重启后用于后续调用。
+存档 `messages[0]` 中保存的剧情系统提示词继续用于该存档。修改 `engine/narrative/system.md` 后，新建存档使用新规则；已有存档不会被自动改写。其他 Agent 的通用模板在重启后用于后续调用，但题材规则始终取该存档保存的故事卡快照。修改故事卡内容或版本只影响之后创建的新局。
 
-世界数据库中的事实、裁判判定与结构化结果、状态转移、记忆筛选、输出解析、模型参数和调用顺序仍由原有模块管理。模板负责模型指令及上下文的文本呈现，不执行数据库查询或业务逻辑。
+世界事实从故事卡加载并写入存档，存档中的位置、知识和机会状态独立维护。裁判判定、状态转移、记忆筛选、输出解析和模型调用仍由原有模块管理。模板负责模型指令及上下文的文本呈现，不执行数据库查询或业务逻辑。
 
 ## 验证
 
@@ -72,4 +74,4 @@ content = render_prompt(
 .venv/bin/python -m unittest discover -s backend/tests -t backend
 ```
 
-`test_prompt_templates.py` 检查变量契约、字面文本保留、工作目录独立性，以及修改标题后上下文槽位仍然有效。既有 Agent 测试继续检查输入顺序、信息边界和共享修炼规则。
+`test_prompt_templates.py` 检查变量契约、字面文本保留、工作目录独立性，以及修改标题后上下文槽位仍然有效。`test_story_cards.py` 检查题材隔离、状态字段、奖励、存档快照和旧档迁移；既有 Agent 测试继续检查输入顺序与信息边界。

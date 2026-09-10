@@ -58,14 +58,14 @@ class PromptTemplateTests(unittest.TestCase):
             )
         self.assertLess(result.index("【稳定世界】"), result.index("【近期世界记忆】"))
         self.assertLess(result.index("【引导层事件引导】"), result.index("# 返回格式"))
-        self.assertTrue(result.endswith(prompts.CULTIVATION_SYSTEM_APPENDIX))
+        self.assertIn(prompts.CULTIVATION_SYSTEM_APPENDIX, result)
 
     def test_causal_context_remains_before_shared_cultivation_rules(self):
         result = game._director_causal_messages(
             {"core": "村口争执"}, {"location": "白石村"}, [], {}, ""
         )[0]["content"]
         self.assertLess(result.index("【稳定世界】"), result.index("# 固定修炼体系"))
-        self.assertTrue(result.endswith(prompts.CULTIVATION_SYSTEM_APPENDIX))
+        self.assertIn(prompts.CULTIVATION_SYSTEM_APPENDIX, result)
 
     def test_template_lookup_does_not_depend_on_working_directory(self):
         backend = str(prompts.TEMPLATE_DIR.parent)

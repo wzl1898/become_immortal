@@ -3,13 +3,13 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>问道 · 修仙文字奇缘</title>
-  <link rel="stylesheet" href="style.css?v=mobile-layout-1" />
+  <title>故事引擎</title>
+  <link rel="stylesheet" href="style.css?v=story-cards-1" />
 </head>
 <body>
   <main id="user-gate" class="user-gate">
     <form id="user-form" class="user-form" autocomplete="off">
-      <h1>问道</h1>
+      <h1>故事引擎</h1>
       <label for="user-id-input">User ID</label>
       <input
         id="user-id-input"
@@ -29,7 +29,7 @@
 
   <div id="app" class="app locked">
     <header class="topbar">
-      <h1>问道</h1>
+      <h1>故事引擎</h1>
       <div class="actions">
         <button id="user-btn" class="ghost user-btn" title="切换 userid"></button>
         <span id="save-name" class="save-name" title="当前存档"></span>
@@ -38,9 +38,26 @@
         <button id="llm-btn" class="ghost" title="查看 LLM 请求类别与耗时">请求</button>
         <button id="lore-btn" class="ghost" title="查看与打听世界记忆">记忆</button>
         <button id="saves-btn" class="ghost" title="存档 / 读档">存档</button>
-        <button id="restart" class="ghost" title="另起新的一世">新的一世</button>
+        <button id="restart" class="ghost" title="选择故事卡，开启新故事">新建故事</button>
       </div>
     </header>
+
+    <dialog id="story-card-dialog" class="story-card-dialog" aria-labelledby="story-card-title">
+      <form id="story-card-form">
+        <div class="story-card-heading">
+          <p class="story-card-eyebrow">新的故事</p>
+          <h2 id="story-card-title">选择一个世界</h2>
+          <p>每张故事卡都有自己的背景、地图、人物和成长规则。</p>
+        </div>
+        <div id="story-card-list" class="story-card-list" aria-label="可选故事卡"></div>
+        <p id="story-card-error" class="story-card-error" role="alert"></p>
+        <div class="story-card-actions">
+          <button id="story-card-cancel" class="ghost" type="button">取消</button>
+          <button id="story-card-retry" class="ghost hidden" type="button">重新加载</button>
+          <button id="story-card-start" type="submit" disabled>开始故事</button>
+        </div>
+      </form>
+    </dialog>
 
     <aside id="status-panel" class="status-panel empty" aria-label="身体状态">
       <div class="status-head">
@@ -51,7 +68,7 @@
         </div>
       </div>
       <div id="status-body" class="status-body"></div>
-      <p class="status-empty">尚未入世</p>
+      <p class="status-empty">等待故事开始</p>
     </aside>
 
     <aside id="trace-panel" class="trace-panel empty" aria-label="Agent 实时 Trace">
@@ -68,11 +85,11 @@
     <div id="drawer" class="drawer hidden">
       <div class="drawer-panel">
         <div class="drawer-head">
-          <h2>历世存档</h2>
+          <h2>故事存档</h2>
           <button id="drawer-close" class="ghost">关闭</button>
         </div>
         <ul id="save-list" class="save-list"></ul>
-        <p id="save-empty" class="save-empty hidden">还没有存档，去开启第一世吧。</p>
+        <p id="save-empty" class="save-empty hidden">还没有存档，去开启一个故事吧。</p>
       </div>
       <div class="drawer-mask"></div>
     </div>
@@ -148,13 +165,13 @@
       <input
         id="action"
         type="text"
-        placeholder="你会怎么做？顺着灵光，或自行其事……"
+        placeholder="你会怎么做？跟随线索，或自行探索……"
         disabled
       />
       <button id="send" type="submit" disabled>行动</button>
     </form>
   </div>
 
-  <script src="app.js?v=user-gate-1"></script>
+  <script src="app.js?v=story-cards-1"></script>
 </body>
 </html>

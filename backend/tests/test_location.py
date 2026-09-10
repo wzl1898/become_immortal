@@ -49,7 +49,7 @@ class StructuredLocationTests(unittest.TestCase):
         )
 
         for block in blocks:
-            self.assertIn("固定修为人口分布", block)
+            self.assertIn("固定人员能力分布", block)
             self.assertIn("炼气七至九层（罕见）", block)
             self.assertIn("药店老板", block)
 

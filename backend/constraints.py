@@ -12,50 +12,26 @@ import re
 from collections import defaultdict
 
 import store
+import story_cards
 from prompts import render_prompt
 
 
 MOVE_WORDS = ("去", "前往", "赶往", "回", "返回", "离开", "沿", "往", "进", "进入", "赶路", "找路")
 EXPLORE_WORDS = ("搜", "搜索", "探索", "查探", "查看", "观察", "寻找", "翻找", "调查", "摸索")
 SOCIAL_WORDS = ("问", "打听", "拜访", "交谈", "交易", "买", "卖", "求见", "拜师")
-CULTIVATE_WORDS = ("修炼", "闭关", "突破", "吐纳", "疗伤", "研读", "参悟")
+CULTIVATE_WORDS = (
+    "修炼",
+    "训练",
+    "练习",
+    "学习",
+    "闭关",
+    "突破",
+    "吐纳",
+    "疗伤",
+    "研读",
+    "参悟",
+)
 ITEM_WORDS = ("使用", "服用", "拿", "收起", "丢", "买", "卖", "炼制")
-
-FACTION_HOME_LOCATIONS = {
-    "xuanxiao_sect": "xuanxiao_outer_gate",
-    "wanbao_tower": "wanbao_tower",
-    "tianheng_sect": "tianheng_sect",
-    "taixuan_academy": "taixuan_academy",
-}
-
-# Only aliases that are unambiguous within the fixed world. They help the
-# reconciliation pass understand natural prose without creating locations.
-LOCATION_ALIASES = {
-    "baishi_village": ("村里", "村中", "村内"),
-    "baishi_back_mountain": ("后山",),
-    "baishi_ruined_temple": ("破庙",),
-    "xuanxiao_outer_gate": ("玄霄宗山门", "外山门"),
-}
-
-# Local scenes are deliberately allow-listed.  They refine ``site_name`` but
-# never create a new world location or move the player across the world map.
-SITE_ALIASES = {
-    "baishi_village": {
-        "村西老槐树": ("村西老槐树", "老槐树下", "老槐树旁"),
-        "村西小径": ("村西小径",),
-        "白石村村口": ("白石村村口", "村口"),
-        "白石村村中": ("白石村村中", "村中", "村里", "村内"),
-        "张婶家": ("张婶家",),
-    },
-    "baishi_back_mountain": {
-        "后山入口": ("后山入口", "后山山脚"),
-        "后山林中": ("后山林中", "后山密林", "林间空地"),
-    },
-    "baishi_ruined_temple": {
-        "破庙门前": ("破庙门前", "破庙外"),
-        "破庙内": ("破庙内", "破庙里", "庙内"),
-    },
-}
 
 _ARRIVAL_BEFORE_RE = re.compile(
     r"(?:抵达|到达|来到|赶到|走到|行至|回到|返回到?|进入|走进|踏入|"
@@ -80,12 +56,17 @@ def opening_constraints(session_id: str) -> str:
     if not snap:
         return ""
     return render_prompt(
-        'constraints/opening',
+        "constraints/opening",
+        opening=snap["story_card"]["prompts"]["opening"],
         cultivation=_cultivation_demographics_line(snap),
         location=_location_line(snap),
         time=_time_line(snap),
-        confirmed_locations=_knowledge_line(snap, 'location', 'confirmed', '已确认地点', limit=8),
-        rumored_locations=_knowledge_line(snap, 'location', 'rumored', '听闻地点', limit=8),
+        confirmed_locations=_knowledge_line(
+            snap, "location", "confirmed", "已确认地点", limit=8
+        ),
+        rumored_locations=_knowledge_line(
+            snap, "location", "rumored", "听闻地点", limit=8
+        ),
     )
 
 
@@ -100,23 +81,29 @@ def action_constraints(session_id: str, action: str) -> str:
     verdict = _adjudicate(session_id, snap, action, action_type, matches)
     local = _local_context(snap, matches)
     return render_prompt(
-        'constraints/action',
+        "constraints/action",
         cultivation=_cultivation_demographics_line(snap),
         location=_location_line(snap),
         time=_time_line(snap),
         intent=_intent_line(action_type, verdict),
         entities=_entity_line(matches),
-        confirmed_locations=_knowledge_line(snap, 'location', 'confirmed', '已确认地点', limit=10),
-        rumored_locations=_knowledge_line(snap, 'location', 'rumored', '听闻地点', limit=10),
-        routes=_knowledge_line(snap, 'route', 'confirmed', '已确认路线', limit=10),
-        arts=_knowledge_line(snap, 'art', 'rumored', '已听闻功法', limit=8),
-        opportunities=_knowledge_line(snap, 'opportunity', 'rumored', '已知机缘线索', limit=8),
+        confirmed_locations=_knowledge_line(
+            snap, "location", "confirmed", "已确认地点", limit=10
+        ),
+        rumored_locations=_knowledge_line(
+            snap, "location", "rumored", "听闻地点", limit=10
+        ),
+        routes=_knowledge_line(snap, "route", "confirmed", "已确认路线", limit=10),
+        arts=_knowledge_line(snap, "art", "rumored", "已听闻技能", limit=8),
+        opportunities=_knowledge_line(
+            snap, "opportunity", "rumored", "已知机会线索", limit=8
+        ),
         local_context=("\n" + local_text if (local_text := _local_line(local)) else ""),
-        verdict=verdict['verdict'],
-        reason=verdict['reason'],
-        core_result=verdict['core_result'],
-        allowed_reveals=_join_or_none(verdict['allowed_reveals']),
-        forbidden_reveals=_join_or_none(verdict['forbidden_reveals']),
+        verdict=verdict["verdict"],
+        reason=verdict["reason"],
+        core_result=verdict["core_result"],
+        allowed_reveals=_join_or_none(verdict["allowed_reveals"]),
+        forbidden_reveals=_join_or_none(verdict["forbidden_reveals"]),
     )
 
 
@@ -126,15 +113,17 @@ def inquiry_constraints(session_id: str) -> str:
     if not snap:
         return ""
     return render_prompt(
-        'constraints/inquiry',
+        "constraints/inquiry",
         cultivation=_cultivation_demographics_line(snap),
         location=_location_line(snap),
         time=_time_line(snap),
-        locations=_knowledge_detail_line(snap, 'location', '地点知识', limit=14),
-        routes=_knowledge_detail_line(snap, 'route', '路线知识', limit=12),
-        factions=_knowledge_detail_line(snap, 'faction', '势力知识', limit=10),
-        arts=_knowledge_detail_line(snap, 'art', '功法知识', limit=10),
-        opportunities=_knowledge_detail_line(snap, 'opportunity', '机缘线索', limit=10),
+        locations=_knowledge_detail_line(snap, "location", "地点知识", limit=14),
+        routes=_knowledge_detail_line(snap, "route", "路线知识", limit=12),
+        factions=_knowledge_detail_line(snap, "faction", "势力知识", limit=10),
+        arts=_knowledge_detail_line(snap, "art", "技能知识", limit=10),
+        opportunities=_knowledge_detail_line(snap, "opportunity", "机会线索", limit=10),
+        characters=_knowledge_detail_line(snap, "character", "已知人物", limit=10),
+        items=_knowledge_detail_line(snap, "item", "已知物品", limit=10),
     )
 
 
@@ -147,6 +136,7 @@ def get_world_state(session_id: str) -> dict | None:
     names = _names_by_table(snap)
     intended_id = snap["location"]["intended_destination_id"]
     return {
+        "world_name": snap["world_name"],
         "location": {
             "region_id": snap["location"]["region_id"],
             "region_name": snap["location"]["region_name"],
@@ -155,17 +145,31 @@ def get_world_state(session_id: str) -> dict | None:
             "site_name": snap["location"]["site_name"],
             "location_state": snap["location"]["location_state"],
             "intended_destination_id": intended_id,
-            "intended_destination_name": names.get(intended_id, "") if intended_id else "",
+            "intended_destination_name": (
+                names.get(intended_id, "") if intended_id else ""
+            ),
             "lost_risk": snap["location"]["lost_risk"],
         },
         "time": _public_time(snap["time"]),
         "knowledge": {
-            "confirmed_locations": _names_for_knowledge(snap, knowledge, "location", "confirmed"),
-            "rumored_locations": _names_for_knowledge(snap, knowledge, "location", "rumored"),
-            "confirmed_routes": _names_for_knowledge(snap, knowledge, "route", "confirmed"),
+            "confirmed_locations": _names_for_knowledge(
+                snap, knowledge, "location", "confirmed"
+            ),
+            "rumored_locations": _names_for_knowledge(
+                snap, knowledge, "location", "rumored"
+            ),
+            "confirmed_routes": _names_for_knowledge(
+                snap, knowledge, "route", "confirmed"
+            ),
             "known_factions": _names_for_knowledge(snap, knowledge, "faction", None),
             "known_arts": _names_for_knowledge(snap, knowledge, "art", None),
-            "known_opportunities": _names_for_knowledge(snap, knowledge, "opportunity", None),
+            "known_opportunities": _names_for_knowledge(
+                snap, knowledge, "opportunity", None
+            ),
+            "known_characters": _names_for_knowledge(
+                snap, knowledge, "character", None
+            ),
+            "known_items": _names_for_knowledge(snap, knowledge, "item", None),
         },
         "cultivation_demographics": snap["cultivation_demographics"],
     }
@@ -182,7 +186,9 @@ def reconcile_location(
 
     arrivals: list[tuple[int, dict, str]] = []
     for location in snap["locations"]:
-        aliases = (location["name"],) + LOCATION_ALIASES.get(location["id"], ())
+        aliases = (location["name"],) + tuple(
+            snap.get("location_aliases", {}).get(location["id"], ())
+        )
         for alias in aliases:
             start = 0
             while True:
@@ -203,7 +209,9 @@ def reconcile_location(
         target_index, target, target_alias = max(arrivals, key=lambda row: (row[0], len(row[2])))
 
     location_id = target["id"] if target else snap["location"]["location_id"]
-    site_arrivals = _confirmed_site_arrivals(narrative, location_id)
+    site_arrivals = _confirmed_site_arrivals(
+        narrative, location_id, snap.get("site_aliases", {})
+    )
     site_name = snap["location"]["site_name"]
     if target:
         # A macro move must never retain a stale site from the previous place.
@@ -240,9 +248,16 @@ def reconcile_location(
     return target
 
 
-def _confirmed_site_arrivals(narrative: str, location_id: str) -> list[tuple[int, str]]:
+def _confirmed_site_arrivals(
+    narrative: str, location_id: str, sites: dict | None = None
+) -> list[tuple[int, str]]:
     arrivals = []
-    for canonical, aliases in SITE_ALIASES.get(location_id, {}).items():
+    sites = (
+        sites
+        if sites is not None
+        else story_cards.get()["world"].get("site_aliases", {})
+    )
+    for canonical, aliases in sites.get(location_id, {}).items():
         for alias in aliases:
             start = 0
             while True:
@@ -304,16 +319,19 @@ def director_context(session_id: str, action: str) -> dict:
                 "knowledge_status": known.get("status") if known else "unknown",
             })
 
-    reward_candidates = [{
-        "id": row["id"],
-        "name": row["name"],
-        "reward_kind": "art",
-        "rank": row["rank"],
-        "category": row["category"],
-        "summary": row["summary"],
-        "source_location_id": row.get("source_location_id"),
-        "source_label": row["source_label"],
-    } for row in snap["arts"]]
+    reward_candidates = [
+        {
+            "id": row["id"],
+            "name": row["name"],
+            "reward_kind": row["reward_kind"],
+            "rank": row["rank"],
+            "category": row["category"],
+            "summary": row["summary"],
+            "source_location_id": row.get("source_location_id"),
+            "source_label": row["source_label"],
+        }
+        for row in snap["arts"]
+    ]
     opportunity_names = {row["id"]: row["name"] for row in snap["opportunities"]}
     reward_names = {row["id"]: row["name"] for row in reward_candidates}
     existing_reward_bindings = [{
@@ -365,11 +383,22 @@ def director_context(session_id: str, action: str) -> dict:
         "text": f"{row['name']}：{row['summary']}，来源为{row['source_label']}",
     } for row in snap["arts"] if row["id"] in {art["id"] for art in arts})
 
+    for collection in ("characters", "items"):
+        facts.extend(
+            {
+                "id": f"{collection}:{row['id']}",
+                "kind": collection,
+                "text": f"{row['name']}：{row.get('summary', '')}",
+            }
+            for row in snap.get(collection, [])
+            if row.get("location_id") in relevant_location_ids
+        )
     allowed_reference_ids = {row["id"] for row in facts}
     allowed_reference_ids.update(row["id"] for row in arts)
     allowed_reference_ids.update(row["id"] for row in opportunities)
     allowed_reference_ids.update(row["id"] for row in reward_candidates)
     return {
+        "world_name": snap["world_name"],
         "location": {
             "region_id": snap["location"]["region_id"],
             "region_name": snap["location"]["region_name"],
@@ -388,6 +417,16 @@ def director_context(session_id: str, action: str) -> dict:
             "opportunities": _names_for_knowledge(snap, knowledge, "opportunity", None),
         },
         "facts": facts,
+        "characters": [
+            row
+            for row in snap.get("characters", [])
+            if row.get("location_id") in relevant_location_ids
+        ],
+        "items": [
+            row
+            for row in snap.get("items", [])
+            if row.get("location_id") in relevant_location_ids
+        ],
         "arts": arts,
         "opportunities": opportunities,
         "reward_candidates": reward_candidates,
@@ -395,9 +434,9 @@ def director_context(session_id: str, action: str) -> dict:
         "cultivation_demographics": snap["cultivation_demographics"],
         "allowed_reference_ids": sorted(allowed_reference_ids),
         "forbidden_reveals": [
-            "切片之外的地点、路线、势力、功法、机缘和秘境",
+            "切片之外的地点、路线、势力、技能、机会和特殊场所",
             "主角未知且未被本轮骨架选中的客观世界事实",
-            "没有固定来源 ID 的功法、传承、法宝或重大资源",
+            "没有固定来源 ID 的技能、传承、装备或重大资源",
         ],
     }
 
@@ -412,7 +451,11 @@ def selected_director_facts(context: dict, reference_ids: list[str]) -> list[dic
         if row.get("id")
     }
     selected.extend(
-        {"id": row["id"], "kind": "art", "text": f"{row['name']}：{row['summary']}"}
+        {
+            "id": row["id"],
+            "kind": row.get("reward_kind", "art"),
+            "text": f"{row['name']}：{row['summary']}",
+        }
         for row in reward_rows.values()
         if row["id"] in wanted
     )
@@ -431,7 +474,7 @@ def _render_constraint_block(title: str, lines: list[str]) -> str:
 
 def _infer_action_type(action: str) -> str:
     if any(w in action for w in CULTIVATE_WORDS):
-        return "修炼"
+        return "训练/成长"
     if any(w in action for w in MOVE_WORDS):
         return "移动"
     if any(w in action for w in EXPLORE_WORDS):
@@ -455,7 +498,11 @@ def _match_entities(snap: dict, action: str) -> dict[str, list[dict]]:
     for source, kind in specs:
         for row in snap[source]:
             name = row.get("name") or ""
-            aliases = LOCATION_ALIASES.get(row["id"], ()) if kind == "location" else ()
+            aliases = (
+                snap.get("location_aliases", {}).get(row["id"], ())
+                if kind == "location"
+                else ()
+            )
             if (name and name in action) or any(alias in action for alias in aliases):
                 buckets[kind].append(row)
     return dict(buckets)
@@ -469,9 +516,9 @@ def _adjudicate(
     matches: dict[str, list[dict]],
 ) -> dict:
     forbidden = [
-        "未进入主角知识系统的固定机缘细节",
+        "未进入主角知识系统的固定机会细节",
         "未确认路线的远方地点具体路径",
-        "SQLite 固定库不存在的功法、地点、秘境、势力",
+        "SQLite 固定库不存在的技能、地点、特殊场所、势力",
     ]
     allowed = ["当前位置可见环境", "主角已知/听闻内容", "与玩家行动直接相关的低层线索"]
     if action_type == "移动":
@@ -480,7 +527,7 @@ def _adjudicate(
         return {
             "verdict": "allowed",
             "reason": "探索发生在当前地点或当前叙事范围内。",
-            "core_result": "可检查当前位置的固定线索；若无固定机缘，不得临时生成重大奖励。",
+            "core_result": "可检查当前位置的固定线索；若无固定机会，不得临时生成重大奖励。",
             "allowed_reveals": allowed + _local_reveals(snap),
             "forbidden_reveals": forbidden,
         }
@@ -488,17 +535,18 @@ def _adjudicate(
         return {
             "verdict": "allowed",
             "reason": "可与当前地点合理存在的人群互动，但核心实体仍须来自固定库。",
-            "core_result": "可通过问询、交易或传闻让主角获得模糊知识；不要直接给远方秘境精确入口。",
-            "allowed_reveals": allowed + ["可把固定库中常见功法/公开势力作为坊间传闻露出"],
+            "core_result": "可通过问询、交易或传闻让主角获得模糊知识；不要直接给远方特殊场所精确入口。",
+            "allowed_reveals": allowed
+            + ["可把固定库中常见技能/公开势力作为坊间传闻露出"],
             "forbidden_reveals": forbidden,
         }
-    if action_type == "修炼":
+    if action_type == "训练/成长":
         return {
             "verdict": "allowed",
-            "reason": "修炼按简单体系处理：境界、修为、主修功法、灵根软绑定、暗伤和突破资源。",
-            "core_result": "小境界可随修为推进；大境界突破需要关键资源或机缘，不能无因跃迁。",
+            "reason": "训练与成长必须遵循当前故事卡的能力体系、已有技能、身体状态和资源条件。",
+            "core_result": "能力进步需要实际练习或明确剧情条件，不得无因获得新技能、设备或权限。",
             "allowed_reveals": allowed,
-            "forbidden_reveals": forbidden + ["不在功法库中的新功法"],
+            "forbidden_reveals": forbidden + ["不在技能库中的新技能"],
         }
     if _mentions_unknown_core(action, matches):
         return {
@@ -531,9 +579,9 @@ def _adjudicate_movement(
         loc_targets = [l for l in snap["locations"] if l["id"] in entrances]
     if not loc_targets and matches.get("faction"):
         home_ids = {
-            FACTION_HOME_LOCATIONS[f["id"]]
+            snap.get("faction_homes", {})[f["id"]]
             for f in matches["faction"]
-            if f["id"] in FACTION_HOME_LOCATIONS
+            if f["id"] in snap.get("faction_homes", {})
         }
         loc_targets = [l for l in snap["locations"] if l["id"] in home_ids]
     if not loc_targets:
@@ -581,7 +629,22 @@ def _adjudicate_movement(
 
 
 def _mentions_unknown_core(action: str, matches: dict[str, list[dict]]) -> bool:
-    bookish = ("诀", "经", "功", "法", "术", "秘境", "洞府", "宗", "派", "楼", "谷", "山", "镇", "城")
+    bookish = (
+        "诀",
+        "经",
+        "功",
+        "法",
+        "术",
+        "特殊场所",
+        "洞府",
+        "宗",
+        "派",
+        "楼",
+        "谷",
+        "山",
+        "镇",
+        "城",
+    )
     has_entity = any(matches.values())
     return not has_entity and any(ch in action for ch in bookish)
 
@@ -592,8 +655,18 @@ def _knowledge_map(snap: dict) -> dict[tuple[str, str], dict]:
 
 def _names_by_table(snap: dict) -> dict[str, str]:
     names = {}
-    for key in ("regions", "locations", "routes", "factions", "arts", "opportunities", "realms"):
-        for row in snap[key]:
+    for key in (
+        "regions",
+        "locations",
+        "routes",
+        "factions",
+        "arts",
+        "opportunities",
+        "realms",
+        "characters",
+        "items",
+    ):
+        for row in snap.get(key, []):
             names[row["id"]] = row["name"]
     return names
 
@@ -635,12 +708,13 @@ def _location_line(snap: dict) -> str:
     name_by_id = _names_by_table(snap)
     dest = f"；行动意图：{name_by_id.get(intended, intended)}" if intended else ""
     return render_prompt(
-        'constraints/location',
-        region=loc['region_name'],
-        location=loc['location_name'],
+        "constraints/location",
+        world_name=snap["world_name"],
+        region=loc["region_name"],
+        location=loc["location_name"],
         site=site,
-        state=loc['location_state'],
-        lost_risk=loc['lost_risk'],
+        state=loc["location_state"],
+        lost_risk=loc["lost_risk"],
         destination=dest,
     )
 
@@ -716,7 +790,7 @@ def _elapsed_minutes(action: str, narrative: str, world_time: dict) -> int:
         "移动": 30,
         "探索": 15,
         "社交/交易": 15,
-        "修炼": 60,
+        "训练/成长": 60,
         "物品": 5,
     }.get(action_type, 10)
 
@@ -730,9 +804,9 @@ def _entity_line(matches: dict[str, list[dict]]) -> str:
     labels = {
         "location": "地点",
         "faction": "势力",
-        "art": "功法",
-        "opportunity": "机缘",
-        "realm": "秘境/洞府",
+        "art": "技能",
+        "opportunity": "机会",
+        "realm": "特殊场所/洞府",
     }
     for kind, rows in matches.items():
         names = "、".join(row["name"] for row in rows[:6])
@@ -770,7 +844,9 @@ def _local_line(local: dict) -> str:
     if local["routes"]:
         chunks.append("隐性本地路线：" + "、".join(r["name"] for r in local["routes"]))
     if local["opportunities"]:
-        chunks.append("本地固定机缘线索：" + "、".join(o["clue"] for o in local["opportunities"]))
+        chunks.append(
+            "本地固定机会线索：" + "、".join(o["clue"] for o in local["opportunities"])
+        )
     if local["factions"]:
         chunks.append("本区域固定势力：" + "、".join(f["name"] for f in local["factions"]))
     return "；".join(chunks)
@@ -799,9 +875,9 @@ def _state_for_location(location: dict) -> str:
     if kind in {"wild", "ruin", "secret_entrance", "lake", "peak", "rift"}:
         return "野外"
     if kind in {"market", "town", "city"}:
-        return "坊市" if kind == "market" else "安全"
+        return "交易区" if kind == "market" else "安全"
     if kind in {"sect", "academy"}:
-        return "宗门"
+        return "组织驻地"
     return "安全"
 
 

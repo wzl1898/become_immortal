@@ -7,4 +7,4 @@
 
 最后只输出严格 JSON，不要 Markdown，不要解释：
 {"conflict_seed":""}
-${cultivation_rules}
+${story_rules}

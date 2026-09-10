@@ -24,26 +24,9 @@ from dataclasses import replace
 import constraints
 import embed
 import store
+import story_cards
 from llm import complete_chat, config_from_env
-from prompts import (
-    render_prompt,
-    render_system_prompt,
-    DIRECTOR_AUDIT_SYSTEM_PROMPT,
-    DIRECTOR_PROGRESSION_SYSTEM_PROMPT,
-    DIRECTOR_VIEWPOINT_SYSTEM_PROMPT,
-    DIRECTOR_HOOK_SYSTEM_PROMPT,
-    DIRECTOR_PACING_SYSTEM_PROMPT,
-    DIRECTOR_PAYOFF_SYSTEM_PROMPT,
-    DIRECTOR_SKELETON_SYSTEM_PROMPT,
-    DIRECTOR_SYSTEM_PROMPT,
-    GUIDANCE_CONFLICT_SYSTEM_PROMPT,
-    CHARACTER_SETTING_SYSTEM_PROMPT,
-    INQUIRY_SYSTEM_PROMPT,
-    MEMORY_EXTRACT_SYSTEM_PROMPT,
-    NARRATIVE_OBSERVER_SYSTEM_PROMPT,
-    OPENING_PROMPT,
-    SYSTEM_PROMPT,
-)
+from prompts import OPENING_PROMPT, render_prompt, render_system_prompt
 
 # save_id -> {"messages": list[dict], "transcript": list[dict], "turns": int, "character_state": dict, "world_memory": list[dict]}
 _CACHE: dict[str, dict] = {}
@@ -78,7 +61,7 @@ HOT_TURNS = 5
 RECALL_TOP_K = 3
 RECALL_THRESHOLD = 0.35
 
-DEFAULT_NAME = "无名修士"
+DEFAULT_NAME = story_cards.get()["default_save_name"]
 
 # ---- 导演模块（实时事件骨架）----
 # 同一语义意图第二次必须结算。
@@ -159,26 +142,30 @@ def init() -> None:
     store.init()
 
 
+def _card(state: dict | None = None) -> dict:
+    return (state or {}).get("story_card") or story_cards.get()
+
+
+def get_story_card_info(session_id: str) -> dict:
+    return story_cards.public(_card(_get(session_id)))
+
+
 def create_session(
-    name: str = DEFAULT_NAME, user_id: str = store.DEFAULT_USER_ID
+    name: str | None = None,
+    user_id: str = store.DEFAULT_USER_ID,
+    story_card_id: str = story_cards.DEFAULT_CARD_ID,
 ) -> str:
-    """新建一局并落库，返回 save_id。"""
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    sid = store.create(name, messages, user_id)
-    _CACHE[sid] = {
-        "session_id": sid,
-        "messages": messages,
-        "transcript": [],
-        "turns": 0,
-        "character_state": {},
-        "world_memory": [],
-        "world_entities": {},
-        "inventory": [],
-        "director_state": {},
-        "stage_summary": "",
-        "summary_turn": 0,
-        "_injected": [],  # 上一回合注入过（热+召回）的物品归一化名，供 _reconcile 判失去
-    }
+    card = story_cards.get(story_card_id)
+    messages = [
+        {
+            "role": "system",
+            "content": render_system_prompt("engine/narrative/system", card=card),
+        }
+    ]
+    sid = store.create(
+        name or card["default_save_name"], messages, user_id, story_card=card
+    )
+    _get(sid)
     return sid
 
 
@@ -204,6 +191,7 @@ def _get(session_id: str) -> dict | None:
             m["content"] = _strip_hint(m["content"])
     _CACHE[session_id] = {
         "session_id": session_id,
+        "story_card": data["story_card"],
         "messages": data["messages"],
         "transcript": data["transcript"],
         "turns": data["turns"],
@@ -261,7 +249,12 @@ async def _run_character_setting_agent(state: dict, user_input: str) -> dict:
     try:
         raw = await complete_chat(
             [
-                {"role": "system", "content": CHARACTER_SETTING_SYSTEM_PROMPT},
+                {
+                    "role": "system",
+                    "content": render_system_prompt(
+                        "observation/character/system", card=_card(state)
+                    ),
+                },
                 {"role": "user", "content": content},
             ],
             temperature=0.25,
@@ -390,28 +383,9 @@ def _split_top_level(val: str) -> list[str]:
     return parts
 
 
-_STATE_FIELDS = {
-    "境界": "realm",
-    "气血": "health",
-    "灵力": "spiritual_power",
-    "修为": "cultivation",
-    "状态": "condition",
-    "资源": "resources",
-    "法宝": "artifacts",
-}
-
-_STATE_LABELS = (
-    ("realm", "境界"),
-    ("health", "气血"),
-    ("spiritual_power", "灵力"),
-    ("cultivation", "修为"),
-    ("condition", "状态"),
-    ("resources", "资源"),
-    ("artifacts", "法宝"),
-)
-
-
-def _parse_character_state(status_text: str | None, turn: int) -> dict:
+def _parse_character_state(
+    status_text: str | None, turn: int, card: dict | None = None
+) -> dict:
     """从《状态》面板解析主角当前状态快照。解析失败返回空 dict。"""
     if not status_text:
         return {}
@@ -423,7 +397,9 @@ def _parse_character_state(status_text: str | None, turn: int) -> dict:
         m = re.match(r"^(.+?)[：:]\s*(.*)$", line)
         if not m:
             continue
-        key = _STATE_FIELDS.get(m.group(1).strip())
+        key = {label: key for key, label in story_cards.field_labels(card)}.get(
+            m.group(1).strip()
+        )
         if key:
             character_state[key] = m.group(2).strip()
     if not character_state:
@@ -441,7 +417,7 @@ async def reconcile_character_state_from_text(
     if state is None:
         raise ValueError("存档不存在")
     current = dict(state.get("character_state") or {})
-    fields = {key: label for key, label in _STATE_LABELS}
+    fields = dict(story_cards.field_labels(_card(state)))
     prompt = render_prompt(
         'observation/state/user',
         fields=_stable_json(fields),
@@ -483,12 +459,12 @@ async def reconcile_character_state_from_text(
     return {"character_state": state.get("character_state") or current, "updates": updates, "evidence": clean_evidence}
 
 
-def _character_state_dossier(character_state: dict) -> str:
+def _character_state_dossier(character_state: dict, card: dict | None = None) -> str:
     """把最新版主角状态拼成独立约束串。空则返回 ""。"""
     if not character_state:
         return ""
     lines = []
-    for key, label in _STATE_LABELS:
+    for key, label in story_cards.field_labels(card):
         val = (character_state.get(key) or "").strip()
         if val:
             lines.append(f"{label}：{val}")
@@ -518,16 +494,23 @@ def _norm_name(raw: str) -> str:
     return s.strip()
 
 
-def _parse_panel_items(status: str | None, objects: str | None) -> list[dict]:
-    """从本回合面板（《状态》资源/法宝 + 《物件》块）解析出带属性的物件。
+def _parse_panel_items(
+    status: str | None, objects: str | None, card: dict | None = None
+) -> list[dict]:
+    """从故事卡定义的物品持有栏与《物件》块解析带属性的物件。
 
     返回 [{name, attrs, kind, whereabouts}]：
-    - 资源行里带括号的条目 → kind="资源"
-    - 法宝行非空 → kind="法宝"，支持多个法宝用顿号/逗号分隔
+    - resources 类型栏里带括号的条目入库，kind 使用故事卡字段标签
+    - equipment 类型栏非空条目入库，支持多个装备用顿号/逗号分隔
     - 《物件》整行 → kind="物件"（attrs 取括号内容，name 取主名）
     寻常消耗品（无括号资源）不入库。
     """
     parsed: list[dict] = []
+    item_fields = {
+        field["label"]: field["kind"]
+        for field in (card or story_cards.get())["status_fields"]
+        if field["kind"] in {"resources", "equipment"}
+    }
 
     def _attrs_of(text: str) -> str:
         for op, cl in (("（", "）"), ("(", ")")):
@@ -540,32 +523,38 @@ def _parse_panel_items(status: str | None, objects: str | None) -> list[dict]:
     if status:
         for line in status.splitlines():
             line = line.strip()
-            m = re.match(r"^(资源|法宝)[：:]\s*(.*)$", line)
+            m = re.match(r"^(.+?)[：:]\s*(.*)$", line)
             if not m:
                 continue
-            field, val = m.group(1), m.group(2).strip()
+            field, val = m.group(1).strip(), m.group(2).strip()
+            if field not in item_fields:
+                continue
             if not val or val in ("无", "暂无", "无。"):
                 continue
-            if field == "资源":
+            if item_fields[field] == "resources":
                 for part in _split_top_level(val):
                     part = part.strip()
                     if part and ("（" in part or "(" in part):
-                        parsed.append({
-                            "name": _norm_name(part),
-                            "attrs": _attrs_of(part),
-                            "kind": "资源",
-                            "whereabouts": "随身",
-                        })
+                        parsed.append(
+                            {
+                                "name": _norm_name(part),
+                                "attrs": _attrs_of(part),
+                                "kind": field,
+                                "whereabouts": "随身",
+                            }
+                        )
             else:
                 for part in _split_top_level(val):
                     part = part.strip()
                     if part and part not in ("无", "暂无", "无。"):
-                        parsed.append({
-                            "name": _norm_name(part),
-                            "attrs": _attrs_of(part),
-                            "kind": "法宝",
-                            "whereabouts": "随身",
-                        })
+                        parsed.append(
+                            {
+                                "name": _norm_name(part),
+                                "attrs": _attrs_of(part),
+                                "kind": field,
+                                "whereabouts": "随身",
+                            }
+                        )
 
     if objects:
         for line in objects.splitlines():
@@ -598,6 +587,7 @@ def _reconcile_inventory(state: dict, narration: str) -> None:
     parsed = _parse_panel_items(
         status.group(1) if status else None,
         objects.group(1) if objects else None,
+        _card(state),
     )
 
     by_name = {it["name"]: it for it in inv}
@@ -620,7 +610,7 @@ def _reconcile_inventory(state: dict, narration: str) -> None:
             inv.append(item)
             by_name[name] = item
         else:
-            # 已知物：补全空属性、更新 kind（拥有关系可能迁移：物件→资源/法宝）
+            # 已知物：补全空属性、更新 kind（拥有关系可能迁移到物品持有栏）
             if p["attrs"] and not cur.get("attrs"):
                 cur["attrs"] = p["attrs"]
             if p["kind"]:
@@ -863,7 +853,7 @@ def _injection(
         query = "\n\n".join(p for p in (action or "", _recent_scene(state["transcript"])) if p)
         memories = _recall_world_memory(state, query)
     return (
-        _character_state_dossier(state.get("character_state") or {})
+        _character_state_dossier(state.get("character_state") or {}, _card(state))
         + _inventory_dossier(active)
         + _world_memory_dossier(memories)
     )
@@ -1007,7 +997,12 @@ def messages_for_inquiry(session_id: str, question: str) -> list[dict]:
     state = _get(session_id)
     scene = _recent_scene(state["transcript"])
     knowledge = constraints.inquiry_constraints(session_id)
-    messages = [{"role": "system", "content": INQUIRY_SYSTEM_PROMPT}]
+    messages = [
+        {
+            "role": "system",
+            "content": render_system_prompt("memory/inquiry/system", card=_card(state)),
+        }
+    ]
     if knowledge:
         messages.append({"role": "system", "content": knowledge.rstrip()})
     parts = []
@@ -1100,6 +1095,7 @@ def commit(session_id: str, user_content: str | None, assistant_content: str) ->
     character_state = _parse_character_state(
         status_match.group(1) if status_match else None,
         state["turns"],
+        _card(state),
     )
     if character_state:
         state["character_state"] = character_state
@@ -1184,7 +1180,12 @@ async def _run_narrative_observer(
     try:
         raw = await complete_chat(
             [
-                {"role": "system", "content": NARRATIVE_OBSERVER_SYSTEM_PROMPT},
+                {
+                    "role": "system",
+                    "content": render_system_prompt(
+                        "observation/conflict/system", card=_card(state)
+                    ),
+                },
                 {"role": "user", "content": content},
             ],
             temperature=0.1,
@@ -1255,7 +1256,12 @@ async def _generate_conflict_guidance(
     try:
         raw = await complete_chat(
             [
-                {"role": "system", "content": GUIDANCE_CONFLICT_SYSTEM_PROMPT},
+                {
+                    "role": "system",
+                    "content": render_system_prompt(
+                        "guidance/conflict/system", card=_card(state)
+                    ),
+                },
                 {"role": "user", "content": prompt},
             ],
             temperature=0.3,
@@ -1304,8 +1310,18 @@ async def _extract_and_store_memory(
         entities = dict((state or {}).get("world_entities") or {})
         raw = await complete_chat(
             [
-                {"role": "system", "content": MEMORY_EXTRACT_SYSTEM_PROMPT},
-                {"role": "user", "content": _memory_extract_user_prompt(user_content, assistant_content, turn, known, entities)},
+                {
+                    "role": "system",
+                    "content": render_system_prompt(
+                        "memory/extract/system", card=_card(state)
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": _memory_extract_user_prompt(
+                        user_content, assistant_content, turn, known, entities
+                    ),
+                },
             ],
             temperature=0.2,
             max_tokens=800,
@@ -1877,7 +1893,10 @@ def _event_needs_foundation(prev: dict) -> bool:
 
 
 def _director_event_system_prompt(
-    world_context: dict, memories: list[dict], guidance: dict | None = None
+    world_context: dict,
+    memories: list[dict],
+    guidance: dict | None = None,
+    card: dict | None = None,
 ) -> str:
     """Place trusted event context after the rules and before the output contract."""
     memory_texts = [
@@ -1895,7 +1914,9 @@ def _director_event_system_prompt(
             render_prompt('engine/event/guidance', guidance=_stable_json(guidance))
         )
     context = "\n\n".join(context_parts)
-    return render_system_prompt("engine/event/system", context="\n\n" + context)
+    return render_system_prompt(
+        "engine/event/system", context="\n\n" + context, card=card
+    )
 
 
 def _director_causal_messages(
@@ -1904,6 +1925,7 @@ def _director_causal_messages(
     memories: list[dict],
     character: dict,
     recent_story: str,
+    card: dict | None = None,
 ) -> list[dict]:
     memory_texts = [
         text
@@ -1912,7 +1934,9 @@ def _director_causal_messages(
         if (text := str(item.get("text") or "").strip())
     ]
     stable_world = render_prompt('shared/stable_world', world=_stable_json(world_context))
-    system_prompt = render_system_prompt("engine/causal/system", context="\n\n" + stable_world)
+    system_prompt = render_system_prompt(
+        "engine/causal/system", context="\n\n" + stable_world, card=card
+    )
     user_content = render_prompt(
         'engine/causal/user',
         event=_stable_json(event_seed),
@@ -1991,12 +2015,17 @@ async def _ensure_event_foundation(
                 {
                     "role": "system",
                     "content": _director_event_system_prompt(
-                        world_context, memories, prev.get("event_guidance")
+                        world_context,
+                        memories,
+                        prev.get("event_guidance"),
+                        card=_card(state),
                     ),
                 },
                 {"role": "user", "content": base_context},
             ],
-            "director_event", DIRECTOR_EVENT_MAX_TOKENS, state.get("session_id"),
+            "director_event",
+            DIRECTOR_EVENT_MAX_TOKENS,
+            state.get("session_id"),
         )
         if event_result is None:
             event_result = _fallback_event_creation(world_context)
@@ -2065,14 +2094,19 @@ async def _ensure_event_foundation(
     else:
         viewpoint_model, viewpoint_meta = await _call_director_text_agent(
             [
-                {"role": "system", "content": DIRECTOR_VIEWPOINT_SYSTEM_PROMPT},
+                {
+                    "role": "system",
+                    "content": render_system_prompt(
+                        "engine/viewpoint/system", card=_card(state)
+                    ),
+                },
                 {
                     "role": "user",
                     "content": (
                         render_prompt(
-                            'engine/viewpoint/user',
-                            core=event_seed['core'],
-                            location=_stable_json(world_context.get('location') or {}),
+                            "engine/viewpoint/user",
+                            core=event_seed["core"],
+                            location=_stable_json(world_context.get("location") or {}),
                         )
                     ),
                 },
@@ -2147,11 +2181,14 @@ async def _run_next_event_generation(
                     world_context,
                     memories,
                     (state.get("director_state") or {}).get("event_guidance"),
+                    card=_card(state),
                 ),
             },
             {"role": "user", "content": context},
         ],
-        "director_event", DIRECTOR_EVENT_MAX_TOKENS, session_id,
+        "director_event",
+        DIRECTOR_EVENT_MAX_TOKENS,
+        session_id,
     )
     if result is None:
         return
@@ -2266,7 +2303,12 @@ async def _run_causal_foundation(
     try:
         messages = _inject_story_seed_messages(
             _director_causal_messages(
-                event_seed, world_context, memories, character, recent_story
+                event_seed,
+                world_context,
+                memories,
+                character,
+                recent_story,
+                card=_card(_CACHE.get(session_id)),
             ),
             session_id,
             "director_causal",
@@ -2520,10 +2562,15 @@ def _director_payoff_messages(
         action=action,
     )
     return [
-        {"role": "system", "content": DIRECTOR_PAYOFF_SYSTEM_PROMPT},
         {
             "role": "system",
-            "content": render_prompt('engine/payoff/world', world=_stable_json(world_layer)),
+            "content": render_system_prompt("engine/payoff/system", card=_card(state)),
+        },
+        {
+            "role": "system",
+            "content": render_prompt(
+                "engine/payoff/world", world=_stable_json(world_layer)
+            ),
         },
         {"role": "user", "content": payoff_content},
     ]
@@ -2582,7 +2629,10 @@ def _director_pacing_messages(
         action=action,
     )
     return [
-        {"role": "system", "content": DIRECTOR_PACING_SYSTEM_PROMPT},
+        {
+            "role": "system",
+            "content": render_system_prompt("engine/pacing/system", card=_card(state)),
+        },
         {"role": "user", "content": content},
     ]
 
@@ -2627,7 +2677,12 @@ def _director_progression_messages(
         action=action,
     )
     return [
-        {"role": "system", "content": DIRECTOR_PROGRESSION_SYSTEM_PROMPT},
+        {
+            "role": "system",
+            "content": render_system_prompt(
+                "engine/progression/system", card=_card(state)
+            ),
+        },
         {"role": "user", "content": content},
     ]
 
@@ -2675,7 +2730,10 @@ def _director_hook_messages(
         action=action,
     )
     return [
-        {"role": "system", "content": DIRECTOR_HOOK_SYSTEM_PROMPT},
+        {
+            "role": "system",
+            "content": render_system_prompt("engine/hook/system", card=_card(state)),
+        },
         {"role": "user", "content": content},
     ]
 
@@ -2724,7 +2782,12 @@ def _director_skeleton_messages(
         action=action,
     )
     return [
-        {"role": "system", "content": DIRECTOR_SKELETON_SYSTEM_PROMPT},
+        {
+            "role": "system",
+            "content": render_system_prompt(
+                "engine/skeleton/system", card=_card(state)
+            ),
+        },
         {"role": "user", "content": content},
     ]
 
@@ -2925,7 +2988,7 @@ def _has_payoff_binding(value) -> bool:
         isinstance(binding, dict)
         and _clean_text(binding.get("opportunity_id"), 120)
         and _clean_text(binding.get("reward_id"), 120)
-        and binding.get("reward_kind") == "art"
+        and bool(_clean_text(binding.get("reward_kind"), 80))
     )
 
 
@@ -2934,7 +2997,7 @@ def _has_reward_binding(value) -> bool:
     return bool(
         isinstance(binding, dict)
         and _clean_text(binding.get("reward_id"), 120)
-        and binding.get("reward_kind") == "art"
+        and bool(_clean_text(binding.get("reward_kind"), 80))
     )
 
 
@@ -2968,7 +3031,7 @@ def _resolve_payoff_binding(result: dict, world_context: dict) -> dict | None:
     # ambiguous.
     reward = max(rewards, key=lambda row: _reward_match_score(desc, row))
     binding = {
-        "reward_kind": "art",
+        "reward_kind": reward.get("reward_kind") or "art",
         "reward_id": str(reward["id"]),
         "reward_name": _clean_text(reward["name"], 120),
     }
@@ -3384,10 +3447,20 @@ async def _run_director_audit(
     try:
         messages = _inject_story_seed_messages(
             [
-                {"role": "system", "content": DIRECTOR_AUDIT_SYSTEM_PROMPT},
-                {"role": "user", "content": _director_audit_prompt(
-                    plan, user_content or "（新存档开场，玩家尚未行动）", assistant_content
-                )},
+                {
+                    "role": "system",
+                    "content": render_system_prompt(
+                        "engine/audit/system", card=_card(_get(session_id))
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": _director_audit_prompt(
+                        plan,
+                        user_content or "（新存档开场，玩家尚未行动）",
+                        assistant_content,
+                    ),
+                },
             ],
             session_id,
             "director_audit",
@@ -3682,8 +3755,18 @@ async def _run_director(
     try:
         raw = await complete_chat(
             [
-                {"role": "system", "content": DIRECTOR_SYSTEM_PROMPT},
-                {"role": "user", "content": _director_user_prompt(user_content, assistant_content, turn, prev)},
+                {
+                    "role": "system",
+                    "content": render_system_prompt(
+                        "legacy/director/system", card=_card(state)
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": _director_user_prompt(
+                        user_content, assistant_content, turn, prev
+                    ),
+                },
             ],
             temperature=0.4,
             max_tokens=700,

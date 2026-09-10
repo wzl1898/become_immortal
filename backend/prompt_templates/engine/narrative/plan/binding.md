@@ -1,1 +1,1 @@
-动态机缘关联：${opportunity} → ${reward}
+动态机会关联：${opportunity} → ${reward}

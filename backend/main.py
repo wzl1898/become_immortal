@@ -30,6 +30,7 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 import game  # noqa: E402
+import story_cards  # noqa: E402
 from llm import stream_chat  # noqa: E402
 
 app = FastAPI(title="become_immortal")
@@ -134,6 +135,7 @@ async def _answer_inquiry(sid: str, question: str):
 
 class NewGameBody(BaseModel):
     name: str | None = None
+    story_card_id: str = story_cards.DEFAULT_CARD_ID
 
 
 class RenameBody(BaseModel):
@@ -174,9 +176,26 @@ async def new_game(
     user_id: str = Header(alias="X-User-ID"),
 ):
     user_id = _user_id(user_id)
-    name = (body.name.strip() if body and body.name else "") or game.DEFAULT_NAME
-    sid = game.create_session(name, user_id)
-    return {"session_id": sid}
+    name = (body.name.strip() if body and body.name else "") or None
+    card_id = body.story_card_id if body else story_cards.DEFAULT_CARD_ID
+    try:
+        sid = game.create_session(name, user_id, card_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    card = game.get_story_card_info(sid)
+    return {
+        "session_id": sid,
+        "name": name or card["default_save_name"],
+        "story_card": card,
+        "character_state": game.get_character_state(sid),
+        "world_state": game.get_world_state(sid),
+    }
+
+
+@app.get("/api/story-cards")
+async def available_story_cards(user_id: str = Header(alias="X-User-ID")):
+    _user_id(user_id)
+    return {"story_cards": story_cards.list_cards()}
 
 
 @app.get("/api/saves")
@@ -195,6 +214,7 @@ async def load(
         raise HTTPException(404, "存档不存在")
     return {
         "session_id": sid,
+        "story_card": game.get_story_card_info(sid),
         "transcript": transcript,
         "character_state": game.get_character_state(sid) or {},
         "world_memory": game.get_world_memory(sid) or [],
@@ -305,7 +325,7 @@ async def character_state(
     state = game.get_character_state(sid)
     if state is None:
         raise HTTPException(404, "存档不存在")
-    return {"character_state": state}
+    return {"character_state": state, "story_card": game.get_story_card_info(sid)}
 
 
 @app.post("/api/reconcile-character-state")

@@ -1,4 +1,4 @@
-// 修仙文字冒险 —— 前端逻辑（含存档/读档）
+// 多故事卡文字冒险 —— 前端逻辑（含存档/读档）
 const storyEl = document.getElementById("story");
 const appEl = document.getElementById("app");
 const userGate = document.getElementById("user-gate");
@@ -52,6 +52,70 @@ const llmLiveEl = document.getElementById("llm-live");
 const llmTokenSummaryEl = document.getElementById("llm-token-summary");
 const llmListEl = document.getElementById("llm-list");
 const llmEmptyEl = document.getElementById("llm-empty");
+
+const storyCardDialog = document.getElementById("story-card-dialog");
+const storyCardList = document.getElementById("story-card-list");
+const storyCardForm = document.getElementById("story-card-form");
+const storyCardError = document.getElementById("story-card-error");
+const storyCardStart = document.getElementById("story-card-start");
+const storyCardCancel = document.getElementById("story-card-cancel");
+const storyCardRetry = document.getElementById("story-card-retry");
+let currentStoryCard = null;
+let selectedStoryCardId = null;
+
+function applyStoryCard(card) {
+  currentStoryCard = card;
+  document.querySelector(".topbar h1").textContent = card?.name || "故事引擎";
+  document.title = card?.name || "故事引擎";
+}
+
+async function openStoryCards() {
+  if (busy) return;
+  selectedStoryCardId = null;
+  storyCardStart.disabled = true;
+  storyCardRetry.classList.add("hidden");
+  storyCardError.textContent = "正在读取故事卡…";
+  storyCardList.replaceChildren();
+  if (!storyCardDialog.open) storyCardDialog.showModal();
+  try {
+    const data = await fetchJSON("/api/story-cards");
+    if (!storyCardDialog.open) return;
+    for (const card of data.story_cards || []) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "story-card-option";
+      button.dataset.cardId = card.id;
+      button.setAttribute("aria-pressed", "false");
+      for (const [tag, cls, text] of [["span", "story-card-genre", card.genre], ["strong", "story-card-name", card.name], ["span", "story-card-description", card.description]]) {
+        const child = document.createElement(tag);
+        child.className = cls;
+        child.textContent = text;
+        button.appendChild(child);
+      }
+      button.addEventListener("click", () => {
+        selectedStoryCardId = card.id;
+        for (const option of storyCardList.children) {
+          option.setAttribute("aria-pressed", String(option === button));
+        }
+        storyCardStart.disabled = false;
+        storyCardError.textContent = "";
+      });
+      storyCardList.appendChild(button);
+    }
+    storyCardError.textContent = storyCardList.children.length ? "" : "暂无可用故事卡。";
+  } catch (error) {
+    storyCardError.textContent = `读取失败：${error.message}`;
+    storyCardRetry.classList.remove("hidden");
+  }
+}
+
+storyCardCancel.addEventListener("click", () => storyCardDialog.close());
+storyCardRetry.addEventListener("click", openStoryCards);
+storyCardDialog.addEventListener("cancel", (event) => { if (busy) event.preventDefault(); });
+storyCardForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (selectedStoryCardId && !busy) await newGame(selectedStoryCardId);
+});
 
 const USER_ID_KEY = "become-immortal-user-id";
 let currentUserId = "";
@@ -248,10 +312,12 @@ function addBlock(kind, text = "") {
 
 function setBusy(state) {
   busy = state;
-  input.disabled = state;
-  sendBtn.disabled = state;
+  input.disabled = state || !sessionId;
+  sendBtn.disabled = state || !sessionId;
   restartBtn.disabled = state;
-  if (!state) input.focus();
+  storyCardCancel.disabled = state;
+  storyCardStart.disabled = state || !selectedStoryCardId;
+  if (!state && sessionId && !storyCardDialog.open) input.focus();
 }
 
 function setCurrent(sid, name) {
@@ -482,15 +548,7 @@ function renderStatus(status, objects) {
 
 function statusTextFromCharacterState(state) {
   if (!state || !Object.keys(state).length) return "";
-  const fields = [
-    ["realm", "境界"],
-    ["health", "气血"],
-    ["spiritual_power", "灵力"],
-    ["cultivation", "修为"],
-    ["condition", "状态"],
-    ["resources", "资源"],
-    ["artifacts", "法宝"],
-  ];
+  const fields = (currentStoryCard?.status_fields || []).map(({ key, label }) => [key, label]);
   return fields
     .map(([key, label]) => state[key] ? `${label}：${state[key]}` : "")
     .filter(Boolean)
@@ -602,25 +660,28 @@ async function narrate(url, options = {}) {
 }
 
 // ---- 游戏生命周期 ----
-async function newGame() {
+async function newGame(storyCardId) {
   setBusy(true);
-  storyEl.innerHTML = "";
-  clearStatus();
-  worldMemory = [];
-  renderConstraint(null);
-  addBlock("narration", "　　天地灵气涌动，你的故事即将开始……").classList.add("cursor");
+  let created = false;
   try {
     const data = await fetchJSON("/api/new", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
+      body: JSON.stringify({ story_card_id: storyCardId }),
     });
-    setCurrent(data.session_id, "无名修士");
+    created = true;
+    storyCardDialog.close();
+    applyStoryCard(data.story_card);
+    setCurrent(data.session_id, data.name);
     storyEl.innerHTML = "";
+    clearStatus();
+    worldMemory = [];
+    renderCharacterState(data.character_state);
+    renderConstraint(data.world_state);
     await narrate(`/api/opening?sid=${sessionId}`);
   } catch (e) {
-    storyEl.innerHTML = "";
-    addBlock("error", `【出错】${e.message}`);
+    if (!created) storyCardError.textContent = `创建失败：${e.message}`;
+    // narrate displays generation errors; the new save remains available to retry.
   } finally {
     setBusy(false);
   }
@@ -631,6 +692,7 @@ async function loadGame(sid, name) {
   setBusy(true);
   try {
     const data = await fetchJSON(`/api/load?sid=${sid}`);
+    applyStoryCard(data.story_card);
     setCurrent(sid, name);
     worldMemory = data.world_memory || data.lore || [];
     renderConstraint(data.world_state || null);
@@ -677,7 +739,7 @@ form.addEventListener("submit", async (e) => {
 
 restartBtn.addEventListener("click", () => {
   if (busy) return;
-  newGame();
+  openStoryCards();
 });
 
 // ---- 存档抽屉 ----
@@ -722,7 +784,7 @@ function renderSaveItem(s) {
       <button class="del">删除</button>
     </div>`;
   li.querySelector(".name").textContent = s.name;
-  li.querySelector(".preview").textContent = s.preview || "（尚未落笔）";
+  li.querySelector(".preview").textContent = `${s.story_card?.name || ""} · ${s.preview || "（尚未开始）"}`;
   li.querySelector(".load").addEventListener("click", () => loadGame(s.id, s.name));
   li.querySelector(".ren").addEventListener("click", () => renameSave(s));
   li.querySelector(".del").addEventListener("click", () => deleteSave(s));
@@ -730,7 +792,7 @@ function renderSaveItem(s) {
 }
 
 async function renameSave(s) {
-  const name = prompt("给这一世取个名字：", s.name);
+  const name = prompt("给这个故事取个名字：", s.name);
   if (!name || !name.trim()) return;
   try {
     await fetchJSON("/api/rename", {
@@ -1328,8 +1390,10 @@ function renderConstraint(state) {
   constraintBodyEl.appendChild(chipSection("听闻地点", knowledge.rumored_locations));
   constraintBodyEl.appendChild(chipSection("已确认路线", knowledge.confirmed_routes));
   constraintBodyEl.appendChild(chipSection("已知势力", knowledge.known_factions));
-  constraintBodyEl.appendChild(chipSection("已知功法", knowledge.known_arts));
-  constraintBodyEl.appendChild(chipSection("机缘线索", knowledge.known_opportunities));
+  constraintBodyEl.appendChild(chipSection("已知技能与奖励", knowledge.known_arts));
+  constraintBodyEl.appendChild(chipSection("机会线索", knowledge.known_opportunities));
+  constraintBodyEl.appendChild(chipSection("已知人物", knowledge.known_characters));
+  constraintBodyEl.appendChild(chipSection("已知物品", knowledge.known_items));
 }
 
 function constraintSection(title, rows) {
@@ -1529,7 +1593,10 @@ llmDrawer.querySelector(".drawer-mask").addEventListener("click", closeLLMDrawer
 async function switchUser() {
   if (busy) return;
   sessionId = null;
+  applyStoryCard(null);
+  storyCardDialog.close();
   setCurrent(null, "");
+  setBusy(false);
   storyEl.innerHTML = "";
   clearStatus();
   worldMemory = [];
@@ -1551,7 +1618,7 @@ async function boot(saves) {
     await loadGame(saves[0].id, saves[0].name);
     return;
   }
-  await newGame();
+  await openStoryCards();
 }
 
 userForm.addEventListener("submit", async (event) => {
