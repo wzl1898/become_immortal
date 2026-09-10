@@ -25,6 +25,7 @@ import constraints
 import embed
 import store
 import story_cards
+import background
 from llm import complete_chat, config_from_env
 from prompts import OPENING_PROMPT, render_prompt, render_system_prompt
 
@@ -1143,7 +1144,13 @@ def _schedule_memory_extraction(
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return
-    loop.create_task(_extract_and_store_memory(session_id, user_content, assistant_content, turn))
+    background.track(
+        loop.create_task(
+            _extract_and_store_memory(session_id, user_content, assistant_content, turn)
+        ),
+        session_id,
+        "memory_extract",
+    )
 
 
 def _schedule_narrative_observer(
@@ -1156,9 +1163,13 @@ def _schedule_narrative_observer(
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return
-    loop.create_task(_run_narrative_observer(
-        session_id, user_content, assistant_content, turn
-    ))
+    background.track(
+        loop.create_task(
+            _run_narrative_observer(session_id, user_content, assistant_content, turn)
+        ),
+        session_id,
+        "narrative_observer",
+    )
 
 
 async def _run_narrative_observer(
@@ -2233,9 +2244,13 @@ def _schedule_eventless_event_generation(
     )
     memories = _compact_memories(_recall_world_memory(state, recall_query))
     context = _eventless_event_generation_context(state, action, intent)
-    task = asyncio.create_task(_run_next_event_generation(
-        session_id, context, world_context, memories
-    ))
+    task = background.track(
+        asyncio.create_task(
+            _run_next_event_generation(session_id, context, world_context, memories)
+        ),
+        session_id,
+        "director_next_event",
+    )
     _NEXT_EVENT_TASKS[session_id] = task
     task.add_done_callback(
         lambda done, key=session_id: _NEXT_EVENT_TASKS.pop(key, None)
@@ -2276,11 +2291,22 @@ def _schedule_causal_foundation(
         if key != "updated_at"
     }
     recent_story = _recent_scene(state.get("transcript") or [])
-    task = asyncio.create_task(_run_causal_foundation(
-        state.get("session_id"), event_id, event_seed, world_context, memories,
-        character, recent_story,
-        int(state.get("turns") or 0) + 1,
-    ))
+    task = background.track(
+        asyncio.create_task(
+            _run_causal_foundation(
+                state.get("session_id"),
+                event_id,
+                event_seed,
+                world_context,
+                memories,
+                character,
+                recent_story,
+                int(state.get("turns") or 0) + 1,
+            )
+        ),
+        state.get("session_id"),
+        "director_causal",
+    )
     _CAUSAL_TASKS[event_id] = task
     task.add_done_callback(lambda done, key=event_id: (
         _CAUSAL_TASKS.pop(key, None) if _CAUSAL_TASKS.get(key) is done else None
@@ -3434,7 +3460,15 @@ def _schedule_director_audit(
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return
-    loop.create_task(_run_director_audit(session_id, user_content, assistant_content, turn, snapshot))
+    background.track(
+        loop.create_task(
+            _run_director_audit(
+                session_id, user_content, assistant_content, turn, snapshot
+            )
+        ),
+        session_id,
+        "director_audit",
+    )
 
 
 async def _run_director_audit(
@@ -3738,7 +3772,13 @@ def _schedule_director(
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return
-    loop.create_task(_run_director(session_id, user_content, assistant_content, turn))
+    background.track(
+        loop.create_task(
+            _run_director(session_id, user_content, assistant_content, turn)
+        ),
+        session_id,
+        "director_legacy",
+    )
 
 
 async def _run_director(

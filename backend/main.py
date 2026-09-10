@@ -31,6 +31,7 @@ from pydantic import BaseModel  # noqa: E402
 
 import game  # noqa: E402
 import story_cards  # noqa: E402
+import background  # noqa: E402
 from llm import stream_chat  # noqa: E402
 
 app = FastAPI(title="become_immortal")
@@ -448,6 +449,13 @@ async def agent_traces(
         raise HTTPException(404, "存档不存在")
     cursor = max((item["updated_at"] for item in items), default=updated_after or 0)
     return {"traces": items, "cursor": cursor}
+
+
+@app.get("/api/jobs")
+async def jobs(sid: str, user_id: str = Header(alias="X-User-ID")):
+    """Observe in-process background tasks; idle does not imply model success."""
+    _require_owned(sid, _user_id(user_id))
+    return background.status(sid)
 
 
 @app.get("/api/world-state")

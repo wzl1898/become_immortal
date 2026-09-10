@@ -1,0 +1,16 @@
+{
+  "card": "orbital",
+  "name": "CLI 科幻冒烟测试",
+  "steps": [
+    {"command": "assert", "path": "/story_card/id", "equals": "orbital"},
+    {"command": "assert", "path": "/world_state/location/location_id", "equals": "maintenance_bay"},
+    {"command": "assert", "path": "/character_state/energy", "exists": true},
+    {"command": "opening"},
+    {"command": "assert", "path": "/transcript/0/role", "equals": "narration"},
+    {"command": "action", "text": "核对手边的记录，寻找值得注意的差异。"},
+    {"command": "assert", "path": "/transcript/1/text", "equals": "核对手边的记录，寻找值得注意的差异。"},
+    {"command": "inquiry", "text": "我现在知道这座轨道站的哪些情况？"},
+    {"command": "reconcile"},
+    {"command": "checkpoint"}
+  ]
+}

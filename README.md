@@ -44,6 +44,20 @@ cd backend
 > 否则正在进行的 SSE 流式请求（开场/行动生成）会让重启卡在 "Waiting for connections to close"。
 > 想连前端热更新一起开：在命令前加 `LIVE_RELOAD=1`（改前端文件浏览器自动刷新）。
 
+## CLI 与 Agent 测试
+
+命令行和 Agent 测试入口：`./story --help`。支持全部游戏接口、流式 JSON 输出、后台任务等待、模板校验和场景断言，详见 [CLI 使用说明](docs/CLI.md)。例如：
+
+```bash
+./story health
+./story saves create --user agent-test --card orbital
+./story test
+# 独立目录与端口启动测试服务
+./story serve --port 8901 --data-dir /tmp/story-agent-test --no-embed
+```
+
+使用返回的 `session_id` 执行 `./story play opening SID --user agent-test --wait`，随后通过 `play action` 推进，或用 `run examples/cli/orbital-smoke.json` 执行完整场景。
+
 ## 配置项（.env）
 
 | 变量 | 说明 | 示例 |
@@ -61,6 +75,7 @@ cd backend
 | `DIRECTOR_LLM_TIMEOUT` | 每个导演 Agent 的硬超时（秒） | `35` |
 | `EMBED_ENABLED` | 是否启用冷物品语义召回；设 `0` 可关闭 | `1` |
 | `EMBED_MODEL` | fastembed 模型名 | `BAAI/bge-small-zh-v1.5` |
+| `STORY_DATA_DIR` | 独立 SQLite 存档目录，默认 `backend/data` | `/tmp/story-agent-test` |
 
 旧配置 `DIRECTOR_LLM_MAX_TOKENS` 仍兼容：未设置三个专职 Agent 上限时，它会作为共同上限。
 
@@ -85,6 +100,9 @@ LLM_MODEL=claude-sonnet-5
 
 ```
 backend/
+  cli.py       # 命令行入口：HTTP/SSE、本地工具和场景测试
+  cli_client.py # CLI 的 JSON/SSE 传输与退出码
+  background.py # 按存档观察后台任务，不改变 Agent 调度
   main.py      # FastAPI 入口，SSE 接口 + 静态前端挂载
   game.py      # 会话状态管理（内存态）
   llm.py       # OpenAI 兼容的流式客户端
@@ -97,6 +115,8 @@ frontend/
   index.html   # 页面
   style.css    # 古风暗色主题
   app.js       # SSE 流式渲染 + 打字机效果
+story          # 使用项目虚拟环境启动 CLI
+examples/cli/  # Agent 可执行的 JSON 场景
 ```
 
 ## 存档与持久化

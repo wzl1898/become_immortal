@@ -18,7 +18,9 @@ import uuid
 
 import story_cards
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+DATA_DIR = os.path.abspath(
+    os.getenv("STORY_DATA_DIR") or os.path.join(os.path.dirname(__file__), "data")
+)
 DB_PATH = os.path.join(DATA_DIR, "saves.db")
 DEFAULT_USER_ID = "default"
 DEFAULT_WORLD_SEASON = story_cards.get()["initial"]["time"]["season"]

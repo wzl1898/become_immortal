@@ -216,26 +216,40 @@ def validate(card: dict) -> None:
     )
 
 
+def load_card(path: Path) -> dict:
+    """Load one on-disk package, also used by CLI authoring validation."""
+    path = Path(path)
+    if path.is_dir():
+        path = path / "card.json"
+    card = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(card, dict) or not isinstance(card.get("prompts"), dict):
+        raise ValueError(f"{path}: 故事卡及 prompts 必须为对象")
+    for key in PROMPT_SECTIONS:
+        filename = card["prompts"].get(key)
+        if not isinstance(filename, str):
+            raise ValueError(f"{path}: 缺少提示词文件 {key}")
+        prompt_path = (path.parent / filename).resolve()
+        if (
+            not prompt_path.is_relative_to(path.parent.resolve())
+            or prompt_path.suffix != ".md"
+        ):
+            raise ValueError(f"{path}: 提示词路径必须指向故事卡目录内的 Markdown 文件")
+        card["prompts"][key] = prompt_path.read_text(encoding="utf-8").strip()
+    try:
+        validate(card)
+    except (AttributeError, KeyError, TypeError) as exc:
+        raise ValueError(f"{path}: 故事卡字段类型或结构无效：{exc}") from exc
+    if card["id"] != path.parent.name:
+        raise ValueError(f"{path}: 故事卡 id 与目录名不符")
+    return card
+
+
 def _load_cards() -> dict:
     cards = {}
     for path in sorted(CARD_DIR.glob("*/card.json")):
-        card = json.loads(path.read_text(encoding="utf-8"))
-        for key in PROMPT_SECTIONS:
-            filename = card.get("prompts", {}).get(key)
-            if not isinstance(filename, str):
-                raise ValueError(f"{path}: 缺少提示词文件 {key}")
-            prompt_path = (path.parent / filename).resolve()
-            if (
-                not prompt_path.is_relative_to(path.parent.resolve())
-                or prompt_path.suffix != ".md"
-            ):
-                raise ValueError(
-                    f"{path}: 提示词路径必须指向故事卡目录内的 Markdown 文件"
-                )
-            card["prompts"][key] = prompt_path.read_text(encoding="utf-8").strip()
-        validate(card)
-        if card["id"] in cards or card["id"] != path.parent.name:
-            raise ValueError(f"{path}: 故事卡 id 重复或与目录名不符")
+        card = load_card(path)
+        if card["id"] in cards:
+            raise ValueError(f"{path}: 故事卡 id 重复")
         cards[card["id"]] = card
     if DEFAULT_CARD_ID not in cards:
         raise ValueError("缺少兼容旧存档的默认故事卡")
