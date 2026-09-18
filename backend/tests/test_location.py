@@ -30,6 +30,30 @@ class StructuredLocationTests(unittest.TestCase):
         self.assertEqual(location["site_name"], "村西老槐树")
         self.assertEqual(location["intended_destination_id"], "baishi_ruined_temple")
 
+    def test_negated_destination_does_not_record_intent(self):
+        constraints.action_constraints(
+            self.sid,
+            "我不承认这笔债，先请赵德柱拿出祖辈欠债的借据或书面凭证给我核对，"
+            "在看清证据前不交财物，也不答应随他去青溪镇。",
+        )
+
+        self.assertIsNone(self.location()["intended_destination_id"])
+
+    def test_explicit_refusal_clears_matching_intent(self):
+        constraints.action_constraints(self.sid, "去青溪镇")
+        self.assertEqual(self.location()["intended_destination_id"], "qingxi_town")
+
+        constraints.action_constraints(self.sid, "我不去青溪镇，留在老槐树下")
+
+        self.assertIsNone(self.location()["intended_destination_id"])
+
+    def test_npc_departure_does_not_set_player_destination(self):
+        constraints.reconcile_location(self.sid, "赵德柱朝青溪镇方向快步离去。")
+
+        location = self.location()
+        self.assertEqual(location["location_id"], "baishi_village")
+        self.assertIsNone(location["intended_destination_id"])
+
     def test_fixed_world_contains_ordered_cultivation_demographics(self):
         tiers = store.world_snapshot(self.sid)["cultivation_demographics"]
 

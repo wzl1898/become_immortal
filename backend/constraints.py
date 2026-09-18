@@ -48,6 +48,16 @@ _UNREALIZED_BEFORE_RE = re.compile(
     r"(?:抵达|到达|来到|赶到|走到|行至|回到|返回到?|进入|走进|踏入|身处|置身|住进|落脚)"
 )
 _UNREALIZED_AFTER_RE = re.compile(r"^.{0,6}(?:计划|打算|念头|想法|路线|尚未|还未|还没)")
+_NEGATED_MOVEMENT_RE = re.compile(
+    r"(?:"
+    r"(?:不|别|不要|不会|并不|并未|未|没(?:有)?)"
+    r"(?:答应|同意|准备|打算|想要|愿意)?(?:再)?"
+    r"(?:随(?:着)?[^，。；！？!?]{0,4})?"
+    r"(?:去|前往|赶往|往|回|返回|进入|同行|随行)"
+    r"|(?:拒绝|取消|放弃)[^，。；！？!?]{0,10}"
+    r"(?:去|前往|赶往|往|回|返回|进入|同行|随行)"
+    r")"
+)
 
 
 def opening_constraints(session_id: str) -> str:
@@ -77,8 +87,18 @@ def action_constraints(session_id: str, action: str) -> str:
         return ""
     action = (action or "").strip()
     matches = _match_entities(snap, action)
-    action_type = _infer_action_type(action)
-    verdict = _adjudicate(session_id, snap, action, action_type, matches)
+    negated_location_ids = _negated_movement_location_ids(snap, action)
+    movement_matches = _without_locations(matches, negated_location_ids)
+    if snap["location"].get("intended_destination_id") in negated_location_ids:
+        store.set_intended_destination(session_id, None)
+    action_type = _infer_action_type(
+        action,
+        include_movement=bool(movement_matches.get("location")) or not negated_location_ids,
+    )
+    adjudication_matches = movement_matches if action_type == "移动" else matches
+    verdict = _adjudicate(
+        session_id, snap, action, action_type, adjudication_matches
+    )
     local = _local_context(snap, matches)
     return render_prompt(
         "constraints/action",
@@ -472,10 +492,10 @@ def _render_constraint_block(title: str, lines: list[str]) -> str:
     return render_prompt('constraints/block', title=title, body=body)
 
 
-def _infer_action_type(action: str) -> str:
+def _infer_action_type(action: str, *, include_movement: bool = True) -> str:
     if any(w in action for w in CULTIVATE_WORDS):
         return "训练/成长"
-    if any(w in action for w in MOVE_WORDS):
+    if include_movement and any(w in action for w in MOVE_WORDS):
         return "移动"
     if any(w in action for w in EXPLORE_WORDS):
         return "探索"
@@ -506,6 +526,37 @@ def _match_entities(snap: dict, action: str) -> dict[str, list[dict]]:
             if (name and name in action) or any(alias in action for alias in aliases):
                 buckets[kind].append(row)
     return dict(buckets)
+
+
+def _negated_movement_location_ids(snap: dict, action: str) -> set[str]:
+    """Return locations mentioned as destinations inside an explicit refusal clause."""
+    negated: set[str] = set()
+    clauses = re.split(r"[，。；！？!?]", action)
+    aliases = snap.get("location_aliases", {})
+    for clause in clauses:
+        for row in snap["locations"]:
+            names = [row.get("name") or "", *aliases.get(row["id"], ())]
+            for name in (value for value in names if value):
+                start = clause.find(name)
+                if start < 0:
+                    continue
+                prefix = clause[max(0, start - 24):start]
+                if _NEGATED_MOVEMENT_RE.search(prefix):
+                    negated.add(row["id"])
+                    break
+    return negated
+
+
+def _without_locations(
+    matches: dict[str, list[dict]], excluded_ids: set[str]
+) -> dict[str, list[dict]]:
+    if not excluded_ids:
+        return matches
+    filtered = {kind: list(rows) for kind, rows in matches.items()}
+    filtered["location"] = [
+        row for row in filtered.get("location", []) if row["id"] not in excluded_ids
+    ]
+    return filtered
 
 
 def _adjudicate(
