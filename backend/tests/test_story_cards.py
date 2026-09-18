@@ -4,7 +4,7 @@ import json
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -93,7 +93,12 @@ class StoryCardTests(unittest.TestCase):
                 {"desc": "获得引气诀", "trigger": "完成检查"}, second
             )
         )
-        constraints.reconcile_location(b, "你抵达中央大厅。", "去中央大厅")
+        constraints.apply_location_state(b, {
+            "location_id": "central_hub",
+            "site_name": "中央大厅",
+            "intended_destination_id": None,
+            "reason": "玩家已经抵达中央大厅",
+        })
         self.assertEqual(
             store.world_snapshot(b)["location"]["location_name"], "中央大厅"
         )
@@ -129,7 +134,10 @@ class StoryCardTests(unittest.TestCase):
         with patch.object(game, "_schedule_memory_extraction"), patch.object(
             game, "_schedule_narrative_observer"
         ), patch.object(game, "_schedule_director_audit"):
-            game.commit(sid, "检查设备", narration)
+            with patch.object(
+                game, "reconcile_location_state", new=AsyncMock(return_value=False)
+            ):
+                asyncio.run(game.commit(sid, "检查设备", narration))
         game._CACHE.clear()
         state = game.get_character_state(sid)
         self.assertEqual(state["health"], "手指擦伤")

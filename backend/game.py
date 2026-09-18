@@ -460,6 +460,58 @@ async def reconcile_character_state_from_text(
     return {"character_state": state.get("character_state") or current, "updates": updates, "evidence": clean_evidence}
 
 
+async def reconcile_location_state(
+    session_id: str, action: str, assistant_content: str, *, turn: int
+) -> bool:
+    """Use one structured LLM request to maintain the player's location state."""
+    snap = store.world_snapshot(session_id)
+    if not snap:
+        return False
+    locations = []
+    for row in snap["locations"]:
+        locations.append({
+            "id": row["id"],
+            "name": row["name"],
+            "aliases": list((snap.get("location_aliases") or {}).get(row["id"], ())),
+            "sites": list((snap.get("site_aliases") or {}).get(row["id"], {})),
+        })
+    current = snap["location"]
+    prompt = render_prompt(
+        "observation/location/user",
+        current_location=_stable_json({
+            "location_id": current["location_id"],
+            "location_name": current["location_name"],
+            "site_name": current["site_name"],
+            "intended_destination_id": current["intended_destination_id"],
+        }),
+        locations=_stable_json(locations),
+        action=action,
+        narrative=_narration_body(assistant_content),
+    )
+    try:
+        raw = await complete_chat(
+            [
+                {"role": "system", "content": render_prompt("observation/location/system")},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0,
+            max_tokens=260,
+            config=DIRECTOR_LLM_CONFIG,
+            request_type="location_state",
+            session_id=session_id,
+            turn=turn,
+        )
+        decision = _extract_json_object(raw)
+        return constraints.apply_location_state(session_id, decision or {})
+    except Exception:  # noqa: BLE001
+        _LOG.exception(
+            "location state reconciliation failed for session %s turn %s",
+            session_id,
+            turn,
+        )
+        return False
+
+
 def _character_state_dossier(character_state: dict, card: dict | None = None) -> str:
     """把最新版主角状态拼成独立约束串。空则返回 ""。"""
     if not character_state:
@@ -1069,13 +1121,18 @@ async def run_inquiry_react(
     raise RuntimeError("问询 Agent 超过记忆搜索次数上限")
 
 
-def commit(session_id: str, user_content: str | None, assistant_content: str) -> None:
+async def commit(session_id: str, user_content: str | None, assistant_content: str) -> None:
     """把一轮对话写入会话历史 + transcript，并落盘。
 
     开场时 user_content 传 None：LLM 历史里放占位以保持交替，
     transcript 里则只记开场旁白（不显示占位）。
     """
     state = _get(session_id)
+    next_turn = int(state["turns"]) + 1
+    if user_content is not None:
+        await reconcile_location_state(
+            session_id, user_content, assistant_content, turn=next_turn
+        )
     state.pop("_pending_director_prev", None)
     messages = state["messages"]
     transcript = state["transcript"]
@@ -1103,9 +1160,10 @@ def commit(session_id: str, user_content: str | None, assistant_content: str) ->
     # 解析本回合面板回影子库（新物入库、失去物移除、正文命中刷 last_turn）
     _reconcile_inventory(state, assistant_content)
     _finalize_director_state(state, assistant_content)
-    constraints.reconcile_location(
-        session_id, _narration_body(assistant_content), user_content
-    )
+    if user_content is not None:
+        constraints.advance_world_time(
+            session_id, user_content, _narration_body(assistant_content)
+        )
     store.save_state(session_id, state["messages"], state["transcript"], state["turns"])
     store.save_stage_summary(
         session_id, state.get("stage_summary") or "", int(state.get("summary_turn") or 0)

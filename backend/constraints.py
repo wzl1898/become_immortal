@@ -33,33 +33,6 @@ CULTIVATE_WORDS = (
 )
 ITEM_WORDS = ("使用", "服用", "拿", "收起", "丢", "买", "卖", "炼制")
 
-_ARRIVAL_BEFORE_RE = re.compile(
-    r"(?:抵达|到达|来到|赶到|走到|行至|回到|返回到?|进入|走进|踏入|"
-    r"身处|置身于?|住进|落脚在?|(?:你|主角)(?:已经|已|正)?在|到了|进了)"
-    r"[了在于]?\s*[「『\u201c\"]?$"
-)
-_ARRIVAL_AFTER_RE = re.compile(
-    r"^[\s，。；：、——-]*(?:已经|已)?"
-    r"(?:抵达|到达|到了|进入|走进|踏入|赶到|来到|行至|回到|返回到?|进了)"
-)
-_UNREALIZED_BEFORE_RE = re.compile(
-    r"(?:尚未|还未|还没|未能|没能|并未|无法|不能|不曾|打算|计划|准备|想要|希望|欲|"
-    r"若|如果|一旦|需要|须|必须|可以|试图|尝试|开始).{0,8}"
-    r"(?:抵达|到达|来到|赶到|走到|行至|回到|返回到?|进入|走进|踏入|身处|置身|住进|落脚)"
-)
-_UNREALIZED_AFTER_RE = re.compile(r"^.{0,6}(?:计划|打算|念头|想法|路线|尚未|还未|还没)")
-_NEGATED_MOVEMENT_RE = re.compile(
-    r"(?:"
-    r"(?:不|别|不要|不会|并不|并未|未|没(?:有)?)"
-    r"(?:答应|同意|准备|打算|想要|愿意)?(?:再)?"
-    r"(?:随(?:着)?[^，。；！？!?]{0,4})?"
-    r"(?:去|前往|赶往|往|回|返回|进入|同行|随行)"
-    r"|(?:拒绝|取消|放弃)[^，。；！？!?]{0,10}"
-    r"(?:去|前往|赶往|往|回|返回|进入|同行|随行)"
-    r")"
-)
-
-
 def opening_constraints(session_id: str) -> str:
     """开场约束：把新一世锚在固定开局，而不是让 GM 随机起点。"""
     snap = store.world_snapshot(session_id)
@@ -81,24 +54,14 @@ def opening_constraints(session_id: str) -> str:
 
 
 def action_constraints(session_id: str, action: str) -> str:
-    """根据用户输入与世界知识生成本回合叙事边界，并记录移动意图。"""
+    """根据用户输入与世界知识生成本回合叙事边界。"""
     snap = store.world_snapshot(session_id)
     if not snap:
         return ""
     action = (action or "").strip()
     matches = _match_entities(snap, action)
-    negated_location_ids = _negated_movement_location_ids(snap, action)
-    movement_matches = _without_locations(matches, negated_location_ids)
-    if snap["location"].get("intended_destination_id") in negated_location_ids:
-        store.set_intended_destination(session_id, None)
-    action_type = _infer_action_type(
-        action,
-        include_movement=bool(movement_matches.get("location")) or not negated_location_ids,
-    )
-    adjudication_matches = movement_matches if action_type == "移动" else matches
-    verdict = _adjudicate(
-        session_id, snap, action, action_type, adjudication_matches
-    )
+    action_type = _infer_action_type(action)
+    verdict = _adjudicate(snap, action, action_type, matches)
     local = _local_context(snap, matches)
     return render_prompt(
         "constraints/action",
@@ -195,109 +158,75 @@ def get_world_state(session_id: str) -> dict | None:
     }
 
 
-def reconcile_location(
-    session_id: str, assistant_content: str, action: str | None = None
-) -> dict | None:
-    """Reconcile confirmed location/site changes and advance story time."""
+def apply_location_state(session_id: str, decision: dict) -> bool:
+    """Validate and persist one location-agent decision atomically at field level."""
     snap = store.world_snapshot(session_id)
-    narrative = (assistant_content or "").strip()
-    if not snap or not narrative:
-        return None
-
-    arrivals: list[tuple[int, dict, str]] = []
-    for location in snap["locations"]:
-        aliases = (location["name"],) + tuple(
-            snap.get("location_aliases", {}).get(location["id"], ())
-        )
-        for alias in aliases:
-            start = 0
-            while True:
-                index = narrative.find(alias, start)
-                if index < 0:
-                    break
-                before = narrative[max(0, index - 28):index]
-                after = narrative[index + len(alias):index + len(alias) + 16]
-                if _is_confirmed_arrival(before, after):
-                    arrivals.append((index, location, alias))
-                start = index + len(alias)
-
-    target = None
-    target_index = -1
-    target_alias = ""
-    if arrivals:
-        # The final confirmed arrival in the prose is the end-of-turn location.
-        target_index, target, target_alias = max(arrivals, key=lambda row: (row[0], len(row[2])))
-
-    location_id = target["id"] if target else snap["location"]["location_id"]
-    site_arrivals = _confirmed_site_arrivals(
-        narrative, location_id, snap.get("site_aliases", {})
-    )
-    site_name = snap["location"]["site_name"]
-    if target:
-        # A macro move must never retain a stale site from the previous place.
-        site_name = target_alias if target_alias != target["name"] else target["name"]
-    if site_arrivals:
-        site_index, confirmed_site = max(site_arrivals, key=lambda row: row[0])
-        if not target or site_index >= target_index:
-            site_name = confirmed_site
-
-    if target or site_name != snap["location"]["site_name"]:
-        current_location = target or next(
-            row for row in snap["locations"] if row["id"] == location_id
-        )
-        route = _route_between(snap, snap["location"]["location_id"], location_id)
-        lost_risk = "低" if route and route.get("risk") in ("medium", "high") else "无"
-        store.update_player_location(
-            session_id,
-            region_id=current_location["region_id"],
-            location_id=location_id,
-            site_name=site_name,
-            location_state=_state_for_location(current_location),
-            intended_destination_id=None if target else snap["location"]["intended_destination_id"],
-            lost_risk=lost_risk if target else snap["location"]["lost_risk"],
-        )
-
-    if target:
-        store.upsert_knowledge(
-            session_id, "location", target["id"], "confirmed",
-            reliability="high", source="正文确认抵达",
-        )
-
-    if action is not None:
-        store.advance_world_time(session_id, _elapsed_minutes(action, narrative, snap["time"]))
-    return target
-
-
-def _confirmed_site_arrivals(
-    narrative: str, location_id: str, sites: dict | None = None
-) -> list[tuple[int, str]]:
-    arrivals = []
-    sites = (
-        sites
-        if sites is not None
-        else story_cards.get()["world"].get("site_aliases", {})
-    )
-    for canonical, aliases in sites.get(location_id, {}).items():
-        for alias in aliases:
-            start = 0
-            while True:
-                index = narrative.find(alias, start)
-                if index < 0:
-                    break
-                before = narrative[max(0, index - 28):index]
-                after = narrative[index + len(alias):index + len(alias) + 16]
-                if _is_confirmed_arrival(before, after):
-                    arrivals.append((index, canonical))
-                start = index + len(alias)
-    return arrivals
-
-
-def _is_confirmed_arrival(before: str, after: str) -> bool:
-    if _UNREALIZED_BEFORE_RE.search(before) or _UNREALIZED_AFTER_RE.search(after):
+    if not snap or not isinstance(decision, dict):
         return False
-    return bool(
-        _ARRIVAL_BEFORE_RE.search(before)
-        or _ARRIVAL_AFTER_RE.search(after)
+    expected = {"location_id", "site_name", "intended_destination_id", "reason"}
+    if set(decision) != expected:
+        return False
+    location_id = decision.get("location_id")
+    destination_id = decision.get("intended_destination_id")
+    site_name = decision.get("site_name")
+    reason = decision.get("reason")
+    locations = {row["id"]: row for row in snap["locations"]}
+    if location_id not in locations:
+        return False
+    if destination_id is not None and destination_id not in locations:
+        return False
+    if destination_id == location_id:
+        return False
+    if site_name is not None and not isinstance(site_name, str):
+        return False
+    if not isinstance(reason, str) or not reason.strip():
+        return False
+
+    current = snap["location"]
+    target = locations[location_id]
+    allowed_sites = set((snap.get("site_aliases") or {}).get(location_id, {}))
+    allowed_sites.add(target["name"])
+    if location_id == current["location_id"] and current.get("site_name"):
+        allowed_sites.add(current["site_name"])
+    normalized_site = (site_name or "").strip()
+    if normalized_site and normalized_site not in allowed_sites:
+        return False
+    if not normalized_site:
+        normalized_site = (
+            current.get("site_name", "")
+            if location_id == current["location_id"]
+            else target["name"]
+        )
+
+    moved = location_id != current["location_id"]
+    route = _route_between(snap, current["location_id"], location_id)
+    store.update_player_location(
+        session_id,
+        region_id=target["region_id"],
+        location_id=location_id,
+        site_name=normalized_site,
+        location_state=_state_for_location(target) if moved else current["location_state"],
+        intended_destination_id=destination_id,
+        lost_risk=(
+            "低" if moved and route and route.get("risk") in ("medium", "high")
+            else "无" if moved else current["lost_risk"]
+        ),
+    )
+    if moved:
+        store.upsert_knowledge(
+            session_id, "location", location_id, "confirmed",
+            reliability="high", source="地点状态 Agent 确认抵达",
+        )
+    return True
+
+
+def advance_world_time(session_id: str, action: str, assistant_content: str) -> None:
+    snap = store.world_snapshot(session_id)
+    if not snap:
+        return
+    store.advance_world_time(
+        session_id,
+        _elapsed_minutes(action or "", assistant_content or "", snap["time"]),
     )
 
 
@@ -492,10 +421,10 @@ def _render_constraint_block(title: str, lines: list[str]) -> str:
     return render_prompt('constraints/block', title=title, body=body)
 
 
-def _infer_action_type(action: str, *, include_movement: bool = True) -> str:
+def _infer_action_type(action: str) -> str:
     if any(w in action for w in CULTIVATE_WORDS):
         return "训练/成长"
-    if include_movement and any(w in action for w in MOVE_WORDS):
+    if any(w in action for w in MOVE_WORDS):
         return "移动"
     if any(w in action for w in EXPLORE_WORDS):
         return "探索"
@@ -528,39 +457,7 @@ def _match_entities(snap: dict, action: str) -> dict[str, list[dict]]:
     return dict(buckets)
 
 
-def _negated_movement_location_ids(snap: dict, action: str) -> set[str]:
-    """Return locations mentioned as destinations inside an explicit refusal clause."""
-    negated: set[str] = set()
-    clauses = re.split(r"[，。；！？!?]", action)
-    aliases = snap.get("location_aliases", {})
-    for clause in clauses:
-        for row in snap["locations"]:
-            names = [row.get("name") or "", *aliases.get(row["id"], ())]
-            for name in (value for value in names if value):
-                start = clause.find(name)
-                if start < 0:
-                    continue
-                prefix = clause[max(0, start - 24):start]
-                if _NEGATED_MOVEMENT_RE.search(prefix):
-                    negated.add(row["id"])
-                    break
-    return negated
-
-
-def _without_locations(
-    matches: dict[str, list[dict]], excluded_ids: set[str]
-) -> dict[str, list[dict]]:
-    if not excluded_ids:
-        return matches
-    filtered = {kind: list(rows) for kind, rows in matches.items()}
-    filtered["location"] = [
-        row for row in filtered.get("location", []) if row["id"] not in excluded_ids
-    ]
-    return filtered
-
-
 def _adjudicate(
-    session_id: str,
     snap: dict,
     action: str,
     action_type: str,
@@ -573,7 +470,7 @@ def _adjudicate(
     ]
     allowed = ["当前位置可见环境", "主角已知/听闻内容", "与玩家行动直接相关的低层线索"]
     if action_type == "移动":
-        return _adjudicate_movement(session_id, snap, matches, allowed, forbidden)
+        return _adjudicate_movement(snap, matches, allowed, forbidden)
     if action_type == "探索":
         return {
             "verdict": "allowed",
@@ -617,7 +514,6 @@ def _adjudicate(
 
 
 def _adjudicate_movement(
-    session_id: str,
     snap: dict,
     matches: dict[str, list[dict]],
     allowed: list[str],
@@ -652,7 +548,6 @@ def _adjudicate_movement(
         target["id"] == snap["location"]["location_id"]
         or (route and route_status == "confirmed")
     ):
-        store.set_intended_destination(session_id, target["id"])
         route_reason = f"且已确认路线「{route['name']}」" if route else "且当前就在该地点范围内"
         return {
             "verdict": "allowed",
@@ -662,7 +557,6 @@ def _adjudicate_movement(
             "forbidden_reveals": forbidden,
         }
     if status in ("confirmed", "known", "rumored"):
-        store.set_intended_destination(session_id, target["id"])
         return {
             "verdict": "partial",
             "reason": f"主角{_status_text(status)}{target['name']}，但没有从当前位置通往该处的已确认路线。",

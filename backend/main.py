@@ -16,6 +16,7 @@
 """
 
 import asyncio
+import inspect
 import json
 import os
 import re
@@ -91,14 +92,17 @@ async def _stream(
             "message": "模型没有返回可显示的正文，请重试。当前回合未保存。"
         })
         return
-    payload = on_done(completed) or {}
+    payload = on_done(completed)
+    if inspect.isawaitable(payload):
+        payload = await payload
+    payload = payload or {}
     yield _sse("done", payload)
 
 
 def _narrate(messages: list[dict], sid: str, user_content: str | None):
     """叙事流：结束后把这一轮写入会话历史 + transcript，done 带刷新后的物品库。"""
-    def _done(text: str) -> dict:
-        game.commit(sid, user_content, text)
+    async def _done(text: str) -> dict:
+        await game.commit(sid, user_content, text)
         return {
             "character_state": game.get_character_state(sid) or {},
             "inventory": game.get_inventory(sid) or [],
