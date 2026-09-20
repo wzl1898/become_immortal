@@ -28,6 +28,25 @@ CONNECT_RETRY_DELAYS = (0.5, 1.5)
 _TIMEOUT = httpx.Timeout(120.0, connect=15.0)
 
 
+def _sanitize_no_proxy() -> None:
+    """去掉 no_proxy 里带方括号的 IPv6 条目。
+
+    本机 no_proxy 形如 "localhost,127.0.0.1,::1,[::1]"；httpx 构造代理挂载时会
+    把 "[::1]" 当成 host:port 解析，抛 InvalidURL: Invalid port ':1]'，导致所有
+    LLM 请求在建立 client 时就失败。去掉方括号条目后，127.0.0.1 仍被 bypass，
+    而访问外部网关所需的代理仍然生效。
+    """
+    for name in ("no_proxy", "NO_PROXY"):
+        value = os.getenv(name)
+        if not value or "[" not in value:
+            continue
+        kept = [p for p in value.split(",") if "[" not in p and "]" not in p]
+        os.environ[name] = ",".join(kept)
+
+
+_sanitize_no_proxy()
+
+
 @dataclass(frozen=True)
 class LLMConfig:
     protocol: str

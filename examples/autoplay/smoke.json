@@ -1,0 +1,16 @@
+{
+  "base_url": "http://127.0.0.1:8888",
+  "user_id": "autoplay-smoke",
+  "card": "xiuxian",
+  "save_name": "自动游玩冒烟",
+  "turns": 3,
+  "on_turn_failure": "stop",
+  "wait_timeout": 180,
+  "output": "reports/autoplay-smoke-{ts}.html",
+  "player_agent": {
+    "model": null,
+    "temperature": 0.9,
+    "max_tokens": 200,
+    "timeout": 60
+  }
+}

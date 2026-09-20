@@ -4,6 +4,7 @@ CLAUDE.md
 AGENTS.md
 agents.md
 backend/data/
+reports/
 __pycache__/
 *.pyc
 .venv/

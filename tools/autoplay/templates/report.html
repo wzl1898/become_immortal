@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__REPORT_TITLE__</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #14161a; --panel: #1a1d22; --panel2: #20242a; --line: #2f353d;
+    --ink: #e6e4de; --dim: #9aa3ad; --gold: #d2a84b; --gold-dim: #7a6528;
+    --ok: #6fbf73; --warn: #e0a33e; --bad: #e2685f; --skip: #6b7280;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font: 14px/1.6 system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    display: grid; grid-template-rows: auto 1fr;
+  }
+  a { color: var(--gold); }
+
+  header {
+    display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+    padding: 12px 20px; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  header h1 { margin: 0; font-size: 16px; font-weight: 600; }
+  .meta { display: flex; gap: 14px; flex-wrap: wrap; color: var(--dim); font-size: 12.5px; }
+  .meta b { color: var(--ink); font-weight: 600; }
+  .meta .warn { color: var(--warn); }
+  .meta .bad { color: var(--bad); }
+
+  main { display: grid; grid-template-columns: 260px minmax(0, 1fr); min-height: 0; }
+  nav {
+    border-right: 1px solid var(--line); background: var(--panel);
+    overflow-y: auto; padding: 12px 0 40px;
+  }
+  .turn { margin-bottom: 4px; }
+  .turn > button {
+    width: 100%; display: flex; align-items: center; gap: 8px; justify-content: space-between;
+    padding: 9px 14px; background: none; border: 0; border-left: 3px solid transparent;
+    color: var(--ink); font: inherit; font-weight: 600; cursor: pointer; text-align: left;
+  }
+  .turn > button:hover { background: var(--panel2); }
+  .turn > button.active { border-left-color: var(--gold); background: #262b31; color: #fff2cc; }
+  .turn .badge { font: 600 11px/1 var(--mono); padding: 3px 6px; border-radius: 4px; background: #2c3138; }
+  .agents { display: none; padding: 2px 0 8px; }
+  .turn.open .agents { display: block; }
+  .agents button {
+    width: 100%; display: flex; align-items: center; gap: 7px;
+    padding: 6px 14px 6px 30px; background: none; border: 0; border-left: 3px solid transparent;
+    color: var(--dim); font: 12.5px/1.4 inherit; cursor: pointer; text-align: left;
+  }
+  .agents button:hover { background: var(--panel2); color: var(--ink); }
+  .agents button.active { border-left-color: var(--gold); background: #262b31; color: #fff2cc; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
+  .dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); }
+  .dot.skip { background: var(--skip); }
+  .agents .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .agents .ms { font: 11px var(--mono); color: #6f7883; }
+
+  section { min-width: 0; overflow-y: auto; padding: 18px 22px 60px; }
+  .placeholder { color: var(--dim); padding: 40px 0; text-align: center; }
+  h2 { margin: 0 0 4px; font-size: 15px; }
+  .sub { color: var(--dim); font-size: 12.5px; margin-bottom: 16px; }
+  .sub code { font-family: var(--mono); color: var(--gold); }
+
+  .stats { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 18px; }
+  .stat {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    padding: 8px 12px; min-width: 96px;
+  }
+  .stat .k { color: var(--dim); font-size: 11px; }
+  .stat .v { font: 600 16px/1.3 var(--mono); }
+  .stat .v.bad { color: var(--bad); } .stat .v.ok { color: var(--ok); }
+
+  .err {
+    background: #2a1d1d; border: 1px solid #5c3230; border-radius: 6px;
+    padding: 10px 12px; margin-bottom: 14px; color: #ffb4ae; font-size: 13px;
+  }
+  .err .et { font-family: var(--mono); color: #ff8f8f; }
+
+  details {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    margin-bottom: 10px; overflow: hidden;
+  }
+  details > summary {
+    padding: 9px 12px; cursor: pointer; font-weight: 600; font-size: 13px;
+    display: flex; align-items: center; gap: 9px; list-style: none;
+  }
+  details > summary::-webkit-details-marker { display: none; }
+  details > summary:hover { background: var(--panel2); }
+  details > summary .tag {
+    font: 11px var(--mono); color: var(--dim); background: var(--panel2);
+    border: 1px solid var(--line); border-radius: 4px; padding: 2px 6px;
+  }
+  .body { border-top: 1px solid var(--line); padding: 12px; }
+  .msg { margin-bottom: 10px; }
+  .msg .role {
+    font: 600 11px/1 var(--mono); color: var(--gold); text-transform: uppercase;
+    letter-spacing: .04em; margin-bottom: 5px; display: flex; gap: 8px; align-items: center;
+  }
+  .msg .role .n { color: #6f7883; font-weight: 400; text-transform: none; letter-spacing: 0; }
+  pre {
+    margin: 0; padding: 10px 12px; background: #101215; border: 1px solid var(--line);
+    border-radius: 5px; white-space: pre-wrap; overflow-wrap: anywhere;
+    font: 12.5px/1.6 var(--mono); color: #d8d6d0; max-height: 460px; overflow-y: auto;
+  }
+  pre.out { background: #12160f; border-color: #2b3a26; }
+  .dup {
+    font: 11px var(--mono); color: var(--skip); padding: 6px 12px;
+    background: #17191d; border: 1px dashed var(--line); border-radius: 5px;
+  }
+  @media (max-width: 820px) {
+    main { grid-template-columns: 1fr; }
+    nav { max-height: 42vh; border-right: 0; border-bottom: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title"></h1>
+  <div class="meta" id="meta"></div>
+</header>
+<main>
+  <nav id="nav"></nav>
+  <section id="view"><p class="placeholder">从左侧选择一个回合与 Agent</p></section>
+</main>
+<script type="application/json" id="report-data">__REPORT_DATA__</script>
+<script>
+(function () {
+  "use strict";
+  var DATA = JSON.parse(document.getElementById("report-data").textContent);
+  var META = DATA.meta || {}, TURNS = DATA.turns || [], BLOCKS = DATA.blocks || {};
+  var nav = document.getElementById("nav"), view = document.getElementById("view");
+  var selected = { turn: null, agent: null };
+
+  function el(tag, cls, text) {
+    var node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text != null) node.textContent = text;
+    return node;
+  }
+  function fmt(n) { return (n == null ? 0 : n).toLocaleString("en-US"); }
+  function block(ref) { return BLOCKS[ref] || ""; }
+
+  function renderHeader() {
+    document.getElementById("title").textContent = META.title || "自动游玩报告";
+    var meta = document.getElementById("meta");
+    function add(label, value, cls) {
+      var span = el("span", cls || "");
+      span.appendChild(document.createTextNode(label + " "));
+      var b = el("b", null, value); span.appendChild(b);
+      meta.appendChild(span);
+    }
+    add("存档", META.session_id ? META.session_id.slice(0, 12) : "-");
+    add("故事卡", META.card || "-");
+    add("回合", String(META.turns_done || 0) + " / " + String(META.turns_planned || 0));
+    add("trace", fmt(META.trace_count));
+    add("耗时", (META.elapsed_seconds || 0).toFixed(1) + "s");
+    if (META.dedup && META.dedup.saved_chars) {
+      add("去重省", (META.dedup.saved_ratio * 100).toFixed(1) + "%");
+    }
+    if (META.failed_agents) add("失败 Agent", String(META.failed_agents), "bad");
+    if (META.aborted) add("中断", META.aborted, "warn");
+  }
+
+  function agentDot(item) {
+    if (item.known_failing) return "skip";
+    return item.status === "success" ? "ok" : "bad";
+  }
+
+  function renderNav() {
+    nav.innerHTML = "";
+    TURNS.forEach(function (turn) {
+      var wrap = el("div", "turn");
+      var btn = el("button");
+      btn.appendChild(el("span", null, "第 " + turn.turn + " 回合"));
+      var badge = el("span", "badge", turn.summary.failed ? turn.summary.failed + " 失败" : "OK");
+      badge.style.color = turn.summary.failed ? "var(--bad)" : "var(--ok)";
+      btn.appendChild(badge);
+      btn.addEventListener("click", function () {
+        wrap.classList.toggle("open");
+        if (!selected.agent || selected.turn !== turn.turn) select(turn.turn, turn.agents[0]);
+      });
+      wrap.appendChild(btn);
+
+      var list = el("div", "agents");
+      turn.agents.forEach(function (item) {
+        var ab = el("button");
+        ab.appendChild(el("span", "dot " + agentDot(item)));
+        ab.appendChild(el("span", "name", item.name));
+        ab.appendChild(el("span", "ms", item.duration_ms ? item.duration_ms + "ms" : ""));
+        ab.addEventListener("click", function (e) { e.stopPropagation(); select(turn.turn, item); });
+        list.appendChild(ab);
+      });
+      wrap.appendChild(list);
+      nav.appendChild(wrap);
+    });
+    if (TURNS.length) {
+      nav.firstChild.classList.add("open");
+      select(TURNS[0].turn, TURNS[0].agents[0]);
+    }
+  }
+
+  function markActive() {
+    Array.prototype.forEach.call(nav.querySelectorAll(".agents button"), function (b, i) {
+      b.classList.remove("active");
+    });
+    Array.prototype.forEach.call(nav.querySelectorAll(".turn"), function (w) {
+      w.querySelector("button").classList.remove("active");
+    });
+    var turnWrap = nav.querySelectorAll(".turn")[TURNS.findIndex(function (t) {
+      return t.turn === selected.turn;
+    })];
+    if (turnWrap) {
+      turnWrap.querySelector("button").classList.add("active");
+      turnWrap.classList.add("open");
+      var idx = TURNS.find(function (t) { return t.turn === selected.turn; })
+        .agents.findIndex(function (a) { return a.id === selected.agent.id; });
+      var buttons = turnWrap.querySelectorAll(".agents button");
+      if (buttons[idx]) buttons[idx].classList.add("active");
+    }
+  }
+
+  function select(turnNumber, item) {
+    if (!item) return;
+    selected = { turn: turnNumber, agent: item };
+    markActive();
+    renderAgent(turnNumber, item);
+  }
+
+  function renderAgent(turnNumber, item) {
+    view.innerHTML = "";
+    view.appendChild(el("h2", null, "第 " + turnNumber + " 回合 · " + item.name));
+    var sub = el("div", "sub");
+    sub.appendChild(document.createTextNode(item.agent_type + " · " + (item.model || "-") +
+      " · " + item.status));
+    sub.appendChild(document.createTextNode(" · 输入 " + fmt(item.input_chars) + " 字符"));
+    if (item.total_tokens) sub.appendChild(document.createTextNode(" · " + fmt(item.total_tokens) + " tokens"));
+    sub.appendChild(document.createTextNode(" · " + item.duration_ms + "ms"));
+    view.appendChild(sub);
+
+    var stats = el("div", "stats");
+    function stat(k, v, cls) {
+      var box = el("div", "stat");
+      box.appendChild(el("div", "k", k));
+      box.appendChild(el("div", "v" + (cls ? " " + cls : ""), v));
+      stats.appendChild(box);
+    }
+    stat("状态", item.status, item.status === "success" ? "ok" : "bad");
+    stat("耗时", item.duration_ms + "ms");
+    stat("输入消息", String(item.messages.length));
+    stat("输入字符", fmt(item.input_chars));
+    stat("输出字符", fmt(item.output_chars));
+    if (item.total_tokens) stat("tokens", fmt(item.total_tokens));
+    view.appendChild(stats);
+
+    if (item.known_failing) {
+      var note = el("div", "err");
+      note.appendChild(el("span", "et", "已知失败 "));
+      note.appendChild(document.createTextNode(
+        "state_reconcile 在真实存档里 0% 成功，按约定先跳过修复；此条不计入健康度统计。"));
+      view.appendChild(note);
+    }
+    if (item.status !== "success" && (item.error_type || item.error_message)) {
+      var box = el("div", "err");
+      box.appendChild(el("span", "et", item.error_type || "error"));
+      box.appendChild(document.createTextNode(" " + (item.error_message || "")));
+      view.appendChild(box);
+    }
+
+    var seen = {};
+    item.messages.forEach(function (m, i) {
+      var details = el("details");
+      var summary = el("summary");
+      summary.appendChild(document.createTextNode("消息 " + (i + 1) + " · " + m.role));
+      summary.appendChild(el("span", "tag", fmt(m["len"]) + " 字符"));
+      if (seen[m.ref]) summary.appendChild(el("span", "tag", "与消息 " + seen[m.ref] + " 相同"));
+      seen[m.ref] = seen[m.ref] || (i + 1);
+      details.appendChild(summary);
+
+      var body = el("div", "body");
+      body.appendChild(el("pre", null, block(m.ref)));
+      details.appendChild(body);
+      if (i === 0) details.open = true;
+      view.appendChild(details);
+    });
+
+    var out = el("details");
+    var outSummary = el("summary");
+    outSummary.appendChild(document.createTextNode("原始输出"));
+    outSummary.appendChild(el("span", "tag", fmt(item.output_chars) + " 字符"));
+    out.appendChild(outSummary);
+    var outBody = el("div", "body");
+    outBody.appendChild(el("pre", "out", item.raw_output || "（空）"));
+    out.appendChild(outBody);
+    out.open = true;
+    view.appendChild(out);
+  }
+
+  renderHeader();
+  renderNav();
+})();
+</script>
+</body>
+</html>
