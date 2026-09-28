@@ -1924,7 +1924,14 @@ async def _plan_director_turn(
         "fallback_reason": ",".join(fallback_agents),
         "agents": metas,
     }
-    planned["agent_outputs"] = metas
+    planned["agent_outputs"] = dict(metas)
+    # 观察层与引导层的结果由后台任务在回合结束后写入，不属于本轮 planner 的
+    # agents 列表（它们没有 source 字段，混进 metas 会污染 planner 统计与
+    # fallback 判定）。单独补回，使 /api/director 仍能看到最近的观察与引导输出。
+    for _key in ("observer", "guidance"):
+        _value = (prev.get("agent_outputs") or {}).get(_key)
+        if isinstance(_value, dict):
+            planned["agent_outputs"][_key] = _value
     current = state.get("director_state") if isinstance(state.get("director_state"), dict) else {}
     planned["story_seed"] = copy.deepcopy(current.get("story_seed") or prev.get("story_seed"))
     _merge_completed_causal(planned, state.get("director_state"))
@@ -3330,6 +3337,15 @@ def _apply_director_plan(
         "scene": _clean_text(prev.get("scene"), 100),
         "scene_turns": int(prev.get("scene_turns") or 0),
         "note": "",
+        # 观察层与引导层的跨回合状态必须原样带过去。这几个字段由后台任务
+        # （narrative_observer / guidance_conflict）在回合结束后异步写入
+        # state["director_state"]，而本函数每回合都会重建 director 状态；漏掉它们
+        # 会被下一次 _dynamic_director_state 的 setdefault 重置，导致平缓计数永远
+        # 归零、冲突引导再也触发不了。
+        "observer_no_conflict_turns": int(prev.get("observer_no_conflict_turns") or 0),
+        "event_guidance": copy.deepcopy(prev.get("event_guidance")),
+        "event_history": copy.deepcopy(prev.get("event_history") or []),
+        "character_setting": copy.deepcopy(prev.get("character_setting")),
     }
     return _apply_director_pacing(planned, result, prev) if advance_scene else planned
 
