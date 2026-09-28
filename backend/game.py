@@ -85,6 +85,9 @@ DIRECTOR_PROGRESSION_MAX_TOKENS = int(os.getenv(
 DIRECTOR_PAYOFF_MAX_TOKENS = int(os.getenv(
     "DIRECTOR_PAYOFF_MAX_TOKENS", _DIRECTOR_LEGACY_MAX_TOKENS or "250"
 ))
+DIRECTOR_STAGE_MAX_TOKENS = int(os.getenv(
+    "DIRECTOR_STAGE_MAX_TOKENS", _DIRECTOR_LEGACY_MAX_TOKENS or "320"
+))
 DIRECTOR_HOOK_MAX_TOKENS = int(os.getenv(
     "DIRECTOR_HOOK_MAX_TOKENS", _DIRECTOR_LEGACY_MAX_TOKENS or "220"
 ))
@@ -1647,9 +1650,24 @@ def _dynamic_director_state(raw: dict | None) -> dict:
         normalized["last_hook"] = _normalize_hook_state(normalized.get("last_hook"))
         normalized.setdefault("agent_outputs", {})
         normalized.setdefault("next_event_seed", None)
+        normalized["next_event_stage"] = _normalize_stage(
+            normalized.get("next_event_stage")
+        )
         normalized.setdefault("event_guidance", None)
         normalized.setdefault("event_history", [])
         normalized.setdefault("character_setting", None)
+        normalized["stage"] = _normalize_stage(normalized.get("stage"))
+        normalized["stage_generation"] = (
+            _clean_text(normalized.get("stage_generation"), 64)
+            if normalized["stage"] else ""
+        )
+        if normalized["stage"] and not normalized["stage_generation"]:
+            normalized["stage_generation"] = "legacy-" + hashlib.sha256(
+                normalized["stage"]["goal"].encode("utf-8")
+            ).hexdigest()[:24]
+        normalized["stage_history"] = _normalize_stage_history(
+            normalized.get("stage_history")
+        )
         if isinstance(normalized.get("story_seed"), dict):
             normalized["story_seed"] = copy.deepcopy(normalized["story_seed"])
         return normalized
@@ -1663,9 +1681,13 @@ def _dynamic_director_state(raw: dict | None) -> dict:
         "last_hook": None,
         "agent_outputs": {},
         "next_event_seed": None,
+        "next_event_stage": None,
         "event_guidance": None,
         "event_history": [],
         "character_setting": None,
+        "stage": _normalize_stage(raw.get("stage")),
+        "stage_generation": "",
+        "stage_history": _normalize_stage_history(raw.get("stage_history")),
         "story_seed": copy.deepcopy(raw.get("story_seed")) if isinstance(raw.get("story_seed"), dict) else None,
         "last_audit": None,
         "needs_repair": False,
@@ -1680,6 +1702,142 @@ STORY_SEED_MARKER = "【STORY_SEED：历史种子证据】"
 
 def _stable_json(value) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _normalize_stage(value) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    goal = _clean_text(value.get("goal"), 240)
+    if not goal:
+        return None
+    try:
+        budget = int(value.get("event_budget"))
+    except (TypeError, ValueError):
+        return None
+    budget = max(0, min(6, budget))
+    return {"goal": goal, "event_budget": budget}
+
+
+def _normalize_stage_history(value) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    history: list[dict] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        goal = _clean_text(item.get("goal"), 240)
+        result = _clean_text(item.get("result"), 24)
+        if not goal or result not in {"completed", "failed"}:
+            continue
+        try:
+            budget = int(item.get("event_budget"))
+        except (TypeError, ValueError):
+            budget = 0
+        try:
+            ended_turn = int(item.get("ended_turn"))
+        except (TypeError, ValueError):
+            ended_turn = 0
+        history.append({
+            "goal": goal,
+            "event_budget": max(0, min(6, budget)),
+            "result": result,
+            "ended_turn": max(0, ended_turn),
+            "evidence": _clean_text(item.get("evidence"), 360),
+        })
+    return history[-12:]
+
+
+def _is_major_stage_goal(goal: str) -> bool:
+    text = _clean_text(goal, 240)
+    if len(text) < 4:
+        return False
+    if any(token in text for token in ("本轮", "下一步", "当前事件")):
+        return False
+    if text in {"继续调查", "寻找线索", "提升实力", "探索世界", "推进剧情"}:
+        return False
+    if re.search(r"(?:并且|以及|同时|然后|并完成|并获得|并突破|并成为)", text):
+        return False
+    if any(token in text for token in ("一门功法", "某门功法", "一个宗门", "某个宗门", "某种身份")):
+        return False
+    return not re.match(
+        r"^(?:立刻|马上|去|到|前往|进入|离开|查看|检查|询问|问|攻击|追击|追上|躲避|逃离|翻看|打开|拿|取)",
+        text,
+    )
+
+
+def _fallback_stage_guidance(state: dict, world_context: dict) -> dict:
+    director = _dynamic_director_state(state.get("director_state"))
+    completed_goals = {
+        _clean_text(item.get("goal"), 240)
+        for item in director.get("stage_history") or []
+        if item.get("result") == "completed"
+    }
+    rewards = world_context.get("reward_candidates") if isinstance(world_context, dict) else []
+    reward = next(
+        (
+            _clean_text(row.get("name"), 100)
+            for row in (rewards or [])
+            if isinstance(row, dict)
+            and _clean_text(row.get("name"), 100)
+            and f"获得《{_clean_text(row.get('name'), 100)}》" not in completed_goals
+        ),
+        "",
+    )
+    if reward:
+        return {"goal": f"获得《{reward}》", "event_budget": 4}
+    card_name = _clean_text(_card(state).get("name"), 80) or "当前世界"
+    return {
+        "goal": f"在{card_name}中取得足以长期改变主角处境的身份、能力或重要关系",
+        "event_budget": 4,
+    }
+
+
+def _sanitize_stage_guidance(result: dict | None, state: dict, world_context: dict) -> dict:
+    fallback = _fallback_stage_guidance(state, world_context)
+    if not isinstance(result, dict):
+        return fallback
+    goal = _clean_text(result.get("goal"), 240)
+    if not _is_major_stage_goal(goal):
+        return fallback
+    try:
+        budget = int(result.get("event_budget"))
+    except (TypeError, ValueError):
+        budget = 4
+    return {"goal": goal, "event_budget": max(3, min(6, budget))}
+
+
+def _stage_for_generation(stage: dict | None) -> dict | None:
+    normalized = _normalize_stage(stage)
+    if not normalized:
+        return None
+    return {
+        "goal": normalized["goal"],
+        # Zero means a prior settlement event failed to settle; every further
+        # event remains settlement-due instead of silently opening a new stage.
+        "event_budget": max(1, int(normalized.get("event_budget") or 0)),
+    }
+
+
+def _consume_stage_event_budget(stage: dict | None) -> dict | None:
+    normalized = _normalize_stage(stage)
+    if not normalized:
+        return None
+    return {
+        "goal": normalized["goal"],
+        "event_budget": max(0, int(normalized["event_budget"]) - 1),
+    }
+
+
+def _compact_stage_history(history: list[dict]) -> list[dict]:
+    return [
+        {
+            "goal": item.get("goal"),
+            "result": item.get("result"),
+            "ended_turn": item.get("ended_turn"),
+            "evidence": item.get("evidence"),
+        }
+        for item in _normalize_stage_history(history)[-6:]
+    ]
 
 
 def _story_seed_context(state: dict | None, consumer: str) -> str:
@@ -1751,6 +1909,101 @@ def _preserve_story_seed(state: dict, director: dict) -> dict:
     return director
 
 
+def _director_stage_messages(
+    state: dict,
+    action: str,
+    world_context: dict,
+    prev: dict,
+    memories: list[dict],
+) -> list[dict]:
+    memory_texts = [
+        text
+        for item in memories
+        if isinstance(item, dict)
+        if (text := str(item.get("text") or "").strip())
+    ]
+    event = prev.get("event") if isinstance(prev.get("event"), dict) else None
+    current_plan = prev.get("current_plan") if isinstance(prev.get("current_plan"), dict) else {}
+    content = render_prompt(
+        "guidance/stage/user",
+        character=_stable_json({
+            key: value for key, value in (state.get("character_state") or {}).items()
+            if key != "updated_at"
+        }),
+        world=_stable_json(world_context),
+        memories=_stable_json(memory_texts),
+        recent_story=_recent_scene(state.get("transcript") or []) or "（暂无）",
+        recent_direction=_stable_json({
+            "player_action": action,
+            "current_event": {
+                key: event.get(key)
+                for key in ("title", "core", "benefit", "end_condition", "status")
+            } if event else None,
+            "current_plan": {
+                "turn_objective": current_plan.get("turn_objective"),
+                "progression_direction": current_plan.get("progression_direction"),
+                "event_ended": current_plan.get("event_ended"),
+            } if current_plan else None,
+            "event_history": prev.get("event_history") or [],
+        }),
+        stage_history=_stable_json(_compact_stage_history(prev.get("stage_history") or [])),
+    )
+    return [
+        {
+            "role": "system",
+            "content": render_system_prompt("guidance/stage/system", card=_card(state)),
+        },
+        {"role": "user", "content": content},
+    ]
+
+
+async def _ensure_stage_guidance(
+    state: dict,
+    action: str,
+    world_context: dict,
+    memories: list[dict],
+) -> dict:
+    director = _dynamic_director_state(state.get("director_state"))
+    existing_stage = _normalize_stage(director.get("stage"))
+    if existing_stage is not None:
+        return director
+    result, meta = await _call_director_agent(
+        _director_stage_messages(state, action, world_context, director, memories),
+        "stage_guidance",
+        DIRECTOR_STAGE_MAX_TOKENS,
+        state.get("session_id"),
+    )
+    stage = _sanitize_stage_guidance(result, state, world_context)
+    source = meta["source"]
+    fallback_reason = meta.get("fallback_reason", "")
+    if result is not None and stage == _fallback_stage_guidance(state, world_context):
+        source = "fallback"
+        fallback_reason = "invalid_stage"
+    latest = _dynamic_director_state(state.get("director_state"))
+    # Another background task may have completed or installed a stage while the
+    # LLM call was in flight. Never overwrite that newer state with our snapshot.
+    if _normalize_stage(latest.get("stage")) is not None:
+        return latest
+    outputs = latest.get("agent_outputs") if isinstance(latest.get("agent_outputs"), dict) else {}
+    director = {
+        **latest,
+        "stage": stage,
+        "stage_generation": uuid.uuid4().hex,
+        "stage_history": _normalize_stage_history(latest.get("stage_history")),
+        "agent_outputs": {
+            **outputs,
+            "stage_guidance": {
+                "source": source,
+                "model": meta.get("model") if source == "llm" else "local",
+                "fallback_reason": fallback_reason,
+                "output": stage,
+            },
+        },
+    }
+    state["director_state"] = _preserve_story_seed(state, director)
+    return state["director_state"]
+
+
 async def _plan_director_turn(
     state: dict,
     action: str,
@@ -1762,37 +2015,7 @@ async def _plan_director_turn(
     prev = _dynamic_director_state(state.get("director_state"))
     compact_memories = _compact_memories(recalled_memories or [])
 
-    payoff_call, pacing_call = await asyncio.gather(
-        _call_director_agent(
-            _director_payoff_messages(state, action, world_context, prev, compact_memories),
-            "director_payoff", DIRECTOR_PAYOFF_MAX_TOKENS, state.get("session_id")
-        ),
-        _run_pacing_agent(state, action, prev),
-    )
-    payoff_result, payoff_meta = payoff_call
-    pacing_result, pacing_meta = pacing_call
-    payoff_retry_meta = None
-    if payoff_result is not None and world_context is not None:
-        initial_binding = _resolve_payoff_binding(payoff_result, world_context)
-        if _payoff_text(payoff_result) is not None and initial_binding is None:
-            retry_call = await _call_director_agent(
-                _director_payoff_retry_messages(
-                    state, action, world_context, prev, compact_memories, payoff_result,
-                ),
-                "director_payoff_retry",
-                DIRECTOR_PAYOFF_MAX_TOKENS,
-                state.get("session_id"),
-            )
-            retry_result, payoff_retry_meta = retry_call
-            if retry_result is not None:
-                payoff_result = retry_result
-                payoff_meta = {
-                    **payoff_meta,
-                    "retry": payoff_retry_meta,
-                    "retry_output": retry_result,
-                }
-    if payoff_result is None:
-        payoff_result = _fallback_director_payoff(prev)
+    pacing_result, pacing_meta = await _run_pacing_agent(state, action, prev)
     if pacing_result is None:
         pacing_result = _fallback_director_pacing(prev, action)
 
@@ -1842,17 +2065,10 @@ async def _plan_director_turn(
         advance_scene=False,
         event_just_created=event_just_created,
     )
-    payoff_state, last_payoff = _reconcile_payoff_state(
-        prev, payoff_result, state["turns"] + 1, world_context
-    )
-    planned["payoff_state"] = payoff_state
-    planned["last_payoff"] = last_payoff
-    planned["current_plan"]["payoff"] = (
-        dict(payoff_state) if payoff_state and payoff_state.get("status") == "pending" else None
-    )
-    planned["current_plan"]["selected_facts"] = _payoff_selected_facts(
-        planned["current_plan"]["payoff"], world_context
-    )
+    planned["payoff_state"] = prev.get("payoff_state")
+    planned["last_payoff"] = prev.get("last_payoff")
+    planned["current_plan"]["payoff"] = None
+    planned["current_plan"]["selected_facts"] = []
     # 事件判定结束后不再抢在玩家开口前预生成下一事件。改由"无事件过渡轮"里，
     # 节奏 Agent 判完玩家新意图后，再以玩家输入+意图为主异步孵化新事件
     # （见 prepare_action 的无事件链路分流与 _schedule_eventless_event_generation）。
@@ -1907,13 +2123,12 @@ async def _plan_director_turn(
     planned = _apply_director_pacing(planned, skeleton_result, prev)
     foundation_outputs = {
         key: value for key, value in (prev.get("agent_outputs") or {}).items()
-        if key in {"event", "causal", "viewpoint", "hook"}
+        if key in {"event", "causal", "viewpoint", "hook", "stage_guidance"}
     }
     metas = {
         **foundation_outputs,
         "progression": {**progression_meta, "output": progression_output},
         "hook": {**hook_meta, "output": hook_result},
-        "payoff": {**payoff_meta, "output": payoff_result},
         "pacing": {**pacing_meta, "output": pacing_result},
         "director": {**skeleton_meta, "output": skeleton_result},
     }
@@ -1972,6 +2187,7 @@ def _director_event_system_prompt(
     world_context: dict,
     memories: list[dict],
     guidance: dict | None = None,
+    stage: dict | None = None,
     card: dict | None = None,
 ) -> str:
     """Place trusted event context after the rules and before the output contract."""
@@ -1985,6 +2201,11 @@ def _director_event_system_prompt(
         render_prompt('shared/stable_world', world=_stable_json(world_context)),
         render_prompt('shared/recent_memories', memories=_stable_json(memory_texts)),
     ]
+    stage_snapshot = _stage_for_generation(stage)
+    if stage_snapshot:
+        context_parts.append(
+            render_prompt("engine/event/stage", stage=_stable_json(stage_snapshot))
+        )
     if isinstance(guidance, dict) and guidance.get("conflict_seed"):
         context_parts.append(
             render_prompt('engine/event/guidance', guidance=_stable_json(guidance))
@@ -2046,7 +2267,23 @@ async def _ensure_event_foundation(
         return prev
 
     next_seed = prev.get("next_event_seed") if isinstance(prev.get("next_event_seed"), dict) else None
+    next_seed_stage = _normalize_stage(prev.get("next_event_stage"))
     reuse_existing = bool(existing and existing.get("status") not in {"resolved", "abandoned"})
+    stage_snapshot = None
+    if not reuse_existing:
+        prev = await _ensure_stage_guidance(state, action, world_context, memories)
+        existing = prev.get("event") if isinstance(prev.get("event"), dict) else None
+        next_seed = prev.get("next_event_seed") if isinstance(prev.get("next_event_seed"), dict) else None
+        next_seed_stage = _normalize_stage(prev.get("next_event_stage"))
+        stage_snapshot = _stage_for_generation(prev.get("stage"))
+        if next_seed and (
+            not next_seed_stage
+            or not stage_snapshot
+            or next_seed_stage != stage_snapshot
+        ):
+            next_seed = None
+            prev["next_event_seed"] = None
+            prev["next_event_stage"] = None
     character = {
         key: value for key, value in (state.get("character_state") or {}).items()
         if key != "updated_at"
@@ -2094,6 +2331,7 @@ async def _ensure_event_foundation(
                         world_context,
                         memories,
                         prev.get("event_guidance"),
+                        stage_snapshot,
                         card=_card(state),
                     ),
                 },
@@ -2104,8 +2342,8 @@ async def _ensure_event_foundation(
             state.get("session_id"),
         )
         if event_result is None:
-            event_result = _fallback_event_creation(world_context)
-    event_seed = _sanitize_event_creation(event_result, world_context)
+            event_result = _fallback_event_creation(world_context, stage_snapshot)
+    event_seed = _sanitize_event_creation(event_result, world_context, stage_snapshot)
 
     event_history = [
         item for item in (prev.get("event_history") or [])
@@ -2145,6 +2383,9 @@ async def _ensure_event_foundation(
             if reuse_existing else ""
         ),
     }
+    if not reuse_existing and stage_snapshot:
+        event["stage_snapshot"] = copy.deepcopy(stage_snapshot)
+        event["stage_generation"] = _clean_text(prev.get("stage_generation"), 64)
     event.pop("cognition_model", None)
     causal_output = (
         {"source": "existing", "model": "stored", "fallback_reason": "", "output": event["causal_model"]}
@@ -2218,11 +2459,16 @@ async def _ensure_event_foundation(
         "causal": causal_output,
         "viewpoint": {**viewpoint_meta, "output": viewpoint_model},
     }
+    for _key in ("observer", "guidance", "stage_guidance"):
+        _value = (prev.get("agent_outputs") or {}).get(_key)
+        if isinstance(_value, dict):
+            outputs[_key] = _value
     if hook_state:
         outputs["hook"] = {**hook_meta, "output": hook_result}
     foundation = {
         **prev,
         "next_event_seed": None,
+        "next_event_stage": None,
         "event_guidance": None,
         "event_history": event_history,
         "event": event,
@@ -2232,6 +2478,8 @@ async def _ensure_event_foundation(
         "agent_outputs": outputs,
         "needs_repair": False,
     }
+    if not reuse_existing:
+        foundation["stage"] = _consume_stage_event_budget(stage_snapshot)
     state["director_state"] = _preserve_story_seed(state, foundation)
     return foundation
 
@@ -2249,6 +2497,12 @@ async def _run_next_event_generation(
         world_context = constraints.director_context(session_id, "")
     if memories is None:
         memories = _compact_memories(_recall_world_memory(state, context))
+    director = _dynamic_director_state(state.get("director_state"))
+    event = director.get("event") if isinstance(director.get("event"), dict) else None
+    if not event or event.get("status") not in {"resolving", "resolved", "abandoned"}:
+        return
+    director = await _ensure_stage_guidance(state, context, world_context, memories)
+    stage_snapshot = _stage_for_generation(director.get("stage"))
     result, meta = await _call_director_agent(
         [
             {
@@ -2257,6 +2511,7 @@ async def _run_next_event_generation(
                     world_context,
                     memories,
                     (state.get("director_state") or {}).get("event_guidance"),
+                    stage_snapshot,
                     card=_card(state),
                 ),
             },
@@ -2276,8 +2531,12 @@ async def _run_next_event_generation(
     if not event or event.get("status") not in {"resolving", "resolved", "abandoned"}:
         return
     world_context = constraints.director_context(session_id, "")
-    seed = _sanitize_event_creation(result, world_context)
+    seed = _sanitize_event_creation(result, world_context, stage_snapshot)
+    current_stage = _stage_for_generation(director.get("stage"))
+    if not stage_snapshot or not current_stage or current_stage != stage_snapshot:
+        return
     director["next_event_seed"] = seed
+    director["next_event_stage"] = copy.deepcopy(stage_snapshot)
     outputs = director.get("agent_outputs") if isinstance(director.get("agent_outputs"), dict) else {}
     director["agent_outputs"] = {
         **outputs,
@@ -2603,6 +2862,7 @@ def _compact_director_state(prev: dict) -> dict:
             "status": event.get("status"),
             "turns": event.get("turns"),
         } if event else None),
+        "stage": _normalize_stage(prev.get("stage")),
         "intent": prev.get("intent"),
         "previous_hook": _hook_text(prev.get("hook_state")),
         "previous_result": {
@@ -2866,9 +3126,6 @@ def _director_skeleton_messages(
             }
         ),
         hook=_stable_json(plan.get('hook')),
-        payoff=_stable_json(
-            {'payoff': plan.get('payoff'), 'selected_facts': plan.get('selected_facts')}
-        ),
         recent_story=_latest_scene(state.get('transcript') or []) or '（暂无）',
         action=action,
     )
@@ -2883,8 +3140,24 @@ def _director_skeleton_messages(
     ]
 
 
-def _fallback_event_creation(world_context: dict) -> dict:
+def _fallback_event_creation(world_context: dict, stage: dict | None = None) -> dict:
     location = (world_context.get("location") or {}).get("location_name") or "当前地点"
+    stage_snapshot = _stage_for_generation(stage)
+    if stage_snapshot:
+        goal = stage_snapshot["goal"]
+        if int(stage_snapshot.get("event_budget") or 0) <= 1:
+            return {
+                "title": f"{location}阶段收束",
+                "core": f"{location}出现围绕“{goal}”的最终局面，必须在本事件中明确成功或不可逆失败",
+                "benefit": f"让“{goal}”获得明确结果并改变主角后续处境",
+                "end_condition": f"“{goal}”被明确完成，或因不可逆失败被明确终止",
+            }
+        return {
+            "title": f"{location}阶段推进",
+            "core": f"{location}出现一项会实质推进长期目标“{goal}”的现实变化",
+            "benefit": f"获得推进“{goal}”所需的关键进展、关系或信息",
+            "end_condition": f"本事件对“{goal}”产生可验证进展，或该推进路线被明确否定",
+        }
     return {
         "title": f"{location}当前事件",
         "core": f"{location}正在出现一项玩家角色可以观察和介入的现实变化",
@@ -2964,9 +3237,14 @@ def _clean_markdown(value, limit: int = 12000) -> str:
     return text[:limit]
 
 
-def _sanitize_event_creation(result: dict, world_context: dict) -> dict:
-    fallback = _fallback_event_creation(world_context)
-    return {
+def _sanitize_event_creation(
+    result: dict,
+    world_context: dict,
+    stage: dict | None = None,
+) -> dict:
+    result = result if isinstance(result, dict) else {}
+    fallback = _fallback_event_creation(world_context, stage)
+    sanitized = {
         "title": _clean_text(result.get("title"), 100) or fallback["title"],
         "core": _clean_text(result.get("core"), 300) or fallback["core"],
         "benefit": _clean_text(result.get("benefit"), 240) or fallback["benefit"],
@@ -2974,6 +3252,20 @@ def _sanitize_event_creation(result: dict, world_context: dict) -> dict:
             _clean_text(result.get("end_condition"), 300) or fallback["end_condition"]
         ),
     }
+    stage_snapshot = _stage_for_generation(stage)
+    if stage_snapshot and stage_snapshot["event_budget"] <= 1:
+        goal = stage_snapshot["goal"]
+        sanitized["core"] = _clean_text(
+            f"{sanitized['core']}；这是阶段目标“{goal}”的最终结算事件，"
+            "本事件必须直接形成明确成功或不可逆失败，不得再转入中间调查",
+            300,
+        )
+        sanitized["benefit"] = _clean_text(f"明确结算阶段目标“{goal}”", 240)
+        sanitized["end_condition"] = _clean_text(
+            f"阶段目标“{goal}”在正文中被明确完成，或因不可逆失败被明确终止",
+            300,
+        )
+    return sanitized
 
 
 def _fallback_causal_model(event_seed: dict, world_context: dict) -> str:
@@ -3322,6 +3614,14 @@ def _apply_director_plan(
     plan["plan_id"] = uuid.uuid4().hex
     plan["planned_turn"] = turn
     plan["forced_reasons"] = forced_reasons
+    plan["stage"] = (
+        copy.deepcopy(_normalize_stage((event or {}).get("stage_snapshot")))
+        or copy.deepcopy(_normalize_stage(prev.get("stage")))
+    )
+    plan["stage_generation"] = (
+        _clean_text((event or {}).get("stage_generation"), 64)
+        or _clean_text(prev.get("stage_generation"), 64)
+    )
     planned = {
         "event": event,
         "intent": intent,
@@ -3346,6 +3646,9 @@ def _apply_director_plan(
         "event_guidance": copy.deepcopy(prev.get("event_guidance")),
         "event_history": copy.deepcopy(prev.get("event_history") or []),
         "character_setting": copy.deepcopy(prev.get("character_setting")),
+        "stage": copy.deepcopy(_normalize_stage(prev.get("stage"))),
+        "stage_generation": _clean_text(prev.get("stage_generation"), 64),
+        "stage_history": _normalize_stage_history(prev.get("stage_history")),
     }
     return _apply_director_pacing(planned, result, prev) if advance_scene else planned
 
@@ -3394,6 +3697,15 @@ def _render_director_plan(state: dict, world_context: dict) -> str:
             action_goal=plan.get('action_goal') or (plan.get('hook') or {}).get('goal') or '无',
         )
     ]
+    stage = _normalize_stage(plan.get("stage"))
+    if stage:
+        lines.append(
+            render_prompt(
+                "engine/narrative/plan/stage",
+                goal=stage["goal"],
+                event_budget=stage["event_budget"],
+            )
+        )
     payoff = plan.get("payoff") if _is_maintained_payoff(plan.get("payoff")) else None
     if payoff:
         lines.extend(
@@ -3594,6 +3906,8 @@ async def _run_director_audit(
             ),
             "event_end_reached": agent_event_end_reached,
             "agent_event_end_reached": agent_event_end_reached,
+            "stage_completed": bool(result.get("stage_completed")),
+            "stage_failed": bool(result.get("stage_failed")) and not bool(result.get("stage_completed")),
             "evidence": _clean_text(result.get("evidence"), 360),
             "violations": _clean_string_list(result.get("violations"), limit=8),
             "note": _clean_text(result.get("note"), 360),
@@ -3608,27 +3922,29 @@ async def _run_director_audit(
             return
         director = _dynamic_director_state(state.get("director_state"))
         current = director.get("current_plan") or {}
-        if current.get("plan_id") != plan.get("plan_id"):
-            return
-        # 推进 Agent 已明确收束时，审计 Agent 的相反判断不能把事件重新打开。
-        # 保留原始审计值供 trace 追溯，但最终状态按“结束优先”判定。
-        if current.get("event_ended") and not audit["event_end_reached"]:
+        plan_is_current = current.get("plan_id") == plan.get("plan_id")
+        # Event-plan mutations require the current plan. Stage settlement below
+        # uses its own generation identity so a fast next action cannot erase a
+        # valid completion from the preceding narrative.
+        if plan_is_current and current.get("event_ended") and not audit["event_end_reached"]:
             audit["event_end_reached"] = True
             audit["event_end_source"] = "progression"
-        director["last_audit"] = audit
+        if plan_is_current:
+            director["last_audit"] = audit
         outputs = director.get("agent_outputs") if isinstance(director.get("agent_outputs"), dict) else {}
-        director["agent_outputs"] = {
-            **outputs,
-            "audit": {
-                "source": "llm",
-                "model": DIRECTOR_LLM_CONFIG.model,
-                "fallback_reason": "",
-                "output": result,
-            },
-        }
-        director["needs_repair"] = not audit["fulfilled"]
+        if plan_is_current:
+            director["agent_outputs"] = {
+                **outputs,
+                "audit": {
+                    "source": "llm",
+                    "model": DIRECTOR_LLM_CONFIG.model,
+                    "fallback_reason": "",
+                    "output": result,
+                },
+            }
+            director["needs_repair"] = not audit["fulfilled"]
         event = director.get("event") if isinstance(director.get("event"), dict) else None
-        if event and event.get("id") == plan.get("event_id"):
+        if plan_is_current and event and event.get("id") == plan.get("event_id"):
             viewpoint = _clean_markdown(
                 event.get("viewpoint_model") or event.get("cognition_model")
             )
@@ -3637,7 +3953,7 @@ async def _run_director_audit(
             )
             if merged_viewpoint != viewpoint:
                 event["viewpoint_model"] = merged_viewpoint
-                director["event"] = event
+            director["event"] = event
         payoff = plan.get("payoff") if _is_maintained_payoff(plan.get("payoff")) else None
         current_payoff = director.get("payoff_state")
         if (
@@ -3657,8 +3973,42 @@ async def _run_director_audit(
             director["last_payoff"] = triggered
             if current.get("plan_id") == plan.get("plan_id"):
                 current["payoff"] = None
+        stage_snapshot = _normalize_stage(plan.get("stage"))
+        audited_generation = _clean_text(plan.get("stage_generation"), 64)
+        active_generation = _clean_text(director.get("stage_generation"), 64)
         if (
-            audit["event_end_reached"]
+            (audit["stage_completed"] or audit["stage_failed"])
+            and stage_snapshot
+            and audited_generation
+            and audited_generation == active_generation
+        ):
+            active_stage = _normalize_stage(director.get("stage"))
+            if active_stage and active_stage.get("goal") == stage_snapshot.get("goal"):
+                result_key = "completed" if audit["stage_completed"] else "failed"
+                history = _normalize_stage_history(director.get("stage_history"))
+                history.append({
+                    "goal": stage_snapshot["goal"],
+                    "event_budget": active_stage["event_budget"],
+                    "result": result_key,
+                    "ended_turn": turn,
+                    "evidence": audit["evidence"],
+                })
+                director["stage_history"] = _normalize_stage_history(history)
+                director["stage"] = None
+                director["stage_generation"] = ""
+                director["next_event_seed"] = None
+                director["next_event_stage"] = None
+                audit["stage_result"] = result_key
+                if event and event.get("stage_generation") == audited_generation:
+                    event.pop("stage_snapshot", None)
+                    event.pop("stage_generation", None)
+                    director["event"] = event
+                if plan_is_current:
+                    current["stage"] = copy.deepcopy(stage_snapshot)
+                    director["current_plan"] = current
+        if (
+            plan_is_current
+            and audit["event_end_reached"]
             and event
             and event.get("id") == plan.get("event_id")
             and event.get("status") not in {"resolved", "abandoned"}
@@ -3755,17 +4105,14 @@ async def _run_audit_end_progression(
 
 
 def _compact_audit_plan(plan: dict) -> dict:
-    payoff = plan.get("payoff") if isinstance(plan.get("payoff"), dict) else {}
+    stage = _normalize_stage(plan.get("stage"))
     return {
         "turn_mode": plan.get("turn_mode"),
         "required_outcome": plan.get("turn_objective") or plan.get("current_goal"),
         "event_core": plan.get("event_core"),
         "event_end_condition": plan.get("event_end_condition"),
-        "payoff": {
-            "id": payoff.get("id"),
-            "desc": payoff.get("desc"),
-            "trigger": payoff.get("trigger"),
-        },
+        "stage": stage,
+        "stage_generation": _clean_text(plan.get("stage_generation"), 64),
         "beats": plan.get("beats") or [],
         "selected_fact_ids": [
             row.get("id") for row in (plan.get("selected_facts") or []) if row.get("id")

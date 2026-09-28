@@ -1,0 +1,6 @@
+{
+  "status": "SWEEP_UNAVAILABLE",
+  "reason": "Codex reviewer endpoint returned 429 Too Many Requests after retry limit.",
+  "requested_model": "gpt-5.4",
+  "base_commit": "59335d13589790601bace143a0231b9f62fb4296"
+}

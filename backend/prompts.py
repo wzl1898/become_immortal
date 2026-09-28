@@ -56,6 +56,7 @@ def _story_card_context(card: dict, consumer: str) -> str:
         "engine/payoff/system",
         "engine/event/system",
         "guidance/conflict/system",
+        "guidance/stage/system",
     }:
         parts.append(card["prompts"]["rewards"])
     if consumer == "engine/narrative/system":
@@ -113,4 +114,5 @@ DIRECTOR_SKELETON_SYSTEM_PROMPT = render_system_prompt("engine/skeleton/system")
 DIRECTOR_AUDIT_SYSTEM_PROMPT = render_system_prompt("engine/audit/system")
 NARRATIVE_OBSERVER_SYSTEM_PROMPT = render_system_prompt("observation/conflict/system")
 GUIDANCE_CONFLICT_SYSTEM_PROMPT = render_system_prompt("guidance/conflict/system")
+GUIDANCE_STAGE_SYSTEM_PROMPT = render_system_prompt("guidance/stage/system")
 CHARACTER_SETTING_SYSTEM_PROMPT = render_system_prompt("observation/character/system")

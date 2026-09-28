@@ -19,9 +19,6 @@ ${progression}
 【本轮刚生成的钩子】
 ${hook}
 
-【爽点】
-${payoff}
-
 【最近一轮正文】
 ${recent_story}
 

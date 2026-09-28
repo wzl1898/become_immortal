@@ -239,6 +239,10 @@ class StoryCardTests(unittest.TestCase):
                 "guidance_conflict": {
                     "conflict_seed": "值班负责人要求核对记录，暂缓离开。"
                 },
+                "stage_guidance": {
+                    "goal": "获得轨道站正式维修员身份",
+                    "event_budget": 4,
+                },
                 "director_event": {
                     "title": "记录差异",
                     "core": "值班负责人正在核对记录",
@@ -296,6 +300,7 @@ class StoryCardTests(unittest.TestCase):
                     )
         self.assertTrue(
             {
+                "stage_guidance",
                 "director_event",
                 "director_causal",
                 "director_viewpoint",
@@ -303,7 +308,6 @@ class StoryCardTests(unittest.TestCase):
                 "director_progression",
                 "director_hook",
                 "director_skeleton",
-                "director_payoff",
                 "guidance_conflict",
             }.issubset({kind for sid, kind, _ in captured if sid == b})
         )
