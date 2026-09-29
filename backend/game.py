@@ -3897,6 +3897,9 @@ async def _run_director_audit(
         agent_event_end_reached = bool(
             result.get("event_end_reached", result.get("end_condition_met", False))
         )
+        stage_result = _clean_text(result.get("result"), 16).lower()
+        if stage_result not in {"success", "fail"}:
+            stage_result = ""
         audit = {
             "plan_id": plan.get("plan_id"),
             "turn": turn,
@@ -3906,9 +3909,8 @@ async def _run_director_audit(
             ),
             "event_end_reached": agent_event_end_reached,
             "agent_event_end_reached": agent_event_end_reached,
-            "stage_completed": bool(result.get("stage_completed")),
-            "stage_failed": bool(result.get("stage_failed")) and not bool(result.get("stage_completed")),
             "evidence": _clean_text(result.get("evidence"), 360),
+            "result": stage_result,
             "violations": _clean_string_list(result.get("violations"), limit=8),
             "note": _clean_text(result.get("note"), 360),
             "viewpoint_updates": _clean_string_list(
@@ -3976,15 +3978,21 @@ async def _run_director_audit(
         stage_snapshot = _normalize_stage(plan.get("stage"))
         audited_generation = _clean_text(plan.get("stage_generation"), 64)
         active_generation = _clean_text(director.get("stage_generation"), 64)
+        final_stage_event_ended = bool(
+            stage_snapshot
+            and stage_snapshot.get("event_budget") == 1
+            and audit["event_end_reached"]
+        )
         if (
-            (audit["stage_completed"] or audit["stage_failed"])
-            and stage_snapshot
+            final_stage_event_ended
             and audited_generation
             and audited_generation == active_generation
         ):
             active_stage = _normalize_stage(director.get("stage"))
             if active_stage and active_stage.get("goal") == stage_snapshot.get("goal"):
-                result_key = "completed" if audit["stage_completed"] else "failed"
+                # The final event ending is the stage boundary. The existing
+                # audit LLM only classifies that fixed boundary as success/fail.
+                result_key = "completed" if audit["result"] == "success" else "failed"
                 history = _normalize_stage_history(director.get("stage_history"))
                 history.append({
                     "goal": stage_snapshot["goal"],

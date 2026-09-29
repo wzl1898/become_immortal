@@ -32,6 +32,6 @@ Agent 只输出 `goal` 和 `event_budget`。预算由后端限制在 3～6；无
 
 ## 完成与历史
 
-导演审计读取实际正文和状态面板，独立输出 `stage_completed` 或 `stage_failed`。只有正文明确完成目标，或产生明确且不可逆的失败，阶段才会归档到 `director_state.stage_history` 并清空。下一次创建事件前会动态生成新阶段。
+阶段是否结束不由 LLM 单独判断。当创建时 `stage_snapshot.event_budget` 为 1 的最后事件结束时，后端确定阶段同步结束。现有导演审计调用只根据实际正文分类这次结束的结果，并按固定顺序输出：先给 `evidence`，再给 `result: "success" | "fail"`。成功归档为 `completed`，否则归档为 `failed`，随后清空当前阶段和旧事件种子。下一次创建事件前会动态生成新阶段；非最后事件结束时不分类阶段结果。
 
 旧 `payoff` Agent 已退出正常导演规划路径；历史存档字段和辅助函数暂时保留兼容。

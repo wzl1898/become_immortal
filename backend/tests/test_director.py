@@ -1660,6 +1660,10 @@ class StageGuidanceTests(unittest.TestCase):
         self.assertEqual(ensured["stage"], stage)
 
     def test_final_budget_event_prompt_forces_settlement(self):
+        audit_system = prompts.render_system_prompt("engine/audit/system")
+        self.assertLess(audit_system.index('"evidence"'), audit_system.index('"result"'))
+        self.assertNotIn("stage_completed", audit_system)
+        self.assertNotIn("stage_failed", audit_system)
         system = game._director_event_system_prompt(
             _context(), [], None,
             {"goal": "获得《引气诀》", "event_budget": 1},
@@ -1677,9 +1681,10 @@ class StageGuidanceTests(unittest.TestCase):
     def test_audit_archives_completed_stage_from_actual_narrative(self):
         sid = "stage-audit-test"
         stage = {"goal": "获得《引气诀》", "event_budget": 0}
+        final_event_stage = {"goal": "获得《引气诀》", "event_budget": 1}
         plan = {
-            "plan_id": "stage-plan", "event_id": "event-1", "stage": dict(stage),
-            "stage_generation": "stage-gen-1",
+            "plan_id": "stage-plan", "event_id": "event-1", "stage": final_event_stage,
+            "stage_generation": "stage-gen-1", "event_ended": True,
             "turn_objective": "打开铁盒确认传承", "beats": ["打开铁盒"],
         }
         game._CACHE[sid] = {
@@ -1698,10 +1703,11 @@ class StageGuidanceTests(unittest.TestCase):
             if kwargs["request_type"] == "director_audit":
                 self.assertIn("获得《引气诀》", args[0][-1]["content"])
                 return json.dumps({
-                    "fulfilled": True, "event_end_reached": False,
-                    "stage_completed": True, "stage_failed": False,
+                    "fulfilled": True, "event_end_reached": True,
+                    "viewpoint_updates": [],
                     "evidence": "正文明确写明主角取得并阅读《引气诀》。",
-                    "viewpoint_updates": [], "violations": [], "note": "",
+                    "result": "success",
+                    "violations": [], "note": "",
                 }, ensure_ascii=False)
             if kwargs["request_type"] == "state_reconcile":
                 return json.dumps({"updates": {}, "evidence": {}})
