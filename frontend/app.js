@@ -241,6 +241,7 @@ const LLM_REQUEST_LABELS = {
   opening: "开场生成",
   director_plan: "导演规划",
   director_event: "事件 Agent",
+  stage_guidance: "阶段 Agent",
   director_progression: "推进 Agent",
   director_causal: "因果 Agent",
   director_viewpoint: "视角 Agent",
@@ -1070,6 +1071,7 @@ function renderAgentOutputs(outputs) {
   const labels = {
     event: "事件",
     next_event: "下一事件",
+    stage_guidance: "阶段",
     progression: "推进",
     causal: "因果",
     viewpoint: "视角",
@@ -1083,7 +1085,7 @@ function renderAgentOutputs(outputs) {
     guidance: "引导层",
     character_setting: "人物设定",
   };
-  const available = ["event", "next_event", "causal", "viewpoint", "cognition", "progression", "hook", "payoff", "pacing", "director", "audit", "observer", "guidance", "character_setting"]
+  const available = ["stage_guidance", "event", "next_event", "causal", "viewpoint", "cognition", "progression", "hook", "payoff", "pacing", "director", "audit", "observer", "guidance", "character_setting"]
     .filter((key) => outputs[key] && typeof outputs[key] === "object");
   if (!available.length) return;
 
