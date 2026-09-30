@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>故事引擎</title>
-  <link rel="stylesheet" href="style.css?v=story-cards-1" />
+  <link rel="stylesheet" href="style.css?v=stage-display-1" />
 </head>
 <body>
   <main id="user-gate" class="user-gate">
@@ -120,7 +120,7 @@
             <button id="director-close" class="ghost">关闭</button>
           </div>
         </div>
-        <p class="director-tip">事件初始化时先建立主角视角与首个钩子，幕后因果在后台生成；之后每轮由节奏与爽点 Agent 并行判断，刷新下一步钩子，再生成导演骨架。下方可查看各 Agent 的原始输出。</p>
+        <p class="director-tip">这里展示跨事件阶段目标、剩余事件预算、当前事件与导演骨架，也可查看阶段历史和各 Agent 的原始输出。</p>
         <div id="director-body" class="director-body"></div>
         <p id="director-empty" class="director-empty hidden">导演尚未落子。</p>
       </div>
@@ -172,6 +172,6 @@
     </form>
   </div>
 
-  <script src="app.js?v=story-cards-1"></script>
+  <script src="app.js?v=stage-display-1"></script>
 </body>
 </html>

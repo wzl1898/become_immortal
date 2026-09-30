@@ -1000,6 +1000,71 @@ function field(label, value, valClass) {
   return wrap;
 }
 
+function renderStageInfo(state) {
+  const hasStageState = Object.prototype.hasOwnProperty.call(state, "stage") ||
+    (Array.isArray(state.stage_history) && state.stage_history.length > 0);
+  if (!hasStageState) return;
+
+  const stage = state.stage && typeof state.stage === "object" ? state.stage : null;
+  const card = document.createElement("section");
+  card.className = `dir-stage${stage ? "" : " waiting"}`;
+  const head = document.createElement("div");
+  head.className = "dir-stage-head";
+  const title = document.createElement("div");
+  title.className = "dir-section-head";
+  title.textContent = "当前阶段";
+  head.appendChild(title);
+
+  if (stage) {
+    const budget = Math.max(0, Number(stage.event_budget) || 0);
+    const badge = document.createElement("span");
+    badge.className = `dir-stage-status ${budget === 0 ? "settling" : budget === 1 ? "final" : "progressing"}`;
+    badge.textContent = budget === 0 ? "最后事件进行中" : budget === 1 ? "下一事件为最后事件" : "推进中";
+    head.appendChild(badge);
+    card.appendChild(head);
+    card.appendChild(field("阶段目标", stage.goal, "desc"));
+    card.appendChild(field("剩余新事件预算", String(budget), budget <= 1 ? "trigger" : ""));
+  } else {
+    card.appendChild(head);
+    card.appendChild(field("阶段状态", "等待生成下一阶段"));
+  }
+  directorBodyEl.appendChild(card);
+
+  const history = Array.isArray(state.stage_history) ? state.stage_history : [];
+  if (!history.length) return;
+  const details = document.createElement("details");
+  details.className = "dir-stage-history";
+  const summary = document.createElement("summary");
+  summary.textContent = `阶段历史（${history.length}）`;
+  details.appendChild(summary);
+  const list = document.createElement("div");
+  list.className = "dir-stage-history-list";
+  for (const row of [...history].reverse()) {
+    if (!row || typeof row !== "object") continue;
+    const item = document.createElement("div");
+    const succeeded = row.result === "completed" || row.result === "success";
+    item.className = `dir-stage-history-item ${succeeded ? "completed" : "failed"}`;
+    const line = document.createElement("div");
+    line.className = "dir-stage-history-title";
+    const result = document.createElement("span");
+    result.className = "result";
+    result.textContent = succeeded ? "✓ 成功" : "✗ 失败";
+    const goal = document.createElement("span");
+    goal.className = "goal";
+    goal.textContent = row.goal || "未命名阶段";
+    line.append(result, goal);
+    item.appendChild(line);
+    const meta = document.createElement("div");
+    meta.className = "dir-stage-history-meta";
+    meta.textContent = Number(row.ended_turn) > 0 ? `结束于第 ${Number(row.ended_turn)} 回合` : "结束回合未知";
+    item.appendChild(meta);
+    if (row.evidence) item.appendChild(field("结果证据", row.evidence));
+    list.appendChild(item);
+  }
+  details.appendChild(list);
+  directorBodyEl.appendChild(details);
+}
+
 function renderAgentOutputs(outputs) {
   if (!outputs || typeof outputs !== "object" || !Object.keys(outputs).length) return;
   const labels = {
@@ -1075,6 +1140,8 @@ function renderDynamicDirector(state) {
   const plan = state.current_plan || null;
   const intent = state.intent || null;
   const hook = state.hook_state || null;
+
+  renderStageInfo(state);
 
   const phaseWrap = document.createElement("div");
   phaseWrap.className = "dir-phase";
@@ -1229,11 +1296,11 @@ function renderDynamicDirector(state) {
 
 function renderDirector(state, turns) {
   directorBodyEl.innerHTML = "";
-  const hasContent = state && (state.current_plan || state.event || state.hook_state || state.agent_outputs || state.phase || state.payoff || state.last_fired);
+  const hasContent = state && (Object.prototype.hasOwnProperty.call(state, "stage") || (Array.isArray(state.stage_history) && state.stage_history.length) || state.current_plan || state.event || state.hook_state || state.agent_outputs || state.phase || state.payoff || state.last_fired);
   directorEmptyEl.classList.toggle("hidden", !!hasContent);
   if (!hasContent) return;
 
-  if (state.current_plan || Object.prototype.hasOwnProperty.call(state, "event")) {
+  if (state.current_plan || Object.prototype.hasOwnProperty.call(state, "event") || Object.prototype.hasOwnProperty.call(state, "stage")) {
     renderDynamicDirector(state);
     return;
   }

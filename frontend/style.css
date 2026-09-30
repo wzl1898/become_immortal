@@ -521,6 +521,39 @@ html, body {
 .director-empty { color: var(--muted); text-align: center; padding: 20px 0; }
 .director-empty.hidden { display: none; }
 
+/* 当前阶段与历史 */
+.dir-stage {
+  border: 1px solid var(--accent); border-radius: 9px; padding: 14px;
+  background: linear-gradient(135deg, rgba(180,138,60,0.13), rgba(180,138,60,0.04));
+  display: flex; flex-direction: column; gap: 10px;
+}
+.dir-stage.waiting { border-color: #333842; background: #12151b; }
+.dir-stage-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.dir-stage-head .dir-section-head { flex: 1; }
+.dir-stage-status {
+  flex: none; padding: 3px 9px; border: 1px solid; border-radius: 999px;
+  font-size: 11px; line-height: 1.4;
+}
+.dir-stage-status.progressing { color: var(--accent-soft); border-color: var(--accent); }
+.dir-stage-status.final, .dir-stage-status.settling {
+  color: var(--danger); border-color: var(--danger); background: rgba(196,110,110,0.08);
+}
+.dir-stage-history { border: 1px solid #2a2f38; border-radius: 8px; background: #101319; }
+.dir-stage-history summary {
+  padding: 10px 12px; color: var(--muted); font-size: 12px; cursor: pointer;
+  letter-spacing: 0.08em; user-select: none;
+}
+.dir-stage-history[open] summary { border-bottom: 1px solid #23272f; }
+.dir-stage-history-list { display: flex; flex-direction: column; gap: 0; }
+.dir-stage-history-item { padding: 11px 12px; border-bottom: 1px solid #23272f; }
+.dir-stage-history-item:last-child { border-bottom: 0; }
+.dir-stage-history-title { display: flex; align-items: baseline; gap: 8px; font-size: 13px; }
+.dir-stage-history-title .result { flex: none; font-weight: 700; }
+.dir-stage-history-item.completed .result { color: var(--accent-soft); }
+.dir-stage-history-item.failed .result { color: var(--danger); }
+.dir-stage-history-title .goal { color: var(--ink); line-height: 1.5; }
+.dir-stage-history-meta { margin: 3px 0 7px; color: var(--muted); font-size: 11px; }
+
 /* 阶段徽标 */
 .dir-phase { display: flex; align-items: center; gap: 8px; }
 .dir-badge {
