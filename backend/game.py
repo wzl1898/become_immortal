@@ -26,8 +26,9 @@ import embed
 import store
 import story_cards
 import background
+import prompts
 from llm import complete_chat, config_from_env
-from prompts import OPENING_PROMPT, render_prompt, render_system_prompt
+from prompts import render_prompt, render_system_prompt
 
 # save_id -> {"messages": list[dict], "transcript": list[dict], "turns": int, "character_state": dict, "world_memory": list[dict]}
 _CACHE: dict[str, dict] = {}
@@ -144,6 +145,7 @@ DIRECTOR_PROXIMITY_HI = 0.6
 
 def init() -> None:
     store.init()
+    prompts.init_registry()
 
 
 def _card(state: dict | None = None) -> dict:
@@ -319,7 +321,7 @@ async def prepare_opening(session_id: str) -> list[dict]:
             inject.rstrip(),
             _render_event_models(director_state).rstrip(),
             _render_director_plan(director_state, world_context).rstrip(),
-            OPENING_PROMPT,
+            render_prompt("engine/narrative/opening"),
         ]
         messages.append({"role": "user", "content": "\n\n".join(p for p in parts if p)})
         return _inject_story_seed_messages(messages, session_id, "narrative")

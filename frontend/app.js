@@ -52,6 +52,43 @@ const llmLiveEl = document.getElementById("llm-live");
 const llmTokenSummaryEl = document.getElementById("llm-token-summary");
 const llmListEl = document.getElementById("llm-list");
 const llmEmptyEl = document.getElementById("llm-empty");
+const promptsBtn = document.getElementById("prompts-btn");
+const promptPage = document.getElementById("prompt-page");
+const promptPageClose = document.getElementById("prompt-page-close");
+const promptCreateBtn = document.getElementById("prompt-create");
+const promptCount = document.getElementById("prompt-count");
+const promptSearch = document.getElementById("prompt-search");
+const promptList = document.getElementById("prompt-list");
+const promptListEmpty = document.getElementById("prompt-list-empty");
+const promptDetailEmpty = document.getElementById("prompt-detail-empty");
+const promptDetail = document.getElementById("prompt-detail");
+const promptName = document.getElementById("prompt-name");
+const promptSource = document.getElementById("prompt-source");
+const promptDescription = document.getElementById("prompt-description");
+const promptNewVersion = document.getElementById("prompt-new-version");
+const promptVersionList = document.getElementById("prompt-version-list");
+const promptVersionTitle = document.getElementById("prompt-version-title");
+const promptProductionBadge = document.getElementById("prompt-production-badge");
+const promptVersionMeta = document.getElementById("prompt-version-meta");
+const promptPublish = document.getElementById("prompt-publish");
+const promptVariables = document.getElementById("prompt-variables");
+const promptContent = document.getElementById("prompt-content");
+const promptContractWarning = document.getElementById("prompt-contract-warning");
+const promptEditorDialog = document.getElementById("prompt-editor-dialog");
+const promptEditorForm = document.getElementById("prompt-editor-form");
+const promptEditorEyebrow = document.getElementById("prompt-editor-eyebrow");
+const promptEditorTitle = document.getElementById("prompt-editor-title");
+const promptEditorClose = document.getElementById("prompt-editor-close");
+const promptEditorCancel = document.getElementById("prompt-editor-cancel");
+const promptEditorSubmit = document.getElementById("prompt-editor-submit");
+const promptNameField = document.getElementById("prompt-name-field");
+const promptDescriptionField = document.getElementById("prompt-description-field");
+const promptProductionField = document.getElementById("prompt-production-field");
+const promptEditorName = document.getElementById("prompt-editor-name");
+const promptEditorDescription = document.getElementById("prompt-editor-description");
+const promptEditorContent = document.getElementById("prompt-editor-content");
+const promptEditorProduction = document.getElementById("prompt-editor-production");
+const promptEditorError = document.getElementById("prompt-editor-error");
 
 const storyCardDialog = document.getElementById("story-card-dialog");
 const storyCardList = document.getElementById("story-card-list");
@@ -1658,6 +1695,260 @@ llmClose.addEventListener("click", closeLLMDrawer);
 llmRefresh.addEventListener("click", refreshLLMMetrics);
 llmDrawer.querySelector(".drawer-mask").addEventListener("click", closeLLMDrawer);
 
+// ---- 提示词版本管理 ----
+let managedPrompts = [];
+let managedPrompt = null;
+let managedPromptVersion = null;
+let promptEditorMode = "create";
+
+function sameVariables(left, right) {
+  const a = [...(left || [])].sort();
+  const b = [...(right || [])].sort();
+  return a.length === b.length && a.every((item, index) => item === b[index]);
+}
+
+function promptTimestamp(ts) {
+  const date = new Date(Number(ts) * 1000);
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hour12: false,
+  }).format(date);
+}
+
+function renderPromptCatalog() {
+  const query = promptSearch.value.trim().toLowerCase();
+  const items = managedPrompts.filter((item) => (
+    item.name.toLowerCase().includes(query)
+    || (item.description || "").toLowerCase().includes(query)
+  ));
+  promptCount.textContent = `共 ${managedPrompts.length} 个提示词`;
+  promptList.replaceChildren();
+  promptListEmpty.classList.toggle("hidden", items.length > 0);
+  for (const item of items) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "prompt-list-item";
+    button.classList.toggle("active", managedPrompt?.name === item.name);
+    const name = makeTextElement("span", "prompt-list-name", item.name);
+    const meta = document.createElement("span");
+    meta.className = "prompt-list-meta";
+    meta.appendChild(makeTextElement("span", "", `${item.version_count} 个版本`));
+    meta.appendChild(makeTextElement(
+      "span",
+      item.production_version ? "prompt-list-prod" : "",
+      item.production_version ? `production v${item.production_version}` : "未发布",
+    ));
+    button.append(name, meta);
+    button.addEventListener("click", () => selectManagedPrompt(item.name));
+    promptList.appendChild(button);
+  }
+}
+
+function renderManagedPromptVersion(versionNumber) {
+  if (!managedPrompt) return;
+  const version = managedPrompt.versions.find((item) => item.version === versionNumber);
+  if (!version) return;
+  managedPromptVersion = version;
+  for (const button of promptVersionList.querySelectorAll(".prompt-version-item")) {
+    button.classList.toggle("active", Number(button.dataset.version) === version.version);
+  }
+  const production = managedPrompt.production_version === version.version;
+  const compatible = sameVariables(version.variables, managedPrompt.expected_variables);
+  promptVersionTitle.textContent = `v${version.version}`;
+  promptProductionBadge.classList.toggle("hidden", !production);
+  promptVersionMeta.textContent = `${version.created_by || "system"} · ${promptTimestamp(version.created_at)}`;
+  promptPublish.disabled = production || !compatible;
+  promptPublish.textContent = production ? "当前 production" : "标记 production";
+  promptVariables.replaceChildren();
+  if (version.variables.length) {
+    for (const variable of version.variables) {
+      promptVariables.appendChild(makeTextElement("code", "prompt-variable-chip", `\${${variable}}`));
+    }
+  } else {
+    promptVariables.appendChild(makeTextElement("span", "prompt-variable-none", "无"));
+  }
+  promptContent.value = version.content;
+  promptContractWarning.classList.toggle("hidden", compatible);
+  promptContractWarning.textContent = compatible
+    ? ""
+    : `变量契约不一致，production 需要：${managedPrompt.expected_variables.map((item) => `\${${item}}`).join("、") || "无变量"}`;
+}
+
+function renderManagedPrompt(item, preferredVersion = null) {
+  managedPrompt = item;
+  promptDetailEmpty.classList.add("hidden");
+  promptDetail.classList.remove("hidden");
+  promptName.textContent = item.name;
+  promptSource.textContent = item.source === "file" ? "内置" : "自建";
+  promptDescription.textContent = item.description || "";
+  promptVersionList.replaceChildren();
+  for (const version of item.versions) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "prompt-version-item";
+    button.dataset.version = String(version.version);
+    button.appendChild(makeTextElement("span", "prompt-version-number", `v${version.version}`));
+    if (item.production_version === version.version) {
+      button.appendChild(makeTextElement("span", "prompt-version-label", "production"));
+    }
+    button.addEventListener("click", () => renderManagedPromptVersion(version.version));
+    promptVersionList.appendChild(button);
+  }
+  const selected = item.versions.find((version) => version.version === preferredVersion)
+    || item.versions.find((version) => version.version === item.production_version)
+    || item.versions[0];
+  if (selected) renderManagedPromptVersion(selected.version);
+  renderPromptCatalog();
+}
+
+async function selectManagedPrompt(name, preferredVersion = null) {
+  promptDetail.classList.add("hidden");
+  promptDetailEmpty.classList.remove("hidden");
+  promptDetailEmpty.querySelector("p").textContent = "正在读取…";
+  try {
+    const data = await fetchJSON(`/api/prompts/detail?name=${encodeURIComponent(name)}`);
+    renderManagedPrompt(data.prompt, preferredVersion);
+  } catch (error) {
+    promptDetailEmpty.querySelector("p").textContent = `读取失败：${error.message}`;
+  }
+}
+
+async function loadPromptCatalog(preferredName = null, preferredVersion = null) {
+  promptCount.textContent = "正在读取…";
+  try {
+    const data = await fetchJSON("/api/prompts");
+    managedPrompts = data.prompts || [];
+    renderPromptCatalog();
+    const name = preferredName
+      || (managedPrompt && managedPrompts.some((item) => item.name === managedPrompt.name) && managedPrompt.name)
+      || managedPrompts[0]?.name;
+    if (name) {
+      await selectManagedPrompt(name, preferredVersion);
+    } else {
+      managedPrompt = null;
+      promptDetail.classList.add("hidden");
+      promptDetailEmpty.classList.remove("hidden");
+      promptDetailEmpty.querySelector("p").textContent = "还没有提示词";
+    }
+  } catch (error) {
+    promptCount.textContent = "读取失败";
+    managedPrompts = [];
+    renderPromptCatalog();
+    promptDetail.classList.add("hidden");
+    promptDetailEmpty.classList.remove("hidden");
+    promptDetailEmpty.querySelector("p").textContent = error.message;
+  }
+}
+
+async function openPromptPage() {
+  closeDrawer();
+  closeLoreDrawer();
+  closeDirectorDrawer();
+  closeConstraintDrawer();
+  closeLLMDrawer();
+  promptPage.classList.remove("hidden");
+  await loadPromptCatalog();
+}
+
+function closePromptPage() {
+  if (promptEditorDialog.open) promptEditorDialog.close();
+  promptPage.classList.add("hidden");
+}
+
+function openCreatePromptEditor() {
+  promptEditorMode = "create";
+  promptEditorForm.reset();
+  promptNameField.classList.remove("hidden");
+  promptDescriptionField.classList.remove("hidden");
+  promptProductionField.classList.remove("hidden");
+  promptEditorEyebrow.textContent = "NEW PROMPT";
+  promptEditorTitle.textContent = "新建提示词";
+  promptEditorSubmit.textContent = "创建提示词";
+  promptEditorError.textContent = "";
+  promptEditorDialog.showModal();
+  promptEditorName.focus();
+}
+
+function openVersionEditor() {
+  if (!managedPrompt || !managedPromptVersion) return;
+  promptEditorMode = "version";
+  promptEditorForm.reset();
+  promptNameField.classList.add("hidden");
+  promptDescriptionField.classList.add("hidden");
+  promptProductionField.classList.add("hidden");
+  promptEditorName.value = managedPrompt.name;
+  promptEditorContent.value = managedPromptVersion.content;
+  promptEditorEyebrow.textContent = managedPrompt.name;
+  promptEditorTitle.textContent = `从 v${managedPromptVersion.version} 新建版本`;
+  promptEditorSubmit.textContent = "创建版本";
+  promptEditorError.textContent = "";
+  promptEditorDialog.showModal();
+  promptEditorContent.focus();
+}
+
+promptEditorForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  promptEditorSubmit.disabled = true;
+  promptEditorError.textContent = "";
+  const name = promptEditorMode === "create" ? promptEditorName.value.trim() : managedPrompt.name;
+  try {
+    const data = promptEditorMode === "create"
+      ? await fetchJSON("/api/prompts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name,
+          description: promptEditorDescription.value.trim(),
+          content: promptEditorContent.value,
+          make_production: promptEditorProduction.checked,
+        }),
+      })
+      : await fetchJSON("/api/prompts/versions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, content: promptEditorContent.value }),
+      });
+    const latestVersion = data.prompt.versions[0]?.version || 1;
+    promptEditorDialog.close();
+    await loadPromptCatalog(name, latestVersion);
+  } catch (error) {
+    promptEditorError.textContent = error.message;
+  } finally {
+    promptEditorSubmit.disabled = false;
+  }
+});
+
+promptPublish.addEventListener("click", async () => {
+  if (!managedPrompt || !managedPromptVersion || promptPublish.disabled) return;
+  const name = managedPrompt.name;
+  const version = managedPromptVersion.version;
+  promptPublish.disabled = true;
+  try {
+    await fetchJSON("/api/prompts/production", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, version }),
+    });
+    await loadPromptCatalog(name, version);
+  } catch (error) {
+    window.alert(error.message);
+    promptPublish.disabled = false;
+  }
+});
+
+promptsBtn.addEventListener("click", openPromptPage);
+promptPageClose.addEventListener("click", closePromptPage);
+promptCreateBtn.addEventListener("click", openCreatePromptEditor);
+promptNewVersion.addEventListener("click", openVersionEditor);
+promptSearch.addEventListener("input", renderPromptCatalog);
+promptEditorClose.addEventListener("click", () => promptEditorDialog.close());
+promptEditorCancel.addEventListener("click", () => promptEditorDialog.close());
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !promptPage.classList.contains("hidden") && !promptEditorDialog.open) {
+    closePromptPage();
+  }
+});
+
 // ---- 启动：有存档则续上最近一局，否则开新局 ----
 async function switchUser() {
   if (busy) return;
@@ -1675,6 +1966,7 @@ async function switchUser() {
   closeDirectorDrawer();
   closeConstraintDrawer();
   closeLLMDrawer();
+  closePromptPage();
   currentUserId = "";
   userIdInput.value = localStorage.getItem(USER_ID_KEY) || "";
   appEl.classList.add("locked");

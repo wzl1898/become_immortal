@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>故事引擎</title>
-  <link rel="stylesheet" href="style.css?v=stage-display-1" />
+  <link rel="stylesheet" href="style.css?v=prompt-management-1" />
 </head>
 <body>
   <main id="user-gate" class="user-gate">
@@ -36,6 +36,7 @@
         <button id="constraint-btn" class="ghost" title="查看世界约束 Agent 的实时状态">约束</button>
         <button id="director-btn" class="ghost" title="查看导演模块状态（幕后剧情调度）">导演</button>
         <button id="llm-btn" class="ghost" title="查看 LLM 请求类别与耗时">请求</button>
+        <button id="prompts-btn" class="ghost" title="管理提示词及其版本">提示词</button>
         <button id="lore-btn" class="ghost" title="查看与打听世界记忆">记忆</button>
         <button id="saves-btn" class="ghost" title="存档 / 读档">存档</button>
         <button id="restart" class="ghost" title="选择故事卡，开启新故事">新建故事</button>
@@ -160,6 +161,109 @@
       <div class="drawer-mask"></div>
     </div>
 
+    <section id="prompt-page" class="prompt-page hidden" role="dialog" aria-modal="true" aria-labelledby="prompt-page-title">
+      <header class="prompt-page-head">
+        <div class="prompt-page-title">
+          <span class="prompt-page-mark" aria-hidden="true">P</span>
+          <div>
+            <h2 id="prompt-page-title">提示词管理</h2>
+            <span id="prompt-count" class="prompt-count"></span>
+          </div>
+        </div>
+        <div class="prompt-page-actions">
+          <button id="prompt-create" class="prompt-primary" type="button">新建提示词</button>
+          <button id="prompt-page-close" class="prompt-icon-btn" type="button" title="关闭提示词管理" aria-label="关闭提示词管理">×</button>
+        </div>
+      </header>
+
+      <div class="prompt-workspace">
+        <aside class="prompt-catalog" aria-label="提示词列表">
+          <label class="prompt-search">
+            <span class="sr-only">搜索提示词</span>
+            <input id="prompt-search" type="search" placeholder="搜索名称" autocomplete="off" />
+          </label>
+          <div id="prompt-list" class="prompt-list"></div>
+          <p id="prompt-list-empty" class="prompt-empty hidden">没有匹配的提示词</p>
+        </aside>
+
+        <main class="prompt-detail-area">
+          <div id="prompt-detail-empty" class="prompt-detail-empty">
+            <p>选择一个提示词</p>
+          </div>
+          <div id="prompt-detail" class="prompt-detail hidden">
+            <header class="prompt-detail-head">
+              <div class="prompt-detail-title">
+                <div class="prompt-name-line">
+                  <h3 id="prompt-name"></h3>
+                  <span id="prompt-source" class="prompt-source"></span>
+                </div>
+                <p id="prompt-description" class="prompt-description"></p>
+              </div>
+              <button id="prompt-new-version" class="prompt-secondary" type="button">新建版本</button>
+            </header>
+
+            <div class="prompt-version-workspace">
+              <aside class="prompt-versions" aria-label="版本列表">
+                <div class="prompt-section-label">版本</div>
+                <div id="prompt-version-list" class="prompt-version-list"></div>
+              </aside>
+              <section class="prompt-version-detail">
+                <header class="prompt-version-head">
+                  <div>
+                    <div class="prompt-version-title-line">
+                      <h4 id="prompt-version-title"></h4>
+                      <span id="prompt-production-badge" class="prompt-production-badge hidden">production</span>
+                    </div>
+                    <p id="prompt-version-meta" class="prompt-version-meta"></p>
+                  </div>
+                  <button id="prompt-publish" class="prompt-production-action" type="button">标记 production</button>
+                </header>
+                <div class="prompt-variable-row">
+                  <span>变量</span>
+                  <div id="prompt-variables" class="prompt-variable-list"></div>
+                </div>
+                <textarea id="prompt-content" class="prompt-content" readonly spellcheck="false" aria-label="提示词内容"></textarea>
+                <p id="prompt-contract-warning" class="prompt-contract-warning hidden"></p>
+              </section>
+            </div>
+          </div>
+        </main>
+      </div>
+    </section>
+
+    <dialog id="prompt-editor-dialog" class="prompt-editor-dialog" aria-labelledby="prompt-editor-title">
+      <form id="prompt-editor-form" autocomplete="off">
+        <header class="prompt-editor-head">
+          <div>
+            <p id="prompt-editor-eyebrow" class="prompt-editor-eyebrow"></p>
+            <h2 id="prompt-editor-title"></h2>
+          </div>
+          <button id="prompt-editor-close" class="prompt-icon-btn" type="button" title="关闭编辑器" aria-label="关闭编辑器">×</button>
+        </header>
+        <label id="prompt-name-field" class="prompt-field">
+          <span>名称</span>
+          <input id="prompt-editor-name" type="text" maxlength="160" placeholder="engine/example/system" required />
+        </label>
+        <label id="prompt-description-field" class="prompt-field">
+          <span>说明</span>
+          <input id="prompt-editor-description" type="text" maxlength="500" placeholder="可选" />
+        </label>
+        <label class="prompt-field prompt-content-field">
+          <span>内容</span>
+          <textarea id="prompt-editor-content" maxlength="500000" spellcheck="false" required></textarea>
+        </label>
+        <label id="prompt-production-field" class="prompt-production-option">
+          <input id="prompt-editor-production" type="checkbox" />
+          <span>创建后标记为 production</span>
+        </label>
+        <p id="prompt-editor-error" class="prompt-editor-error" role="alert"></p>
+        <footer class="prompt-editor-actions">
+          <button id="prompt-editor-cancel" class="prompt-secondary" type="button">取消</button>
+          <button id="prompt-editor-submit" class="prompt-primary" type="submit">创建</button>
+        </footer>
+      </form>
+    </dialog>
+
     <form id="input-form" class="input-bar" autocomplete="off">
       <button id="voice-input" class="voice-input" type="button" title="语音输入" aria-label="语音输入">麦克风</button>
       <input
@@ -172,6 +276,6 @@
     </form>
   </div>
 
-  <script src="app.js?v=stage-trace-1"></script>
+  <script src="app.js?v=prompt-management-1"></script>
 </body>
 </html>

@@ -169,6 +169,37 @@ def init() -> None:
             "CREATE INDEX IF NOT EXISTS idx_save_opportunity_rewards_save "
             "ON save_opportunity_rewards(save_id, status)"
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS prompt_definitions (
+                name                TEXT PRIMARY KEY,
+                description         TEXT NOT NULL DEFAULT '',
+                expected_variables  TEXT NOT NULL DEFAULT '[]',
+                source              TEXT NOT NULL DEFAULT 'custom',
+                production_version  INTEGER,
+                created_at          REAL NOT NULL,
+                updated_at          REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS prompt_versions (
+                prompt_name  TEXT NOT NULL,
+                version      INTEGER NOT NULL,
+                content      TEXT NOT NULL,
+                variables    TEXT NOT NULL DEFAULT '[]',
+                created_by   TEXT NOT NULL DEFAULT '',
+                created_at   REAL NOT NULL,
+                PRIMARY KEY (prompt_name, version),
+                FOREIGN KEY (prompt_name) REFERENCES prompt_definitions(name)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_prompt_versions_created "
+            "ON prompt_versions(prompt_name, created_at DESC)"
+        )
         _init_world_tables(conn)
         _migrate_story_cards(conn)
         _migrate_lore_to_world_memory(conn)
@@ -1315,3 +1346,204 @@ def delete(sid: str, user_id: str = DEFAULT_USER_ID) -> bool:
             "DELETE FROM saves WHERE id=? AND user_id=?", (sid, user_id)
         )
     return cur.rowcount > 0
+
+
+# ---- Prompt registry -----------------------------------------------------
+
+def seed_prompt_templates(templates: list[dict]) -> None:
+    """Import file-backed templates once as immutable version 1 records."""
+    now = time.time()
+    with _conn() as conn:
+        for item in templates:
+            variables = json.dumps(sorted(item["variables"]), ensure_ascii=False)
+            cur = conn.execute(
+                """
+                INSERT OR IGNORE INTO prompt_definitions
+                    (name, description, expected_variables, source,
+                     production_version, created_at, updated_at)
+                VALUES (?, '', ?, 'file', 1, ?, ?)
+                """,
+                (item["name"], variables, now, now),
+            )
+            if cur.rowcount:
+                conn.execute(
+                    """
+                    INSERT INTO prompt_versions
+                        (prompt_name, version, content, variables, created_by, created_at)
+                    VALUES (?, 1, ?, ?, 'filesystem', ?)
+                    """,
+                    (item["name"], item["content"], variables, now),
+                )
+
+
+def list_prompt_definitions() -> list[dict]:
+    with _conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT d.name, d.description, d.expected_variables, d.source,
+                   d.production_version, d.created_at, d.updated_at,
+                   COUNT(v.version) AS version_count,
+                   MAX(v.version) AS latest_version
+            FROM prompt_definitions d
+            LEFT JOIN prompt_versions v ON v.prompt_name = d.name
+            GROUP BY d.name
+            ORDER BY d.name COLLATE NOCASE
+            """
+        ).fetchall()
+    return [
+        {
+            **dict(row),
+            "expected_variables": json.loads(row["expected_variables"] or "[]"),
+        }
+        for row in rows
+    ]
+
+
+def get_prompt_definition(name: str) -> dict | None:
+    with _conn() as conn:
+        definition = conn.execute(
+            "SELECT * FROM prompt_definitions WHERE name=?", (name,)
+        ).fetchone()
+        if definition is None:
+            return None
+        versions = conn.execute(
+            """
+            SELECT version, content, variables, created_by, created_at
+            FROM prompt_versions
+            WHERE prompt_name=?
+            ORDER BY version DESC
+            """,
+            (name,),
+        ).fetchall()
+    result = dict(definition)
+    result["expected_variables"] = json.loads(
+        result.get("expected_variables") or "[]"
+    )
+    result["versions"] = [
+        {
+            **dict(row),
+            "variables": json.loads(row["variables"] or "[]"),
+            "labels": (
+                ["production"]
+                if row["version"] == definition["production_version"]
+                else []
+            ),
+        }
+        for row in versions
+    ]
+    return result
+
+
+def list_production_prompt_versions() -> list[dict]:
+    with _conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT d.name, v.version, v.content, v.variables
+            FROM prompt_definitions d
+            JOIN prompt_versions v
+              ON v.prompt_name=d.name AND v.version=d.production_version
+            ORDER BY d.name COLLATE NOCASE
+            """
+        ).fetchall()
+    return [
+        {**dict(row), "variables": json.loads(row["variables"] or "[]")}
+        for row in rows
+    ]
+
+
+def create_prompt_definition(
+    name: str,
+    description: str,
+    content: str,
+    variables: list[str],
+    created_by: str,
+    *,
+    make_production: bool = False,
+) -> dict:
+    now = time.time()
+    encoded_variables = json.dumps(sorted(variables), ensure_ascii=False)
+    with _conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            """
+            INSERT INTO prompt_definitions
+                (name, description, expected_variables, source,
+                 production_version, created_at, updated_at)
+            VALUES (?, ?, ?, 'custom', ?, ?, ?)
+            """,
+            (
+                name,
+                description,
+                encoded_variables,
+                1 if make_production else None,
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO prompt_versions
+                (prompt_name, version, content, variables, created_by, created_at)
+            VALUES (?, 1, ?, ?, ?, ?)
+            """,
+            (name, content, encoded_variables, created_by, now),
+        )
+    return get_prompt_definition(name)
+
+
+def create_prompt_version(
+    name: str, content: str, variables: list[str], created_by: str
+) -> dict | None:
+    now = time.time()
+    encoded_variables = json.dumps(sorted(variables), ensure_ascii=False)
+    with _conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        exists = conn.execute(
+            "SELECT 1 FROM prompt_definitions WHERE name=?", (name,)
+        ).fetchone()
+        if exists is None:
+            return None
+        row = conn.execute(
+            "SELECT COALESCE(MAX(version), 0) + 1 AS version "
+            "FROM prompt_versions WHERE prompt_name=?",
+            (name,),
+        ).fetchone()
+        version = int(row["version"])
+        conn.execute(
+            """
+            INSERT INTO prompt_versions
+                (prompt_name, version, content, variables, created_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (name, version, content, encoded_variables, created_by, now),
+        )
+        conn.execute(
+            "UPDATE prompt_definitions SET updated_at=? WHERE name=?",
+            (now, name),
+        )
+    return get_prompt_definition(name)
+
+
+def set_prompt_production_version(name: str, version: int) -> dict | None:
+    now = time.time()
+    with _conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            """
+            SELECT v.variables, v.content
+            FROM prompt_versions v
+            WHERE v.prompt_name=? AND v.version=?
+            """,
+            (name, version),
+        ).fetchone()
+        if row is None:
+            return None
+        conn.execute(
+            """
+            UPDATE prompt_definitions
+            SET production_version=?, updated_at=?
+            WHERE name=?
+            """,
+            (version, now, name),
+        )
+    return get_prompt_definition(name)

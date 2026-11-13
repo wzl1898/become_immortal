@@ -31,6 +31,7 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 import game  # noqa: E402
+import prompts  # noqa: E402
 import story_cards  # noqa: E402
 import background  # noqa: E402
 from llm import stream_chat  # noqa: E402
@@ -162,6 +163,23 @@ class InquiryBody(BaseModel):
     q: str
 
 
+class PromptCreateBody(BaseModel):
+    name: str
+    description: str = ""
+    content: str
+    make_production: bool = False
+
+
+class PromptVersionBody(BaseModel):
+    name: str
+    content: str
+
+
+class PromptProductionBody(BaseModel):
+    name: str
+    version: int
+
+
 def _user_id(x_user_id: str) -> str:
     user_id = x_user_id.strip()
     if not _USER_ID_RE.fullmatch(user_id):
@@ -201,6 +219,76 @@ async def new_game(
 async def available_story_cards(user_id: str = Header(alias="X-User-ID")):
     _user_id(user_id)
     return {"story_cards": story_cards.list_cards()}
+
+
+# ---- Prompt management ---------------------------------------------------
+
+@app.get("/api/prompts")
+async def prompt_list(user_id: str = Header(alias="X-User-ID")):
+    _user_id(user_id)
+    return {"prompts": prompts.list_prompts()}
+
+
+@app.get("/api/prompts/detail")
+async def prompt_detail(
+    name: str, user_id: str = Header(alias="X-User-ID")
+):
+    _user_id(user_id)
+    item = prompts.get_prompt(name)
+    if item is None:
+        raise HTTPException(404, "提示词不存在")
+    return {"prompt": item}
+
+
+@app.post("/api/prompts")
+async def prompt_create(
+    body: PromptCreateBody,
+    user_id: str = Header(alias="X-User-ID"),
+):
+    user_id = _user_id(user_id)
+    try:
+        item = prompts.create_prompt(
+            body.name,
+            body.description,
+            body.content,
+            user_id,
+            make_production=body.make_production,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"prompt": item}
+
+
+@app.post("/api/prompts/versions")
+async def prompt_create_version(
+    body: PromptVersionBody,
+    user_id: str = Header(alias="X-User-ID"),
+):
+    user_id = _user_id(user_id)
+    try:
+        item = prompts.create_version(body.name, body.content, user_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if item is None:
+        raise HTTPException(404, "提示词不存在")
+    return {"prompt": item}
+
+
+@app.post("/api/prompts/production")
+async def prompt_set_production(
+    body: PromptProductionBody,
+    user_id: str = Header(alias="X-User-ID"),
+):
+    _user_id(user_id)
+    if body.version < 1:
+        raise HTTPException(400, "版本号必须大于 0")
+    try:
+        item = prompts.promote_version(body.name, body.version)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if item is None:
+        raise HTTPException(404, "提示词或版本不存在")
+    return {"prompt": item}
 
 
 @app.get("/api/saves")

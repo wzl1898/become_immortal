@@ -46,6 +46,11 @@ API_ALIASES = {
     ("GET", "/api/inquiry"),
     ("GET", "/api/lore"),
     ("POST", "/api/lore/delete"),
+    ("GET", "/api/prompts"),
+    ("GET", "/api/prompts/detail"),
+    ("POST", "/api/prompts"),
+    ("POST", "/api/prompts/versions"),
+    ("POST", "/api/prompts/production"),
 }
 
 
