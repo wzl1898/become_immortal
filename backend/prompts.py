@@ -125,6 +125,7 @@ _TEMPLATE_SEGMENT_LABELS = {
     "untriggered": "未触发",
     "viewpoint_context": "视角上下文",
     "world": "世界状态",
+    "world_integrity": "固定世界完整性",
     "world_memory": "世界记忆",
     "wrapper": "包装模板",
 }
@@ -362,7 +363,7 @@ def _story_card_context(card: dict, consumer: str) -> str:
 def render_system_prompt(
     name: str, *, context: str = "", card: dict | None = None
 ) -> str:
-    """Compose neutral Agent rules with the selected save's story-card rules."""
+    """Compose Agent rules, story-card rules and the cross-Agent integrity guard."""
     card = card if card is not None else story_cards.get()
     variables = {}
     expected = _ACTIVE_VARIABLES.get(name, _VARIABLES.get(name, set()))
@@ -372,7 +373,11 @@ def render_system_prompt(
         raise ValueError(f"System prompt has no context slot: {name}.md")
     if "story_rules" in expected:
         variables["story_rules"] = _story_card_context(card, name)
-    return render_prompt(name, **variables)
+    rendered = render_prompt(name, **variables)
+    integrity_guard = render_prompt("shared/world_integrity")
+    if integrity_guard not in rendered:
+        rendered = f"{rendered.rstrip()}\n\n{integrity_guard}"
+    return rendered
 
 
 # Compatibility names for existing callers and prompt-contract tests.

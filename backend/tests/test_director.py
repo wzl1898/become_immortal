@@ -1362,6 +1362,10 @@ class DirectorPlanTests(unittest.TestCase):
 
         self.assertEqual(messages[:-1], [
             historical[0],
+            {
+                "role": "system",
+                "content": prompts.render_prompt("shared/world_integrity"),
+            },
             {"role": "system", "content": "【既往阶段摘要】\nearlier rounds summary"},
             *historical[-4:],
         ])

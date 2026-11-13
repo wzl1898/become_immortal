@@ -12,6 +12,42 @@ import prompts
 
 
 class PromptTemplateTests(unittest.TestCase):
+    def test_world_integrity_guard_is_in_every_agent_system_prompt(self):
+        guard = prompts.render_prompt("shared/world_integrity")
+        agent_names = (*prompts._AGENT_GROUPS, "legacy/director")
+        for agent_name in agent_names:
+            system_name = f"{agent_name}/system"
+            with self.subTest(agent=agent_name):
+                self.assertIn(system_name, prompts._TEMPLATES)
+                self.assertIn(guard, prompts.render_system_prompt(system_name))
+
+    def test_world_integrity_guard_forbids_incomplete_fixed_rewards(self):
+        guard = prompts.render_prompt("shared/world_integrity")
+        for forbidden in (
+            "残篇",
+            "残本",
+            "残卷",
+            "残缺本",
+            "缺页本",
+            "伪本",
+            "NPC 自行补写本",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertIn(forbidden, guard)
+        self.assertIn("必须恢复稳定世界中的标准定义", guard)
+
+    def test_existing_save_receives_latest_world_integrity_guard_once(self):
+        guard = prompts.render_prompt("shared/world_integrity")
+        legacy = game._narrative_context_messages({
+            "messages": [{"role": "system", "content": "旧叙事提示词"}],
+        })
+        self.assertEqual(guard, legacy[1]["content"])
+
+        current = game._narrative_context_messages({
+            "messages": [{"role": "system", "content": f"叙事提示词\n\n{guard}"}],
+        })
+        self.assertEqual(1, len(current))
+
     def test_json_and_template_looking_input_are_preserved_verbatim(self):
         action = '检查 ${cultivation_rules} 和 {"goal": "开门"}，价格 $5；{{ untouched }}'
         self.assertEqual(
