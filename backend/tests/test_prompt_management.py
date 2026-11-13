@@ -44,6 +44,42 @@ class PromptManagementTests(unittest.TestCase):
         self.assertEqual(1, opening["version_count"])
         self.assertEqual("file", opening["source"])
 
+    def test_catalog_groups_templates_under_eighteen_active_agents(self):
+        items = self.client.get("/api/prompts", headers=self.headers).json()["prompts"]
+        agent_groups = {
+            item["group_key"]
+            for item in items
+            if item["catalog_scope"] == "agent"
+        }
+        self.assertEqual(set(prompts._AGENT_GROUPS), agent_groups)
+        self.assertEqual(18, len(agent_groups))
+        for item in items:
+            with self.subTest(prompt=item["name"]):
+                self.assertTrue(item["group_key"])
+                self.assertTrue(item["group_label"])
+                self.assertTrue(item["template_path"])
+                self.assertTrue(item["template_label"])
+
+        scopes = {item["name"]: item["catalog_scope"] for item in items}
+        for prefix in ("constraints/", "shared/", "legacy/"):
+            self.assertTrue(
+                all(
+                    scopes[name] == "support"
+                    for name in scopes
+                    if name.startswith(prefix)
+                )
+            )
+
+    def test_custom_prompt_has_catalog_metadata(self):
+        created = self.client.post(
+            "/api/prompts",
+            headers=self.headers,
+            json={"name": "custom/example", "content": "Example"},
+        ).json()["prompt"]
+        self.assertEqual("custom", created["catalog_scope"])
+        self.assertEqual("custom", created["group_key"])
+        self.assertEqual("自建提示词", created["group_label"])
+
     def test_every_existing_template_can_create_a_new_version(self):
         for name, template in prompts._TEMPLATES.items():
             with self.subTest(prompt=name):

@@ -58,10 +58,15 @@ const promptPageClose = document.getElementById("prompt-page-close");
 const promptCreateBtn = document.getElementById("prompt-create");
 const promptCount = document.getElementById("prompt-count");
 const promptSearch = document.getElementById("prompt-search");
+const promptShowSupport = document.getElementById("prompt-show-support");
 const promptList = document.getElementById("prompt-list");
 const promptListEmpty = document.getElementById("prompt-list-empty");
 const promptDetailEmpty = document.getElementById("prompt-detail-empty");
 const promptDetail = document.getElementById("prompt-detail");
+const promptGroupName = document.getElementById("prompt-group-name");
+const promptGroupPath = document.getElementById("prompt-group-path");
+const promptGroupCount = document.getElementById("prompt-group-count");
+const promptTemplateList = document.getElementById("prompt-template-list");
 const promptName = document.getElementById("prompt-name");
 const promptSource = document.getElementById("prompt-source");
 const promptDescription = document.getElementById("prompt-description");
@@ -1697,6 +1702,8 @@ llmDrawer.querySelector(".drawer-mask").addEventListener("click", closeLLMDrawer
 
 // ---- 提示词版本管理 ----
 let managedPrompts = [];
+let managedPromptGroupKey = null;
+let managedPromptName = null;
 let managedPrompt = null;
 let managedPromptVersion = null;
 let promptEditorMode = "create";
@@ -1715,32 +1722,109 @@ function promptTimestamp(ts) {
   }).format(date);
 }
 
-function renderPromptCatalog() {
-  const query = promptSearch.value.trim().toLowerCase();
-  const items = managedPrompts.filter((item) => (
-    item.name.toLowerCase().includes(query)
-    || (item.description || "").toLowerCase().includes(query)
+function getPromptGroups() {
+  const groups = new Map();
+  for (const item of managedPrompts) {
+    if (!groups.has(item.group_key)) {
+      groups.set(item.group_key, {
+        key: item.group_key,
+        label: item.group_label,
+        order: item.group_order,
+        scope: item.catalog_scope,
+        templates: [],
+      });
+    }
+    groups.get(item.group_key).templates.push(item);
+  }
+  for (const group of groups.values()) {
+    group.templates.sort((left, right) => (
+      left.template_order - right.template_order
+      || left.template_path.localeCompare(right.template_path)
+    ));
+  }
+  return [...groups.values()].sort((left, right) => (
+    left.order - right.order || left.label.localeCompare(right.label)
   ));
-  promptCount.textContent = `共 ${managedPrompts.length} 个提示词`;
+}
+
+function getPromptGroup(groupKey) {
+  return getPromptGroups().find((group) => group.key === groupKey) || null;
+}
+
+function visiblePromptGroups() {
+  return getPromptGroups().filter((group) => (
+    group.scope !== "support" || promptShowSupport.checked
+  ));
+}
+
+function renderPromptCatalog() {
+  const groups = getPromptGroups();
+  const agentCount = groups.filter((group) => group.scope === "agent").length;
+  const customCount = groups.filter((group) => group.scope === "custom").length;
+  const supportCount = groups.filter((group) => group.scope === "support").length;
+  const countParts = [`${agentCount} 个 Agent`];
+  if (customCount) countParts.push(`${customCount} 个自建分组`);
+  if (promptShowSupport.checked && supportCount) countParts.push(`${supportCount} 类底层模板`);
+  promptCount.textContent = countParts.join(" · ");
+
+  const query = promptSearch.value.trim().toLowerCase();
+  const items = visiblePromptGroups().filter((group) => (
+    !query
+    || group.label.toLowerCase().includes(query)
+    || group.key.toLowerCase().includes(query)
+    || group.templates.some((item) => (
+      item.name.toLowerCase().includes(query)
+      || item.template_label.toLowerCase().includes(query)
+      || (item.description || "").toLowerCase().includes(query)
+    ))
+  ));
   promptList.replaceChildren();
   promptListEmpty.classList.toggle("hidden", items.length > 0);
-  for (const item of items) {
+  for (const group of items) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "prompt-list-item";
-    button.classList.toggle("active", managedPrompt?.name === item.name);
-    const name = makeTextElement("span", "prompt-list-name", item.name);
+    button.classList.toggle("active", managedPromptGroupKey === group.key);
+    const name = makeTextElement("span", "prompt-list-name", group.label);
+    const path = makeTextElement("span", "prompt-list-path", group.key);
     const meta = document.createElement("span");
     meta.className = "prompt-list-meta";
-    meta.appendChild(makeTextElement("span", "", `${item.version_count} 个版本`));
+    meta.appendChild(makeTextElement("span", "", `${group.templates.length} 个模板`));
+    if (group.scope === "support") {
+      meta.appendChild(makeTextElement("span", "prompt-list-support", "底层"));
+    }
+    button.append(name, path, meta);
+    button.addEventListener("click", () => selectPromptGroup(group.key));
+    promptList.appendChild(button);
+  }
+}
+
+function renderPromptGroup() {
+  const group = getPromptGroup(managedPromptGroupKey);
+  if (!group) return;
+  promptDetailEmpty.classList.add("hidden");
+  promptDetail.classList.remove("hidden");
+  promptGroupName.textContent = group.label;
+  promptGroupPath.textContent = group.key;
+  promptGroupCount.textContent = `${group.templates.length} 个模板`;
+  promptTemplateList.replaceChildren();
+  for (const item of group.templates) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "prompt-template-item";
+    button.classList.toggle("active", managedPromptName === item.name);
+    button.appendChild(makeTextElement("span", "prompt-template-name", item.template_label));
+    const meta = document.createElement("span");
+    meta.className = "prompt-template-meta";
+    meta.appendChild(makeTextElement("span", "", item.template_path));
     meta.appendChild(makeTextElement(
       "span",
       item.production_version ? "prompt-list-prod" : "",
-      item.production_version ? `production v${item.production_version}` : "未发布",
+      item.production_version ? `prod v${item.production_version}` : "未发布",
     ));
-    button.append(name, meta);
+    button.appendChild(meta);
     button.addEventListener("click", () => selectManagedPrompt(item.name));
-    promptList.appendChild(button);
+    promptTemplateList.appendChild(button);
   }
 }
 
@@ -1776,11 +1860,15 @@ function renderManagedPromptVersion(versionNumber) {
 
 function renderManagedPrompt(item, preferredVersion = null) {
   managedPrompt = item;
+  managedPromptName = item.name;
+  managedPromptGroupKey = item.group_key;
   promptDetailEmpty.classList.add("hidden");
   promptDetail.classList.remove("hidden");
-  promptName.textContent = item.name;
+  promptName.textContent = item.template_label;
   promptSource.textContent = item.source === "file" ? "内置" : "自建";
-  promptDescription.textContent = item.description || "";
+  promptDescription.textContent = item.description
+    ? `${item.name} · ${item.description}`
+    : item.name;
   promptVersionList.replaceChildren();
   for (const version of item.versions) {
     const button = document.createElement("button");
@@ -1799,17 +1887,37 @@ function renderManagedPrompt(item, preferredVersion = null) {
     || item.versions[0];
   if (selected) renderManagedPromptVersion(selected.version);
   renderPromptCatalog();
+  renderPromptGroup();
 }
 
 async function selectManagedPrompt(name, preferredVersion = null) {
-  promptDetail.classList.add("hidden");
-  promptDetailEmpty.classList.remove("hidden");
-  promptDetailEmpty.querySelector("p").textContent = "正在读取…";
+  managedPromptName = name;
+  renderPromptCatalog();
+  renderPromptGroup();
+  promptName.textContent = "正在读取…";
+  promptNewVersion.disabled = true;
   try {
     const data = await fetchJSON(`/api/prompts/detail?name=${encodeURIComponent(name)}`);
     renderManagedPrompt(data.prompt, preferredVersion);
   } catch (error) {
-    promptDetailEmpty.querySelector("p").textContent = `读取失败：${error.message}`;
+    promptName.textContent = `读取失败：${error.message}`;
+  } finally {
+    promptNewVersion.disabled = false;
+  }
+}
+
+async function selectPromptGroup(groupKey, preferredName = null, preferredVersion = null) {
+  const group = getPromptGroup(groupKey);
+  if (!group) return;
+  managedPromptGroupKey = group.key;
+  const currentName = group.templates.some((item) => item.name === managedPromptName)
+    ? managedPromptName
+    : null;
+  managedPromptName = preferredName || currentName || group.templates[0]?.name || null;
+  renderPromptCatalog();
+  renderPromptGroup();
+  if (managedPromptName) {
+    await selectManagedPrompt(managedPromptName, preferredVersion);
   }
 }
 
@@ -1818,22 +1926,28 @@ async function loadPromptCatalog(preferredName = null, preferredVersion = null) 
   try {
     const data = await fetchJSON("/api/prompts");
     managedPrompts = data.prompts || [];
+    const preferredItem = managedPrompts.find((item) => item.name === preferredName);
+    if (preferredItem?.catalog_scope === "support") promptShowSupport.checked = true;
+    const visibleGroups = visiblePromptGroups();
+    const currentGroup = visibleGroups.find((group) => group.key === managedPromptGroupKey);
+    const targetGroup = preferredItem
+      ? getPromptGroup(preferredItem.group_key)
+      : currentGroup || visibleGroups[0];
     renderPromptCatalog();
-    const name = preferredName
-      || (managedPrompt && managedPrompts.some((item) => item.name === managedPrompt.name) && managedPrompt.name)
-      || managedPrompts[0]?.name;
-    if (name) {
-      await selectManagedPrompt(name, preferredVersion);
+    if (targetGroup) {
+      await selectPromptGroup(targetGroup.key, preferredItem?.name, preferredVersion);
     } else {
+      managedPromptGroupKey = null;
+      managedPromptName = null;
       managedPrompt = null;
       promptDetail.classList.add("hidden");
       promptDetailEmpty.classList.remove("hidden");
       promptDetailEmpty.querySelector("p").textContent = "还没有提示词";
     }
   } catch (error) {
-    promptCount.textContent = "读取失败";
     managedPrompts = [];
     renderPromptCatalog();
+    promptCount.textContent = "读取失败";
     promptDetail.classList.add("hidden");
     promptDetailEmpty.classList.remove("hidden");
     promptDetailEmpty.querySelector("p").textContent = error.message;
@@ -1941,6 +2055,15 @@ promptPageClose.addEventListener("click", closePromptPage);
 promptCreateBtn.addEventListener("click", openCreatePromptEditor);
 promptNewVersion.addEventListener("click", openVersionEditor);
 promptSearch.addEventListener("input", renderPromptCatalog);
+promptShowSupport.addEventListener("change", async () => {
+  const currentGroup = getPromptGroup(managedPromptGroupKey);
+  if (!promptShowSupport.checked && currentGroup?.scope === "support") {
+    const firstAgent = visiblePromptGroups().find((group) => group.scope === "agent");
+    if (firstAgent) await selectPromptGroup(firstAgent.key);
+    return;
+  }
+  renderPromptCatalog();
+});
 promptEditorClose.addEventListener("click", () => promptEditorDialog.close());
 promptEditorCancel.addEventListener("click", () => promptEditorDialog.close());
 document.addEventListener("keydown", (event) => {

@@ -37,6 +37,142 @@ _ACTIVE_TEMPLATES: dict[str, Template] = {}
 _ACTIVE_VARIABLES: dict[str, set[str]] = {}
 _PROMPT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,159}$")
 
+# The catalog is intentionally Agent-first. A single Agent can own several
+# system, user, retry, fallback and composition templates.
+_AGENT_GROUPS = {
+    "engine/narrative": "叙事 Agent",
+    "engine/event": "事件 Agent",
+    "engine/causal": "因果 Agent",
+    "engine/viewpoint": "视角 Agent",
+    "engine/hook": "伏笔 Agent",
+    "engine/payoff": "回收 Agent",
+    "engine/pacing": "节奏 Agent",
+    "engine/progression": "成长 Agent",
+    "engine/skeleton": "剧情骨架 Agent",
+    "engine/audit": "审计 Agent",
+    "guidance/conflict": "冲突引导 Agent",
+    "guidance/stage": "阶段引导 Agent",
+    "memory/extract": "记忆提取 Agent",
+    "memory/inquiry": "记忆询问 Agent",
+    "observation/character": "角色观察 Agent",
+    "observation/conflict": "冲突观察 Agent",
+    "observation/location": "地点观察 Agent",
+    "observation/state": "状态观察 Agent",
+}
+_SUPPORT_GROUPS = {
+    "constraints": "约束片段",
+    "shared": "共享片段",
+    "legacy": "旧版导演",
+}
+_TEMPLATE_SEGMENT_LABELS = {
+    "system": "系统提示词",
+    "user": "用户提示词",
+    "action": "行动",
+    "audit_feedback": "审计反馈",
+    "base": "基础",
+    "beats": "节拍",
+    "binding": "绑定规则",
+    "block": "阻断",
+    "causal_context": "因果上下文",
+    "character_state": "角色状态",
+    "cultivation": "修炼",
+    "entities": "实体",
+    "event_ended": "事件结束",
+    "facts": "事实",
+    "fallback": "回退提示词",
+    "fallback_direction": "回退方向",
+    "fallback_reason": "回退原因",
+    "forced": "强制规划",
+    "forced_resolution": "强制收束",
+    "guidance": "引导",
+    "header": "头部",
+    "hook": "伏笔",
+    "hook_guard": "伏笔守卫",
+    "inquiry": "询问",
+    "intent": "意图",
+    "intent_resolved": "意图完成",
+    "inventory": "物品栏",
+    "known": "已知记忆",
+    "location": "地点",
+    "narration": "叙事",
+    "next_user": "下一轮用户输入",
+    "objects": "对象",
+    "opening": "开场",
+    "payoff": "回收",
+    "plan": "规划",
+    "player_action": "玩家行动",
+    "previous_state": "前序状态",
+    "prohibited": "禁止项",
+    "question": "问题",
+    "recent_memories": "近期记忆",
+    "retry": "重试提示词",
+    "retry_failure": "重试失败",
+    "retry_requirements": "重试要求",
+    "scene": "场景",
+    "scene_only": "仅场景",
+    "scene_push": "场景推进",
+    "stable_world": "稳定世界",
+    "stage": "阶段",
+    "stage_summary": "阶段摘要",
+    "status_panel": "状态面板",
+    "story_card": "故事卡",
+    "story_card_status": "故事卡状态",
+    "story_seed": "故事种子",
+    "time": "时间",
+    "tool_result": "工具结果",
+    "trigger": "触发",
+    "truncated": "截断续写",
+    "untriggered": "未触发",
+    "viewpoint_context": "视角上下文",
+    "world": "世界状态",
+    "world_memory": "世界记忆",
+    "wrapper": "包装模板",
+}
+
+
+def _catalog_metadata(name: str) -> dict:
+    parts = name.split("/")
+    agent_key = "/".join(parts[:2])
+    if agent_key in _AGENT_GROUPS:
+        group_key = agent_key
+        group_label = _AGENT_GROUPS[group_key]
+        catalog_scope = "agent"
+        group_order = list(_AGENT_GROUPS).index(group_key)
+        template_parts = parts[2:]
+    elif parts[0] in _SUPPORT_GROUPS:
+        group_key = parts[0]
+        group_label = _SUPPORT_GROUPS[group_key]
+        catalog_scope = "support"
+        group_order = 100 + list(_SUPPORT_GROUPS).index(group_key)
+        template_parts = parts[1:]
+    else:
+        group_key = "custom"
+        group_label = "自建提示词"
+        catalog_scope = "custom"
+        group_order = 200
+        template_parts = parts[1:] if parts[0] == "custom" else parts
+
+    template_path = "/".join(template_parts) or name
+    template_label = " / ".join(
+        _TEMPLATE_SEGMENT_LABELS.get(part, part.replace("_", " "))
+        for part in template_parts
+    ) or name
+    leaf = template_parts[-1] if template_parts else name
+    template_order = {"system": 0, "user": 1}.get(leaf, 10)
+    return {
+        "catalog_scope": catalog_scope,
+        "group_key": group_key,
+        "group_label": group_label,
+        "group_order": group_order,
+        "template_path": template_path,
+        "template_label": template_label,
+        "template_order": template_order,
+    }
+
+
+def _with_catalog_metadata(item: dict) -> dict:
+    return {**item, **_catalog_metadata(item["name"])}
+
 
 def _compile_template(content: str, *, name: str = "prompt") -> tuple[Template, set[str]]:
     template = Template(content)
@@ -102,11 +238,12 @@ def _validated_content(content: str, name: str) -> tuple[str, set[str]]:
 
 
 def list_prompts() -> list[dict]:
-    return store.list_prompt_definitions()
+    return [_with_catalog_metadata(item) for item in store.list_prompt_definitions()]
 
 
 def get_prompt(name: str) -> dict | None:
-    return store.get_prompt_definition(name)
+    item = store.get_prompt_definition(name)
+    return _with_catalog_metadata(item) if item is not None else None
 
 
 def create_prompt(
@@ -137,13 +274,16 @@ def create_prompt(
         _ACTIVE_TEMPLATES[name], _ACTIVE_VARIABLES[name] = _compile_template(
             content, name=name
         )
-    return result
+    return _with_catalog_metadata(result)
 
 
 def create_version(name: str, content: str, created_by: str) -> dict | None:
     name = _validate_name(name)
     content, variables = _validated_content(content, name)
-    return store.create_prompt_version(name, content, sorted(variables), created_by)
+    result = store.create_prompt_version(
+        name, content, sorted(variables), created_by
+    )
+    return _with_catalog_metadata(result) if result is not None else None
 
 
 def promote_version(name: str, version: int) -> dict | None:
@@ -165,7 +305,7 @@ def promote_version(name: str, version: int) -> dict | None:
     _ACTIVE_TEMPLATES[name], _ACTIVE_VARIABLES[name] = _compile_template(
         selected["content"], name=name
     )
-    return result
+    return _with_catalog_metadata(result)
 
 
 def render_prompt(template_name: str, **variables: object) -> str:
