@@ -52,6 +52,12 @@ MEMORY_EXTRACT_RECALL_K = 8
 NARRATIVE_OBSERVER_NO_CONFLICT_LIMIT = 3
 NARRATIVE_OBSERVER_MAX_TOKENS = int(os.getenv("NARRATIVE_OBSERVER_MAX_TOKENS", "320"))
 
+# 人物设定 Agent 开关。该 Agent 基于「上一次事件 core」生成 NPC 对主角的关系设定，
+# 却由下一个事件 Agent 消费，属观察层污染叙事输入；默认关闭。设 1 可恢复旧行为。
+CHARACTER_SETTING_ENABLED = os.getenv("CHARACTER_SETTING_ENABLED", "0").strip().lower() in {
+    "1", "true", "yes", "on",
+}
+
 # 喂给问询的"当前情境"取最近多少条 narration 的正文
 INQUIRY_SCENE_TURNS = 3
 
@@ -242,6 +248,8 @@ def _narrative_context_messages(state: dict) -> list[dict]:
 
 async def _run_character_setting_agent(state: dict, user_input: str) -> dict:
     """Generate the NPC-to-protagonist relation setting for the next event."""
+    if not CHARACTER_SETTING_ENABLED:
+        return {}
     previous = _dynamic_director_state(state.get("director_state"))
     event = previous.get("event") if isinstance(previous.get("event"), dict) else {}
     narrations = [
@@ -2289,7 +2297,7 @@ async def _ensure_event_foundation(
         recent_story=_recent_scene(state.get('transcript') or []) or '（新存档尚无正文）',
         action=action,
         guidance=_stable_json(prev.get('event_guidance')),
-        character_setting=_stable_json(prev.get('character_setting')),
+        character_setting=_stable_json(prev.get('character_setting')) if CHARACTER_SETTING_ENABLED else '（本次未提供）',
     )
 
     if next_seed:
