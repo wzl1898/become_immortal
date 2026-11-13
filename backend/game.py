@@ -246,6 +246,17 @@ def _narrative_context_messages(state: dict) -> list[dict]:
     return messages
 
 
+def _character_setting_active(value) -> bool:
+    """Whether the character setting fragment should reach the event Agent.
+
+    Requires both the Agent switch and real content: an enabled Agent that
+    returned an empty dict must not emit an empty 【人物设定 Agent结果】 heading.
+    """
+    if not CHARACTER_SETTING_ENABLED or not isinstance(value, dict):
+        return False
+    return any(_clean_text(value.get(key), 360) for key in ("reason", "attitude", "goal"))
+
+
 async def _run_character_setting_agent(state: dict, user_input: str) -> dict:
     """Generate the NPC-to-protagonist relation setting for the next event."""
     if not CHARACTER_SETTING_ENABLED:
@@ -2297,8 +2308,20 @@ async def _ensure_event_foundation(
         recent_story=_recent_scene(state.get('transcript') or []) or '（新存档尚无正文）',
         action=action,
         guidance=_stable_json(prev.get('event_guidance')),
-        character_setting=_stable_json(prev.get('character_setting')) if CHARACTER_SETTING_ENABLED else '（本次未提供）',
     )
+    # 人物设定片段只在 Agent 启用且有实际输出时拼接；关闭时整段提示词不存在，
+    # 而不是留一个空的「（本次未提供）」标题让事件 Agent 去解读。
+    character_setting = prev.get('character_setting')
+    if _character_setting_active(character_setting):
+        base_context = "\n\n".join(
+            part for part in (
+                base_context.rstrip(),
+                render_prompt(
+                    'engine/event/character_setting',
+                    character_setting=_stable_json(character_setting),
+                ).rstrip(),
+            ) if part
+        )
 
     if next_seed:
         event_result = next_seed

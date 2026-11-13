@@ -12,6 +12,3 @@ ${action}
 
 【引导层事件引导】
 ${guidance}
-
-【人物设定 Agent结果】
-${character_setting}
