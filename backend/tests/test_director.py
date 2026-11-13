@@ -1361,10 +1361,9 @@ class DirectorPlanTests(unittest.TestCase):
             game._CACHE.pop(sid, None)
 
         self.assertEqual(messages[:-1], [
-            historical[0],
             {
                 "role": "system",
-                "content": prompts.render_prompt("shared/world_integrity"),
+                "content": prompts.render_system_prompt("engine/narrative/system"),
             },
             {"role": "system", "content": "【既往阶段摘要】\nearlier rounds summary"},
             *historical[-4:],

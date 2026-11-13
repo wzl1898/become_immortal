@@ -224,12 +224,10 @@ def _narrative_context_messages(state: dict) -> list[dict]:
     stored = state.get("messages") or []
     if not stored:
         return []
-    messages = [stored[0]]
-    integrity_guard = render_prompt("shared/world_integrity")
-    if integrity_guard not in str(stored[0].get("content") or ""):
-        # Existing saves persist the original narrative system prompt. Inject the
-        # current guard separately so prompt updates also protect old saves.
-        messages.append({"role": "system", "content": integrity_guard})
+    messages = [{
+        "role": "system",
+        "content": render_system_prompt("engine/narrative/system", card=_card(state)),
+    }]
     if state.get("stage_summary"):
         messages.append(
             {
@@ -437,12 +435,7 @@ async def reconcile_character_state_from_text(
     )
     raw = await complete_chat(
         [
-            {
-                "role": "system",
-                "content": render_system_prompt(
-                    "observation/state/system", card=_card(state)
-                ),
-            },
+            {"role": "system", "content": render_prompt('observation/state/system')},
             {"role": "user", "content": prompt},
         ],
         temperature=0,
@@ -506,12 +499,7 @@ async def reconcile_location_state(
     try:
         raw = await complete_chat(
             [
-                {
-                    "role": "system",
-                    "content": render_system_prompt(
-                        "observation/location/system", card=_card(_get(session_id))
-                    ),
-                },
+                {"role": "system", "content": render_prompt("observation/location/system")},
                 {"role": "user", "content": prompt},
             ],
             temperature=0,

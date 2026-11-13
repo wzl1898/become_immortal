@@ -128,23 +128,6 @@ class PromptManagementTests(unittest.TestCase):
         self.assertEqual("Hello ${name}", detail["versions"][1]["content"])
         self.assertEqual(["production"], detail["versions"][0]["labels"])
 
-    def test_agent_production_override_cannot_remove_world_integrity_guard(self):
-        name = "engine/causal/system"
-        definition = prompts.get_prompt(name)
-        custom = "自定义因果规则。\n${context}\n${story_rules}"
-        drafted = prompts.create_version(name, custom, "prompt-admin")
-        self.assertIsNotNone(drafted)
-        version = drafted["versions"][0]["version"]
-        prompts.promote_version(name, version)
-
-        rendered = prompts.render_system_prompt(name, context="【稳定世界】{}")
-        self.assertIn("自定义因果规则", rendered)
-        self.assertIn(prompts.render_prompt("shared/world_integrity"), rendered)
-        self.assertEqual(
-            set(definition["expected_variables"]),
-            {"context", "story_rules"},
-        )
-
     def test_incompatible_variable_contract_cannot_be_production(self):
         self.client.post(
             "/api/prompts",

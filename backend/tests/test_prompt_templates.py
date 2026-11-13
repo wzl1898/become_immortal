@@ -12,41 +12,38 @@ import prompts
 
 
 class PromptTemplateTests(unittest.TestCase):
-    def test_world_integrity_guard_is_in_every_agent_system_prompt(self):
-        guard = prompts.render_prompt("shared/world_integrity")
-        agent_names = (*prompts._AGENT_GROUPS, "legacy/director")
-        for agent_name in agent_names:
-            system_name = f"{agent_name}/system"
-            with self.subTest(agent=agent_name):
-                self.assertIn(system_name, prompts._TEMPLATES)
-                self.assertIn(guard, prompts.render_system_prompt(system_name))
+    def test_integrity_rules_are_scoped_to_each_risky_agent_output(self):
+        checks = {
+            "guidance/stage/system": "goal 涉及稳定世界已有的功法",
+            "guidance/conflict/system": "conflict_seed 可以围绕稳定世界中的物品",
+            "engine/event/system": "core、benefit 和 end_condition 涉及稳定世界",
+            "engine/causal/system": "幕后事实不得把它解释成残片",
+            "engine/viewpoint/system": "当前可感知事实只能记录物件",
+            "engine/pacing/system": "intent.key 只概括玩家想达成的结果",
+            "engine/progression/system": "direction 可以决定玩家是否取得 benefit",
+            "engine/hook/system": "goal 指向固定功法",
+            "engine/payoff/system": "reward_candidates 中的 name、reward_kind 和 summary",
+            "engine/skeleton/system": "turn_objective 和 beats 可以安排固定奖励",
+            "engine/narrative/system": "正文、《状态》和《物件》均不得把它写成残片",
+            "engine/audit/system": "必须记入 violations",
+            "memory/extract/system": "不得提取为 state、event、别名或物品属性",
+            "memory/inquiry/system": "answer 必须忽略该污染描述",
+            "observation/character/system": "reason、attitude 和 goal 只能建立人物关系",
+            "observation/state/system": "不属于主角状态变化",
+            "legacy/director/system": "payoff、trigger 和 guidance 涉及故事卡已有的功法",
+        }
+        for name, rule in checks.items():
+            with self.subTest(prompt=name):
+                self.assertIn(rule, prompts.render_system_prompt(name))
 
-    def test_world_integrity_guard_forbids_incomplete_fixed_rewards(self):
-        guard = prompts.render_prompt("shared/world_integrity")
-        for forbidden in (
-            "残篇",
-            "残本",
-            "残卷",
-            "残缺本",
-            "缺页本",
-            "伪本",
-            "NPC 自行补写本",
+    def test_read_only_observers_do_not_receive_unrelated_integrity_rules(self):
+        self.assertNotIn("shared/world_integrity", prompts._TEMPLATES)
+        for name in (
+            "observation/conflict/system",
+            "observation/location/system",
         ):
-            with self.subTest(forbidden=forbidden):
-                self.assertIn(forbidden, guard)
-        self.assertIn("必须恢复稳定世界中的标准定义", guard)
-
-    def test_existing_save_receives_latest_world_integrity_guard_once(self):
-        guard = prompts.render_prompt("shared/world_integrity")
-        legacy = game._narrative_context_messages({
-            "messages": [{"role": "system", "content": "旧叙事提示词"}],
-        })
-        self.assertEqual(guard, legacy[1]["content"])
-
-        current = game._narrative_context_messages({
-            "messages": [{"role": "system", "content": f"叙事提示词\n\n{guard}"}],
-        })
-        self.assertEqual(1, len(current))
+            with self.subTest(prompt=name):
+                self.assertNotIn("残篇", prompts.render_prompt(name))
 
     def test_json_and_template_looking_input_are_preserved_verbatim(self):
         action = '检查 ${cultivation_rules} 和 {"goal": "开门"}，价格 $5；{{ untouched }}'
