@@ -5,6 +5,7 @@ Markdown files; a running process keeps a consistent snapshot of all prompts.
 """
 
 from pathlib import Path
+import logging
 import re
 import sqlite3
 from string import Template
@@ -12,6 +13,8 @@ from string import Template
 import store
 import story_cards
 
+
+_LOG = logging.getLogger(__name__)
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "prompt_templates"
 _TEMPLATES = {
@@ -191,6 +194,47 @@ def _reset_active_templates() -> None:
     _ACTIVE_VARIABLES.clear()
 
 
+def _sync_file_templates() -> list[str]:
+    """Publish file-backed templates whose content drifted from production.
+
+    Files are the source of truth for authors editing `prompt_templates/`, but the
+    database production version is what agents actually render. When the two
+    diverge we append an immutable version for the new file content and promote
+    it, so a file edit takes effect on restart instead of being silently
+    shadowed by a stale production version. Returns the names that were synced.
+    """
+    synced: list[str] = []
+    for summary in store.list_prompt_definitions():
+        name = summary["name"]
+        baseline = _TEMPLATES.get(name)
+        if baseline is None or summary["source"] != "file":
+            continue
+        item = store.get_prompt_definition(name)
+        if item is None:
+            continue
+        production = next(
+            (row for row in item["versions"] if row["version"] == item["production_version"]),
+            None,
+        )
+        if production is None or production["content"] == baseline.template:
+            continue
+        try:
+            created = store.create_prompt_version(
+                name, baseline.template, sorted(_VARIABLES[name]), "filesystem"
+            )
+            if created is None:
+                continue
+            newest = max(row["version"] for row in created["versions"])
+            if store.set_prompt_production_version(name, newest) is None:
+                continue
+            synced.append(f"{name} v{newest}")
+        except (ValueError, sqlite3.Error):
+            # A malformed file template must not block startup; the existing
+            # production version keeps working and the error surfaces on render.
+            _LOG.exception("failed to sync file template %s", name)
+    return synced
+
+
 def init_registry() -> None:
     """Seed the prompt registry and load every production version into memory."""
     store.seed_prompt_templates(
@@ -203,6 +247,11 @@ def init_registry() -> None:
             for name, template in _TEMPLATES.items()
         ]
     )
+    synced = _sync_file_templates()
+    if synced:
+        _LOG.warning(
+            "published new production prompt versions from files: %s", ", ".join(synced)
+        )
     _reset_active_templates()
     for item in store.list_production_prompt_versions():
         template, variables = _compile_template(item["content"], name=item["name"])
