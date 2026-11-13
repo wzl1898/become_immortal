@@ -1764,24 +1764,6 @@ def _normalize_stage_history(value) -> list[dict]:
     return history[-12:]
 
 
-def _is_major_stage_goal(goal: str) -> bool:
-    text = _clean_text(goal, 240)
-    if len(text) < 4:
-        return False
-    if any(token in text for token in ("本轮", "下一步", "当前事件")):
-        return False
-    if text in {"继续调查", "寻找线索", "提升实力", "探索世界", "推进剧情"}:
-        return False
-    if re.search(r"(?:并且|以及|同时|然后|并完成|并获得|并突破|并成为)", text):
-        return False
-    if any(token in text for token in ("一门功法", "某门功法", "一个宗门", "某个宗门", "某种身份")):
-        return False
-    return not re.match(
-        r"^(?:立刻|马上|去|到|前往|进入|离开|查看|检查|询问|问|攻击|追击|追上|躲避|逃离|翻看|打开|拿|取)",
-        text,
-    )
-
-
 def _fallback_stage_guidance(state: dict, world_context: dict) -> dict:
     director = _dynamic_director_state(state.get("director_state"))
     completed_goals = {
@@ -1814,7 +1796,7 @@ def _sanitize_stage_guidance(result: dict | None, state: dict, world_context: di
     if not isinstance(result, dict):
         return fallback
     goal = _clean_text(result.get("goal"), 240)
-    if not _is_major_stage_goal(goal):
+    if not goal:
         return fallback
     try:
         budget = int(result.get("event_budget"))
@@ -1993,9 +1975,9 @@ async def _ensure_stage_guidance(
     stage = _sanitize_stage_guidance(result, state, world_context)
     source = meta["source"]
     fallback_reason = meta.get("fallback_reason", "")
-    if result is not None and stage == _fallback_stage_guidance(state, world_context):
+    if result is not None and not _clean_text(result.get("goal"), 240):
         source = "fallback"
-        fallback_reason = "invalid_stage"
+        fallback_reason = "missing_goal"
     latest = _dynamic_director_state(state.get("director_state"))
     # Another background task may have completed or installed a stage while the
     # LLM call was in flight. Never overwrite that newer state with our snapshot.

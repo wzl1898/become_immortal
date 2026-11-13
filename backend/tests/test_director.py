@@ -1639,7 +1639,7 @@ class StageGuidanceTests(unittest.TestCase):
         self.assertIn("获得《引气诀》", content)
         self.assertIn("最近叙事方向", content)
 
-    def test_stage_output_is_exact_and_budget_is_clamped(self):
+    def test_stage_output_preserves_any_nonempty_goal_and_clamps_budget(self):
         state = {"character_state": {}}
         stage = game._sanitize_stage_guidance(
             {"goal": "获得玄霄宗外门弟子身份", "event_budget": 99, "steps": []},
@@ -1650,11 +1650,43 @@ class StageGuidanceTests(unittest.TestCase):
             "event_budget": 6,
         })
         self.assertEqual(set(stage), {"goal", "event_budget"})
-        fallback = game._sanitize_stage_guidance(
-            {"goal": "获得一门功法并完成引气入体", "event_budget": 4},
-            state, _context(),
+        goals = (
+            "去",
+            "本轮继续调查",
+            "继续调查",
+            "获得一门功法并完成引气入体",
+            "前往玄霄宗并成为外门弟子",
         )
-        self.assertEqual(fallback, {"goal": "获得《引气诀》", "event_budget": 4})
+        for goal in goals:
+            with self.subTest(goal=goal):
+                accepted = game._sanitize_stage_guidance(
+                    {"goal": goal, "event_budget": 4}, state, _context()
+                )
+                self.assertEqual(accepted, {"goal": goal, "event_budget": 4})
+
+        self.assertEqual(
+            game._sanitize_stage_guidance(
+                {"event_budget": 4}, state, _context()
+            ),
+            {"goal": "获得《引气诀》", "event_budget": 4},
+        )
+
+    def test_stage_equal_to_fallback_remains_an_llm_result(self):
+        async def fake_call(*args, **kwargs):
+            return (
+                {"goal": "获得《引气诀》", "event_budget": 4},
+                {"source": "llm", "model": "test", "fallback_reason": ""},
+            )
+
+        state = {"session_id": "stage-source-test", "director_state": {}}
+        with patch.object(game, "_call_director_agent", fake_call):
+            director = asyncio.run(
+                game._ensure_stage_guidance(state, "", _context(), [])
+            )
+
+        output = director["agent_outputs"]["stage_guidance"]
+        self.assertEqual("llm", output["source"])
+        self.assertEqual("", output["fallback_reason"])
 
     def test_budget_zero_stays_settlement_due(self):
         stage = {"goal": "获得《引气诀》", "event_budget": 0}
