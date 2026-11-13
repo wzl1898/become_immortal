@@ -807,8 +807,10 @@ html, body {
 .prompt-workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: 310px minmax(0, 1fr); }
 .prompt-catalog {
   min-width: 0; display: flex; flex-direction: column; padding: 16px 12px;
+  overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable;
   border-right: 1px solid #2b3038; background: #11151a;
 }
+.prompt-catalog:focus-visible, .prompt-templates:focus-visible { outline: 1px solid #456878; outline-offset: -1px; }
 .prompt-search { flex: none; padding: 0 4px 12px; }
 .prompt-search input {
   width: 100%; height: 38px; border: 1px solid #343b45; border-radius: 6px;
@@ -820,7 +822,7 @@ html, body {
   color: #aeb3ba; font-size: 12px; cursor: pointer;
 }
 .prompt-support-toggle input { margin: 0; accent-color: #79a9bd; }
-.prompt-list { min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+.prompt-list { flex: none; min-height: 0; overflow: visible; display: flex; flex-direction: column; gap: 4px; }
 .prompt-list-item {
   width: 100%; min-height: 72px; display: grid; gap: 4px; padding: 10px 11px;
   border: 1px solid transparent; border-radius: 6px; background: transparent;
@@ -859,8 +861,20 @@ html, body {
 }
 .prompt-templates {
   min-width: 0; min-height: 0; padding: 18px 10px; overflow-y: auto;
+  overscroll-behavior: contain; scrollbar-gutter: stable;
   border-right: 1px solid #262c34; background: #0f1318;
 }
+.prompt-catalog, .prompt-templates, .prompt-detail, .prompt-content {
+  scrollbar-width: thin; scrollbar-color: #59636f #151a20;
+}
+.prompt-catalog::-webkit-scrollbar, .prompt-templates::-webkit-scrollbar,
+.prompt-detail::-webkit-scrollbar, .prompt-content::-webkit-scrollbar { width: 9px; height: 9px; }
+.prompt-catalog::-webkit-scrollbar-thumb, .prompt-templates::-webkit-scrollbar-thumb,
+.prompt-detail::-webkit-scrollbar-thumb, .prompt-content::-webkit-scrollbar-thumb {
+  border: 2px solid #151a20; border-radius: 6px; background: #59636f;
+}
+.prompt-catalog::-webkit-scrollbar-track, .prompt-templates::-webkit-scrollbar-track,
+.prompt-detail::-webkit-scrollbar-track, .prompt-content::-webkit-scrollbar-track { background: #151a20; }
 .prompt-template-list { display: flex; flex-direction: column; gap: 5px; }
 .prompt-template-item {
   width: 100%; min-height: 54px; display: grid; gap: 6px; padding: 8px 9px;
@@ -981,7 +995,7 @@ html, body {
   .prompt-workspace { grid-template-columns: 1fr; grid-template-rows: 196px minmax(0, 1fr); }
   .prompt-catalog { border-right: 0; border-bottom: 1px solid #2b3038; padding: 10px; }
   .prompt-support-toggle { margin-bottom: 8px; }
-  .prompt-list { flex-direction: column; overflow-x: hidden; overflow-y: auto; scrollbar-gutter: stable; }
+  .prompt-list { flex-direction: column; overflow: visible; }
   .prompt-list-item { flex: 0 0 auto; min-height: 68px; }
   .prompt-detail { overflow-y: auto; scrollbar-gutter: stable; }
   .prompt-group-head { min-height: 54px; padding: 8px 14px; }

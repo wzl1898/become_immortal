@@ -59,6 +59,7 @@ const promptCreateBtn = document.getElementById("prompt-create");
 const promptCount = document.getElementById("prompt-count");
 const promptSearch = document.getElementById("prompt-search");
 const promptShowSupport = document.getElementById("prompt-show-support");
+const promptCatalog = document.querySelector(".prompt-catalog");
 const promptList = document.getElementById("prompt-list");
 const promptListEmpty = document.getElementById("prompt-list-empty");
 const promptDetailEmpty = document.getElementById("prompt-detail-empty");
@@ -66,6 +67,7 @@ const promptDetail = document.getElementById("prompt-detail");
 const promptGroupName = document.getElementById("prompt-group-name");
 const promptGroupPath = document.getElementById("prompt-group-path");
 const promptGroupCount = document.getElementById("prompt-group-count");
+const promptTemplates = document.querySelector(".prompt-templates");
 const promptTemplateList = document.getElementById("prompt-template-list");
 const promptName = document.getElementById("prompt-name");
 const promptSource = document.getElementById("prompt-source");
@@ -1721,6 +1723,18 @@ function promptTimestamp(ts) {
     hour: "2-digit", minute: "2-digit", hour12: false,
   }).format(date);
 }
+
+function forwardVerticalWheel(container) {
+  container.addEventListener("wheel", (event) => {
+    if (!event.deltaY || Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
+    const previousTop = container.scrollTop;
+    container.scrollTop += event.deltaY;
+    if (container.scrollTop !== previousTop) event.preventDefault();
+  }, { passive: false });
+}
+
+forwardVerticalWheel(promptCatalog);
+forwardVerticalWheel(promptTemplates);
 
 function getPromptGroups() {
   const groups = new Map();

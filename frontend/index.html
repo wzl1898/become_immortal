@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>故事引擎</title>
-  <link rel="stylesheet" href="style.css?v=prompt-management-2" />
+  <link rel="stylesheet" href="style.css?v=prompt-management-3" />
 </head>
 <body>
   <main id="user-gate" class="user-gate">
@@ -177,7 +177,7 @@
       </header>
 
       <div class="prompt-workspace">
-        <aside class="prompt-catalog" aria-label="Agent 列表">
+        <aside class="prompt-catalog" aria-label="Agent 列表" tabindex="0">
           <label class="prompt-search">
             <span class="sr-only">搜索 Agent 或模板</span>
             <input id="prompt-search" type="search" placeholder="搜索 Agent 或模板" autocomplete="off" />
@@ -203,7 +203,7 @@
               <span id="prompt-group-count"></span>
             </header>
             <div class="prompt-group-workspace">
-              <aside class="prompt-templates" aria-label="模板列表">
+              <aside class="prompt-templates" aria-label="模板列表" tabindex="0">
                 <div class="prompt-section-label">模板</div>
                 <div id="prompt-template-list" class="prompt-template-list"></div>
               </aside>
@@ -295,6 +295,6 @@
     </form>
   </div>
 
-  <script src="app.js?v=prompt-management-2"></script>
+  <script src="app.js?v=prompt-management-3"></script>
 </body>
 </html>
