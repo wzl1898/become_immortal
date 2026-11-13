@@ -45,6 +45,16 @@ class PromptTemplateTests(unittest.TestCase):
             with self.subTest(prompt=name):
                 self.assertNotIn("残篇", prompts.render_prompt(name))
 
+    def test_conflict_seed_requires_concrete_hostility_and_event_execution(self):
+        guidance = prompts.render_system_prompt("guidance/conflict/system")
+        self.assertIn("拦路勒索、设局诈骗、抢夺财物", guidance)
+        self.assertIn("普通交易或推销、请求帮忙、招揽", guidance)
+
+        event = prompts.render_system_prompt("engine/event/system")
+        self.assertIn("敌对行为必须在玩家介入前已经实际开始", event)
+        self.assertIn("不得把它弱化成谈话、提醒、提议、请求", event)
+        self.assertIn("引导槽位为空时，保持自主生成事件", event)
+
     def test_json_and_template_looking_input_are_preserved_verbatim(self):
         action = '检查 ${cultivation_rules} 和 {"goal": "开门"}，价格 $5；{{ untouched }}'
         self.assertEqual(
