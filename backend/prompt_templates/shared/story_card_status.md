@@ -1,2 +1,2 @@
-状态面板字段与顺序：${fields}
-物品持有栏：${inventory_fields}
+结构化状态字段（只读，禁止在剧情输出中生成或逐项复述）：${fields}
+其中物品持有字段（变化必须先在正文中明确发生，再由状态校准 Agent更新）：${inventory_fields}

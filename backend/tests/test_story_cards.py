@@ -73,6 +73,22 @@ class StoryCardTests(unittest.TestCase):
         self.assertEqual(result.status_code, 400)
         self.assertEqual(store.list_saves("card-test"), before)
 
+    def test_new_save_uses_defined_story_card_initial_state(self):
+        xiuxian = self.create("xiuxian")
+        self.assertEqual(game.get_character_state(xiuxian), {
+            "realm": "凡人",
+            "health": "充盈",
+            "spiritual_power": "尚未引气",
+            "cultivation": "未入修行",
+            "condition": "无伤",
+            "resources": "无",
+            "artifacts": "无",
+        })
+
+        orbital = self.create("orbital")
+        self.assertEqual(game.get_character_state(orbital)["role"], "初级维修员")
+        self.assertEqual(game.get_character_state(orbital)["health"], "良好")
+
     def test_world_and_reward_candidates_are_isolated(self):
         a, b = self.create("xiuxian"), self.create("orbital")
         first, second = constraints.director_context(
@@ -128,12 +144,33 @@ class StoryCardTests(unittest.TestCase):
             store.world_snapshot(second)["location"]["location_name"], "第二维修区"
         )
 
-    def test_state_and_inventory_follow_card_fields_after_commit_and_reload(self):
+    def test_state_agent_updates_card_fields_and_inventory_after_commit(self):
         sid = self.create()
-        narration = "你完成检查。\n《状态》\n岗位：初级维修员\n健康：手指擦伤\n体力：略有消耗\n技能：基础电气检修\n状态：清醒\n补给：饮水 1 袋\n装备：多功能维修工具（绝缘握柄，可测电压）、便携维修无人机（折叠机身）\n《/状态》"
+        narration = (
+            "检修时飞溅的金属屑擦伤了你的手指，你也感到体力略有消耗。"
+            "林澈完成登记，将便携维修无人机（折叠机身）交给你随身使用。"
+        )
+
+        async def complete(*_args, **kwargs):
+            self.assertEqual(kwargs["request_type"], "state_reconcile")
+            return json.dumps({
+                "updates": {
+                    "health": "手指擦伤",
+                    "energy": "略有消耗",
+                    "equipment": "多功能维修工具（绝缘握柄，可测电压）、便携维修无人机（折叠机身）",
+                },
+                "evidence": {
+                    "health": "擦伤了你的手指",
+                    "energy": "你也感到体力略有消耗",
+                    "equipment": "将便携维修无人机（折叠机身）交给你随身使用",
+                },
+            }, ensure_ascii=False)
+
         with patch.object(game, "_schedule_memory_extraction"), patch.object(
             game, "_schedule_narrative_observer"
-        ), patch.object(game, "_schedule_director_audit"):
+        ), patch.object(game, "_schedule_director_audit"), patch.object(
+            game, "complete_chat", complete
+        ):
             with patch.object(
                 game, "reconcile_location_state", new=AsyncMock(return_value=False)
             ):
@@ -147,6 +184,27 @@ class StoryCardTests(unittest.TestCase):
         self.assertIn("便携维修无人机", {r["name"] for r in game.get_inventory(sid)})
         data = self.client.get(f"/api/load?sid={sid}", headers=self.headers).json()
         self.assertEqual(data["story_card"]["status_fields"][0]["label"], "岗位")
+
+    def test_model_authored_status_panel_cannot_modify_state(self):
+        sid = self.create()
+        narration = "你完成检查。\n《状态》\n健康：濒死\n体力：耗尽\n《/状态》"
+
+        async def complete(*_args, **kwargs):
+            self.assertEqual(kwargs["request_type"], "state_reconcile")
+            return json.dumps({"updates": {}, "evidence": {}})
+
+        with patch.object(game, "_schedule_memory_extraction"), patch.object(
+            game, "_schedule_narrative_observer"
+        ), patch.object(game, "_schedule_director_audit"), patch.object(
+            game, "complete_chat", complete
+        ), patch.object(
+            game, "reconcile_location_state", new=AsyncMock(return_value=False)
+        ):
+            asyncio.run(game.commit(sid, "检查设备", narration))
+
+        state = game.get_character_state(sid)
+        self.assertEqual(state["health"], "良好")
+        self.assertEqual(state["energy"], "充足")
 
     def test_state_reconciliation_uses_selected_card_schema(self):
         sid = self.create()

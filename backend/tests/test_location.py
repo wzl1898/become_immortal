@@ -153,7 +153,7 @@ class StructuredLocationTests(unittest.TestCase):
         ):
             asyncio.run(game.commit(self.sid, "留在原地", "你没有移动。"))
 
-        self.assertEqual(calls, ["location_state"])
+        self.assertEqual(calls, ["location_state", "state_reconcile"])
         self.assertEqual(store.load(self.sid)["turns"], 1)
         self.assertEqual(self.location()["location_id"], "baishi_village")
 

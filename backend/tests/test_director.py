@@ -1496,9 +1496,6 @@ class DirectorPlanTests(unittest.TestCase):
                     "violations": [],
                     "note": "",
                 }, ensure_ascii=False)
-            if kwargs["request_type"] == "state_reconcile":
-                self.assertIn("来者已经离开。", args[0][-1]["content"])
-                return json.dumps({"updates": {}, "evidence": {}})
             self.assertEqual(kwargs["request_type"], "director_progression")
             self.assertIn("ended", args[0][-1]["content"])
             return json.dumps({"direction": "收束当前事件", "ended": False}, ensure_ascii=False)
@@ -1511,7 +1508,7 @@ class DirectorPlanTests(unittest.TestCase):
                     sid, "观察", "来者已经离开。", 4, plan
                 ))
             director = game._CACHE[sid]["director_state"]
-            self.assertEqual(calls, ["director_audit", "director_progression", "state_reconcile"])
+            self.assertEqual(calls, ["director_audit", "director_progression"])
             self.assertTrue(director["current_plan"]["event_ended"])
             self.assertEqual(director["current_plan"]["event_action"], "resolve")
             self.assertEqual(director["event"]["status"], "resolved")
@@ -1709,8 +1706,6 @@ class StageGuidanceTests(unittest.TestCase):
                     "result": "success",
                     "violations": [], "note": "",
                 }, ensure_ascii=False)
-            if kwargs["request_type"] == "state_reconcile":
-                return json.dumps({"updates": {}, "evidence": {}})
             raise AssertionError(kwargs["request_type"])
 
         try:

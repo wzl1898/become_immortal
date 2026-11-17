@@ -12,6 +12,19 @@ import prompts
 
 
 class PromptTemplateTests(unittest.TestCase):
+    def test_narrative_cannot_generate_structured_state(self):
+        system = prompts.render_system_prompt("engine/narrative/system")
+        opening = prompts.render_prompt("engine/narrative/opening")
+        state_agent = prompts.render_prompt(
+            "observation/state/user",
+            fields="{}",
+            current_state="{}",
+            narrative="正文",
+        )
+        self.assertIn("绝对不要输出 `《状态》`", system)
+        self.assertIn("初始状态由故事卡提供", opening)
+        self.assertIn("唯一有权修改主角结构化状态", state_agent)
+
     def test_json_and_template_looking_input_are_preserved_verbatim(self):
         action = '检查 ${cultivation_rules} 和 {"goal": "开门"}，价格 $5；{{ untouched }}'
         self.assertEqual(

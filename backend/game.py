@@ -6,7 +6,7 @@
 每个存档维护三份核心数据：
 - messages   : 喂给 LLM 的消息（system + user/assistant，按 MAX_TURNS 截断）
 - transcript : 展示用剧情块列表 [{role: narration|player, text}]，只增不删
-- character_state : 主角当前状态快照，按最新《状态》面板覆盖
+- character_state : 主角当前状态快照，由故事卡初始化、状态校准 Agent增量更新
 - world_memory : 长期世界记忆，独立于短期上下文窗口，按需召回注入
 """
 
@@ -188,11 +188,11 @@ def _get(session_id: str) -> dict | None:
     data = store.load(session_id)
     if data is None:
         return None
-    # 老存档的 assistant 历史里堆着带灵光提示的旧回合；喂给模型前就地剥掉
-    # （仅内存，不回写库——库里 messages/transcript 保持原样）。幂等安全。
+    # 老存档可能含剧情 Agent 生成的状态面板和灵光提示；它们都不是剧情事实。
+    # 喂给模型前仅在内存中剥掉，存档原文保持不变。
     for m in data["messages"]:
         if m.get("role") == "assistant":
-            m["content"] = _strip_hint(m["content"])
+            m["content"] = _narrative_history_content(m["content"])
     _CACHE[session_id] = {
         "session_id": session_id,
         "story_card": data["story_card"],
@@ -342,7 +342,7 @@ def _narration_body(text: str) -> str:
 
 
 def _strip_hint(text: str) -> str:
-    """剥掉末尾的〔灵光一现…〕提示块，保留正文与《状态》《物件》。
+    """剥掉末尾的〔灵光一现…〕提示块，保留正文与其他结构化块。
 
     专供喂给 LLM 的历史：灵光提示是给玩家的备选方向，不是已发生的剧情。
     若原样留在 assistant 历史里，模型会把它当作"自己说过的事实"回引——
@@ -355,6 +355,11 @@ def _strip_hint(text: str) -> str:
         return text
     last = matches[-1]
     return (text[: last.start()] + text[last.end() :]).rstrip()
+
+
+def _narrative_history_content(text: str) -> str:
+    """Keep prose and object context, but never feed model-authored state back in."""
+    return _STATUS_RE.sub("", _strip_hint(text)).strip()
 
 
 def _latest_block(transcript: list[dict], pattern: "re.Pattern") -> str | None:
@@ -387,34 +392,8 @@ def _split_top_level(val: str) -> list[str]:
     return parts
 
 
-def _parse_character_state(
-    status_text: str | None, turn: int, card: dict | None = None
-) -> dict:
-    """从《状态》面板解析主角当前状态快照。解析失败返回空 dict。"""
-    if not status_text:
-        return {}
-    character_state: dict = {}
-    for line in status_text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        m = re.match(r"^(.+?)[：:]\s*(.*)$", line)
-        if not m:
-            continue
-        key = {label: key for key, label in story_cards.field_labels(card)}.get(
-            m.group(1).strip()
-        )
-        if key:
-            character_state[key] = m.group(2).strip()
-    if not character_state:
-        return {}
-    character_state["turn"] = turn
-    character_state["updated_at"] = time.time()
-    return character_state
-
-
 async def reconcile_character_state_from_text(
-    session_id: str, assistant_content: str, *, audit: dict | None = None
+    session_id: str, assistant_content: str
 ) -> dict:
     """Extract only explicitly stated state changes from the latest narration."""
     state = _get(session_id)
@@ -453,14 +432,13 @@ async def reconcile_character_state_from_text(
                 and isinstance(quote, str) and quote.strip() and quote.strip() in body:
             updates[key] = value.strip()
             clean_evidence[key] = quote.strip()[:360]
-    if updates:
-        merged = dict(current)
-        merged.update(updates)
-        merged["turn"] = int(state.get("turns") or 0)
-        merged["updated_at"] = time.time()
-        state["character_state"] = merged
-        store.save_character_state(session_id, merged)
-    return {"character_state": state.get("character_state") or current, "updates": updates, "evidence": clean_evidence}
+    merged = dict(current)
+    merged.update(updates)
+    merged["turn"] = int(state.get("turns") or 0)
+    merged["updated_at"] = time.time()
+    state["character_state"] = merged
+    store.save_character_state(session_id, merged)
+    return {"character_state": merged, "updates": updates, "evidence": clean_evidence}
 
 
 async def reconcile_location_state(
@@ -628,8 +606,18 @@ def _parse_panel_items(
     return parsed
 
 
-def _reconcile_inventory(state: dict, narration: str) -> None:
-    """把本回合面板解析回影子库：新物入库、已知物更新 kind/attrs、失去物移除。
+def _character_state_status_text(state: dict) -> str:
+    """Serialize the state calibrator's canonical snapshot for inventory parsing."""
+    current = state.get("character_state") or {}
+    return "\n".join(
+        f"{label}：{current[key]}"
+        for key, label in story_cards.field_labels(_card(state))
+        if str(current.get(key) or "").strip()
+    )
+
+
+def _reconcile_inventory(state: dict, narration: str, status_text: str) -> None:
+    """Reconcile inventory from calibrated state plus the narrative object block.
 
     - last_turn 只由"正文子串命中"刷新（见 _touch_by_narration），此处新物落库时
       记一次 last_turn=当前turn（首次获得也算"用到"）。注入 ≠ 用到，故不在别处刷。
@@ -638,10 +626,9 @@ def _reconcile_inventory(state: dict, narration: str) -> None:
     """
     inv = state["inventory"]
     turn = state["turns"]  # commit 里已 +1，此处即本回合序号
-    status = _STATUS_RE.search(narration)
     objects = _OBJECTS_RE.search(narration)
     parsed = _parse_panel_items(
-        status.group(1) if status else None,
+        status_text,
         objects.group(1) if objects else None,
         _card(state),
     )
@@ -1145,23 +1132,31 @@ async def commit(session_id: str, user_content: str | None, assistant_content: s
     else:
         messages.append({"role": "user", "content": user_content})
         transcript.append({"role": "player", "text": user_content})
-    # 喂给 LLM 的历史剥掉灵光提示（不让备选动作被误当既成剧情回引）；
-    # transcript 与下方 _reconcile 仍用完整原文（前端要显示提示、解析要读面板）。
-    messages.append({"role": "assistant", "content": _strip_hint(assistant_content)})
+    # 状态只能由状态校准 Agent维护；剧情历史不保留模型自行输出的状态块。
+    # transcript 仍保存完整原文，以兼容旧存档和排查原始输出。
+    messages.append(
+        {
+            "role": "assistant",
+            "content": _narrative_history_content(assistant_content),
+        }
+    )
     transcript.append({"role": "narration", "text": assistant_content})
 
     state["turns"] += 1
     _trim(state)
-    status_match = _STATUS_RE.search(assistant_content)
-    character_state = _parse_character_state(
-        status_match.group(1) if status_match else None,
-        state["turns"],
-        _card(state),
-    )
-    if character_state:
-        state["character_state"] = character_state
-    # 解析本回合面板回影子库（新物入库、失去物移除、正文命中刷 last_turn）
-    _reconcile_inventory(state, assistant_content)
+    try:
+        await reconcile_character_state_from_text(session_id, assistant_content)
+    except Exception:  # noqa: BLE001
+        # A failed calibration leaves the previous structured state intact and
+        # must not discard an otherwise completed narrative turn.
+        _LOG.exception(
+            "character state reconciliation failed for session %s turn %s",
+            session_id,
+            state["turns"],
+        )
+    # Owned items come from the calibrated state. The narrative Agent may only
+    # maintain the separate 《物件》 block for important unowned objects.
+    _reconcile_inventory(state, assistant_content, _character_state_status_text(state))
     _finalize_director_state(state, assistant_content)
     if user_content is not None:
         constraints.advance_world_time(
@@ -1171,8 +1166,6 @@ async def commit(session_id: str, user_content: str | None, assistant_content: s
     store.save_stage_summary(
         session_id, state.get("stage_summary") or "", int(state.get("summary_turn") or 0)
     )
-    if character_state:
-        store.save_character_state(session_id, character_state)
     store.save_inventory(session_id, state["inventory"])
     store.save_director_state(session_id, state.get("director_state") or {})
     store.save_opportunity_reward_binding(
@@ -4054,13 +4047,6 @@ async def _run_director_audit(
         state["director_state"] = director
         store.save_director_state(session_id, director)
         store.save_opportunity_reward_binding(session_id, director.get("last_payoff"))
-        # 状态校准严格排在审计完成并落盘之后，失败不影响本轮剧情。
-        try:
-            await reconcile_character_state_from_text(
-                session_id, assistant_content, audit=audit
-            )
-        except Exception:  # noqa: BLE001
-            _LOG.exception("character state reconciliation failed for session %s turn %s", session_id, turn)
     except Exception:  # noqa: BLE001
         _LOG.exception("director audit failed for session %s turn %s", session_id, turn)
 

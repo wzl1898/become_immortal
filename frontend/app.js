@@ -136,6 +136,8 @@ function validUserId(value) {
 }
 
 function clearStatus() {
+  characterState = {};
+  narrativeObjects = "";
   statusBodyEl.innerHTML = "";
   statusPanel.classList.add("empty");
 }
@@ -174,6 +176,8 @@ statusReconcile.addEventListener("click", async () => {
 let sessionId = null;
 let currentName = "";
 let busy = false;
+let characterState = {};
+let narrativeObjects = "";
 let traceCursor = 0;
 let traceRefreshActive = false;
 let traceSession = null;
@@ -524,7 +528,7 @@ function splitParts(full) {
   return { body: rest.trimEnd(), status, objects, hint };
 }
 
-// 把身体状态（每行"字段：值"）+ 关键物件块渲染进左侧面板
+// 把后端结构化状态 + 剧情中的关键物件块渲染进左侧面板
 function renderStatus(status, objects) {
   if (!status && !objects) return;
   statusBodyEl.innerHTML = "";
@@ -557,8 +561,13 @@ function statusTextFromCharacterState(state) {
 }
 
 function renderCharacterState(state) {
-  const status = statusTextFromCharacterState(state);
-  if (status) renderStatus(status, "");
+  characterState = state || {};
+  renderStatus(statusTextFromCharacterState(characterState), narrativeObjects);
+}
+
+function renderNarrativeObjects(objects) {
+  narrativeObjects = objects || "";
+  renderStatus(statusTextFromCharacterState(characterState), narrativeObjects);
 }
 
 // 关键物件块：主角未拥有但有剧情分量之物，每行"名称（属性）——归属"
@@ -586,7 +595,7 @@ function renderObjects(objects) {
 }
 
 // 冷物品折叠区：后端结构化库里 hot=false 的物品，收进「其他随身物 (N)」折叠块。
-// 热物品仍由面板文本（《状态》/《物件》）驱动展示，这里只补冷物品。
+// 热物品来自结构化状态与《物件》，这里补充不在当前场景中的冷物品。
 function renderColdItems(inventory) {
   // 先清掉旧的折叠区，避免重复
   const old = document.getElementById("cold-items");
@@ -615,11 +624,11 @@ function renderColdItems(inventory) {
   statusBodyEl.appendChild(details);
 }
 
-// 重放用：把一段完整叙事渲染成正文块（+ 可选提示块），并刷新状态面板
+// 重放用：状态块只负责从旧正文中剥离，不参与状态展示或写入。
 function renderNarration(full) {
-  const { body, status, objects, hint } = splitParts(full);
+  const { body, objects, hint } = splitParts(full);
   addBlock("narration", body);
-  if (status || objects) renderStatus(status, objects);
+  renderNarrativeObjects(objects);
   if (hint) addBlock("hint", hint);
 }
 
@@ -631,9 +640,9 @@ async function narrate(url, options = {}) {
   try {
     const done = await streamSSE(url, (text) => {
       full += text;
-      const { body, status, objects, hint } = splitParts(full);
+      const { body, objects, hint } = splitParts(full);
       block.textContent = body;
-      if (status || objects) renderStatus(status, objects);
+      renderNarrativeObjects(objects);
       if (hint) {
         if (!hintBlock) hintBlock = addBlock("hint");
         hintBlock.textContent = hint;
@@ -644,7 +653,8 @@ async function narrate(url, options = {}) {
       if (stage.key === "director") startLiveLLMRequest("story", "director_plan");
       else if (stage.key === "narrative") startLiveLLMRequest("story", "narrative");
     });
-    // 流结束：用后端刷新后的结构化库补上冷物品折叠区
+    // 流结束：状态只采用状态校准 Agent写入后端的结构化快照。
+    if (done && done.character_state) renderCharacterState(done.character_state);
     if (done && done.inventory) renderColdItems(done.inventory);
     if (done && done.world_state) renderConstraint(done.world_state);
     if (done && done.director_state) renderDirector(done.director_state, done.character_state?.turn || 0);
@@ -704,7 +714,8 @@ async function loadGame(sid, name) {
       if (blk.role === "player") addBlock("player", blk.text);
       else renderNarration(blk.text);
     }
-    // 读档还原冷物品折叠区（热物品已随最近一条面板重放出来）
+    // 旧正文中的状态面板不具备写入权，重放后再次应用权威状态快照。
+    renderCharacterState(data.character_state);
     if (data.inventory) renderColdItems(data.inventory);
     closeDrawer();
     // 空局（尚未落笔）：直接让 AI 生成开场，而不是停在占位文字上
