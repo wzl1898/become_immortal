@@ -40,7 +40,7 @@
       "key": "resources",
       "label": "资源",
       "kind": "resources",
-      "initial": "无"
+      "initial": "铜钱三百文"
     },
     {
       "key": "artifacts",

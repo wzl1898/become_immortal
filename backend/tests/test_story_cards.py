@@ -81,7 +81,7 @@ class StoryCardTests(unittest.TestCase):
             "spiritual_power": "尚未引气",
             "cultivation": "未入修行",
             "condition": "无伤",
-            "resources": "无",
+            "resources": "铜钱三百文",
             "artifacts": "无",
         })
 
