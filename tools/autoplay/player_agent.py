@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 
 import httpx
 
@@ -127,22 +128,31 @@ def _request(messages: list[dict], cfg: dict, temperature: float, max_tokens: in
         headers["authorization"] = f"Bearer {cfg['api_key']}"
         body = _payload(messages, cfg, temperature, max_tokens)
 
-    try:
-        # trust_env 保持开启：访问外部网关通常需要机器代理（本机走 127.0.0.1:7897）。
-        # no_proxy 中带方括号的 IPv6 条目会破坏 httpx 的代理解析，auto_play.py 已在
-        # 启动时清理过；这里再清理一次，保证单独调用本模块时同样安全。
-        _sanitize_no_proxy()
-        with httpx.Client(timeout=timeout, trust_env=True) as client:
-            response = client.post(url, headers=headers, json=body)
-            response.raise_for_status()
-            data = response.json()
-    except httpx.HTTPStatusError as exc:
-        raise PlayerAgentError(
-            f"玩家 Agent 请求失败 HTTP {exc.response.status_code}："
-            f"{exc.response.text[:200]}"
-        ) from exc
-    except (httpx.HTTPError, ValueError) as exc:
-        raise PlayerAgentError(f"玩家 Agent 请求失败：{exc}") from exc
+    # trust_env 保持开启：访问外部网关通常需要机器代理（本机走 127.0.0.1:7897）。
+    # no_proxy 中带方括号的 IPv6 条目会破坏 httpx 的代理解析，auto_play.py 已在
+    # 启动时清理过；这里再清理一次，保证单独调用本模块时同样安全。
+    _sanitize_no_proxy()
+    for attempt in range(3):
+        try:
+            with httpx.Client(timeout=timeout, trust_env=True) as client:
+                response = client.post(url, headers=headers, json=body)
+                response.raise_for_status()
+                data = response.json()
+            break
+        except httpx.HTTPStatusError as exc:
+            retryable = exc.response.status_code == 429 or exc.response.status_code >= 500
+            if retryable and attempt < 2:
+                time.sleep(2 ** attempt)
+                continue
+            raise PlayerAgentError(
+                f"玩家 Agent 请求失败 HTTP {exc.response.status_code}："
+                f"{exc.response.text[:200]}"
+            ) from exc
+        except (httpx.HTTPError, ValueError) as exc:
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+                continue
+            raise PlayerAgentError(f"玩家 Agent 请求失败：{exc}") from exc
 
     try:
         if cfg["protocol"] == "anthropic":
