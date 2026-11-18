@@ -3,6 +3,8 @@ import json
 import unittest
 from unittest.mock import AsyncMock, patch
 
+from fastapi import HTTPException
+
 import main
 
 
@@ -89,6 +91,47 @@ class MainStreamTests(unittest.TestCase):
         self.assertEqual(result["transcript"][-1]["text"], "新正文")
         self.assertEqual(result["director_state"]["event"]["title"], "新事件")
         self.assertEqual((result["turns"], result["version"]), (19, 19))
+
+    def test_manual_state_reconcile_refreshes_temporal_save_first(self):
+        latest = "第 21 回合最新正文"
+        result = {"character_state": {"realm": "炼气一层"}, "updates": {}}
+        with patch.object(main.game, "owned_by", return_value=True), patch.object(
+            main.temporal_service, "enabled", return_value=True
+        ), patch.object(
+            main.run_store, "active_run_summary", AsyncMock(return_value=None)
+        ), patch.object(
+            main.game, "reload_persisted_state"
+        ) as reload_state, patch.object(
+            main.game, "get_transcript",
+            return_value=[{"role": "narration", "text": latest}],
+        ), patch.object(
+            main.game, "reconcile_character_state_from_text",
+            AsyncMock(return_value=result),
+        ) as reconcile:
+            actual = asyncio.run(main.reconcile_character_state(
+                main.SidBody(sid="save-1"), user_id="default"
+            ))
+
+        reload_state.assert_called_once_with("save-1")
+        reconcile.assert_awaited_once_with("save-1", latest)
+        self.assertEqual(actual, result)
+
+    def test_manual_state_reconcile_rejects_active_temporal_turn(self):
+        with patch.object(main.game, "owned_by", return_value=True), patch.object(
+            main.temporal_service, "enabled", return_value=True
+        ), patch.object(
+            main.run_store, "active_run_summary",
+            AsyncMock(return_value={"id": "run-1", "status": "running"}),
+        ), patch.object(
+            main.game, "reload_persisted_state"
+        ) as reload_state:
+            with self.assertRaises(HTTPException) as raised:
+                asyncio.run(main.reconcile_character_state(
+                    main.SidBody(sid="save-1"), user_id="default"
+                ))
+
+        self.assertEqual(raised.exception.status_code, 409)
+        reload_state.assert_not_called()
 
     def test_empty_model_output_is_not_committed(self):
         committed = []

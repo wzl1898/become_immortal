@@ -672,8 +672,18 @@ async def reconcile_character_state(
     body: SidBody,
     user_id: str = Header(alias="X-User-ID"),
 ):
-    if not game.owned_by(body.sid, _user_id(user_id)):
+    user_id = _user_id(user_id)
+    if not game.owned_by(body.sid, user_id):
         raise HTTPException(404, "存档不存在")
+    if temporal_service.enabled():
+        active = await run_store.active_run_summary(body.sid, user_id=user_id)
+        if active:
+            raise HTTPException(409, "当前回合仍在生成，请完成或取消后再校准状态")
+        # Temporal commits from another process. Without this refresh, manual
+        # reconciliation can read an old transcript and overwrite the latest
+        # character state with that stale copy even when the model reports no
+        # changes.
+        game.reload_persisted_state(body.sid)
     transcript = game.get_transcript(body.sid) or []
     latest = next((blk.get("text", "") for blk in reversed(transcript)
                    if blk.get("role") == "narration"), "")
