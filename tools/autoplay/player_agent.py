@@ -17,14 +17,24 @@ import re
 
 import httpx
 
-PROMPT = """你是一个文字冒险游戏的玩家。根据最新一段剧情，决定主角接下来做什么。
+PROMPT = """你是文字冒险游戏的 User Simulator。你的任务不是替玩家寻找理论上的最优解，而是模拟【用户画像】中的真实玩家，根据最新剧情决定下一步走向，并把这个走向表达为一条可直接提交的玩家行动。
 
-要求：
-- 只输出主角要执行的具体行动，一到两句话，直接可执行。
-- 不要解释理由，不要分析局势，不要列出选项，不要输出任何前缀、标题或引号。
-- 行动要具体到人物、地点、物件或动作，避免"继续观察""静观其变"这类空泛表述。
-- 结合主角当前处境和已知信息推进剧情，可以主动试探、交涉、调查或行动。
-- 如果剧情停在悬念处，选择能推动局面明朗的动作。
+# 决策原则
+- 用户画像是选择下一步走向的主要依据，不只是语言风格参考。目标、风险偏好、道德边界、兴趣、社交方式和决策习惯都应实际影响选择。
+- 先判断最新剧情提供了哪些主角当前已知、可接触、可执行的方向，再选择该画像最可能采取的一个方向。
+- 不使用玩家或主角尚不知道的幕后信息，不假定尚未获得的能力、物品、关系或地点。
+- 延续上一轮行动已经体现的意图；但如果剧情出现新的危险、收益或信息，应按照用户画像重新权衡。
+- 不要为了推进主线、触发钩子或提高收益而违背用户画像。谨慎型玩家可以撤退、核实或准备，冒险型玩家可以追击、试探或承担风险。
+- 不重复已经完成或已经明确失败的动作。只有剧情表明继续执行仍会产生新进展，并且符合用户画像时，才可以继续同类行动。
+- 用户画像没有覆盖当前情况时，选择与其已知偏好最接近、承诺成本最低的合理行动，不补造新的性格设定。
+
+# 输出要求
+- 只输出主角下一步要执行的一条具体行动，一到两句话，必须能直接提交给游戏。
+- 行动应尽量包含明确的人物、地点、物件或动作，避免“继续观察”“静观其变”“随机选择”这类空泛表述。
+- 不解释理由，不分析局势，不复述用户画像，不列出备选项，不输出标题、前缀、引号、Markdown 或 JSON。
+
+【用户画像】
+{user_profile}
 
 【当前状态】
 {state}
@@ -145,6 +155,7 @@ def generate_action(
     *,
     state: dict | None = None,
     previous_action: str = "",
+    user_profile: dict | str | None = None,
     temperature: float = 0.9,
     max_tokens: int = 200,
     timeout: float = 60,
@@ -161,7 +172,15 @@ def generate_action(
     if not cfg["base_url"]:
         raise PlayerAgentError("未配置 LLM_BASE_URL（或 PLAYER_LLM_BASE_URL）")
 
+    if isinstance(user_profile, str):
+        rendered_profile = user_profile.strip() or "（未提供用户画像）"
+    else:
+        rendered_profile = json.dumps(
+            user_profile or {}, ensure_ascii=False, separators=(",", ":")
+        )
+
     prompt = PROMPT.format(
+        user_profile=rendered_profile,
         state=json.dumps(state or {}, ensure_ascii=False, indent=None)[:1200],
         previous_action=previous_action or "（暂无，本局刚开始）",
         narrative=narrative or "（暂无正文）",

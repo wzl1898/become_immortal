@@ -52,6 +52,7 @@ JSON 文件，全部字段可选：
 | `wait_timeout` | `180` | 等待后台任务的秒数 |
 | `output` | `reports/autoplay-{ts}.html` | 报告路径，`{ts}` 为时间戳 |
 | `player_agent.model` | `null` | 玩家 Agent 模型，`null` 继承 `LLM_MODEL` |
+| `player_agent.user_profile` | `{}` | 驱动玩家决策的用户画像，可使用 JSON 对象或文本 |
 | `player_agent.temperature` | `0.9` | 采样温度 |
 | `player_agent.max_tokens` | `200` | 输出上限 |
 | `player_agent.timeout` | `60` | 请求超时（秒） |
@@ -71,6 +72,29 @@ export PLAYER_LLM_MODEL=deepseek-v4-flash
 ```
 
 它的调用**不进项目 trace**——trace 记录的是叙事引擎的 Agent，玩家 Agent 属于框架外部。
+
+### 用户画像
+
+`player_agent.user_profile` 决定模拟玩家选择什么方向，而不只是改变输出措辞。画像没有固定
+schema，可以直接写自然语言，也可以使用便于复用和对比的 JSON 对象：
+
+```json
+{
+  "player_agent": {
+    "user_profile": {
+      "core_goal": "稳步修炼并追查已经出现的功法线索",
+      "risk_tolerance": "低",
+      "decision_style": "信息不足时先调查和准备",
+      "moral_boundaries": "不主动伤害无辜者",
+      "interests": ["修炼成长", "探索", "交易"],
+      "social_style": "谨慎试探，不轻信陌生人"
+    }
+  }
+}
+```
+
+模拟器会结合画像、当前结构化状态、上一轮行动和最新剧情，选择画像中的玩家最可能
+采取的一条具体行动。画像未覆盖当前局面时，才采用与已有偏好最接近的低承诺行动。
 
 ## 失败语义
 

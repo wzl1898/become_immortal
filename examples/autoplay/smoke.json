@@ -9,6 +9,14 @@
   "output": "reports/autoplay-smoke-{ts}.html",
   "player_agent": {
     "model": null,
+    "user_profile": {
+      "core_goal": "稳步提升实力，并优先弄清已经出现的线索",
+      "risk_tolerance": "中等偏低，不在信息不足时正面挑战明显更强的对手",
+      "decision_style": "先核实信息，再选择可控且有实际收益的行动",
+      "moral_boundaries": "不主动伤害无辜者",
+      "interests": ["修炼成长", "功法线索", "世界探索"],
+      "social_style": "对陌生人保持戒心，但愿意用交换和试探获取信息"
+    },
     "temperature": 0.9,
     "max_tokens": 200,
     "timeout": 60
