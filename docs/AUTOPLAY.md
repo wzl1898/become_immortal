@@ -18,7 +18,8 @@ python auto_play.py --config examples/autoplay/smoke.json
 python auto_play.py --config examples/autoplay/smoke.json --dry-run
 
 # 命令行覆盖
-python auto_play.py --card orbital --turns 5 --user autoplay -y
+python auto_play.py --card orbital --turns 5 --user autoplay \
+  --profile "这个玩家喜欢探索陌生区域，但遭遇明显危险时会先准备退路。" -y
 ```
 
 报告默认写到 `reports/autoplay-<时间戳>.html`，用浏览器直接打开即可，不需要服务。
@@ -57,7 +58,7 @@ JSON 文件，全部字段可选：
 | `player_agent.max_tokens` | `200` | 输出上限 |
 | `player_agent.timeout` | `60` | 请求超时（秒） |
 
-命令行参数 `--url --user --card --name --turns --output --on-turn-failure` 覆盖同名配置。
+命令行参数 `--url --user --card --name --turns --profile --output --on-turn-failure` 覆盖同名配置。
 `--resume SID` 在已有存档上继续，`-y/--yes` 跳过成本确认，`--dry-run` 只校验配置。
 
 ### 玩家 Agent 的模型配置

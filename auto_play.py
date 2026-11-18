@@ -74,6 +74,9 @@ def parse_args(argv=None):
     parser.add_argument("--card", help="故事卡 id")
     parser.add_argument("--name", help="存档名")
     parser.add_argument("--turns", type=int, help="游玩回合数")
+    parser.add_argument(
+        "--profile", help="玩家自然语言画像，覆盖配置中的 player_agent.user_profile"
+    )
     parser.add_argument("--output", help="报告输出路径，支持 {ts} 占位符")
     parser.add_argument(
         "--on-turn-failure", choices=sorted(config_mod.VALID_FAILURE_MODES),
@@ -112,6 +115,10 @@ def build_config(args) -> config_mod.Config:
     for key, value in overrides.items():
         if value is not None:
             data[key] = value
+    if args.profile is not None:
+        player = dict(data.get("player_agent") or {})
+        player["user_profile"] = args.profile
+        data["player_agent"] = player
     return config_mod.Config(data, args.config or "<cli>")
 
 
