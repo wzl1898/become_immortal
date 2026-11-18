@@ -34,12 +34,61 @@ class MainStreamTests(unittest.TestCase):
         ), patch.object(
             main.run_store, "active_run_summary", AsyncMock(return_value=active)
         ), patch.object(main.store, "exists", return_value=True), patch.object(
+            main.game, "reload_persisted_state"
+        ) as reload_state, patch.object(
             main.game, "get_director_state", return_value={"event": {"summary": "冲突"}}
         ) as get_state, patch.object(main.game, "get_turns", return_value=2):
             result = asyncio.run(main.director("save-1", user_id="default"))
 
         self.assertEqual(result["director_state"]["event"]["summary"], "冲突")
+        reload_state.assert_called_once_with("shadow:run-1")
         get_state.assert_called_once_with("shadow:run-1")
+
+    def test_director_refreshes_canonical_save_after_temporal_commit(self):
+        with patch.object(main, "_require_owned"), patch.object(
+            main.temporal_service, "enabled", return_value=True
+        ), patch.object(
+            main.run_store, "active_run_summary", AsyncMock(return_value=None)
+        ), patch.object(
+            main.game, "reload_persisted_state"
+        ) as reload_state, patch.object(
+            main.game, "get_director_state", return_value={"event": {"title": "新事件"}}
+        ), patch.object(main.game, "get_turns", return_value=19):
+            result = asyncio.run(main.director("save-1", user_id="default"))
+
+        reload_state.assert_called_once_with("save-1")
+        self.assertEqual(result["director_state"]["event"]["title"], "新事件")
+        self.assertEqual(result["turns"], 19)
+
+    def test_load_refreshes_canonical_save_after_temporal_commit(self):
+        persisted = {"turns": 19, "version": 19}
+        with patch.object(main, "_require_owned"), patch.object(
+            main.temporal_service, "enabled", return_value=True
+        ), patch.object(
+            main.run_store, "active_run_summary", AsyncMock(return_value=None)
+        ), patch.object(
+            main.game, "reload_persisted_state"
+        ) as reload_state, patch.object(
+            main.game, "get_transcript", return_value=[{"role": "narration", "text": "新正文"}]
+        ), patch.object(
+            main.game, "get_story_card_info", return_value={}
+        ), patch.object(
+            main.game, "get_character_state", return_value={}
+        ), patch.object(
+            main.game, "get_world_memory", return_value=[]
+        ), patch.object(
+            main.game, "get_inventory", return_value=[]
+        ), patch.object(
+            main.game, "get_director_state", return_value={"event": {"title": "新事件"}}
+        ), patch.object(
+            main.game, "get_world_state", return_value={}
+        ), patch.object(main.store, "load", return_value=persisted):
+            result = asyncio.run(main.load("save-1", user_id="default"))
+
+        reload_state.assert_called_once_with("save-1")
+        self.assertEqual(result["transcript"][-1]["text"], "新正文")
+        self.assertEqual(result["director_state"]["event"]["title"], "新事件")
+        self.assertEqual((result["turns"], result["version"]), (19, 19))
 
     def test_empty_model_output_is_not_committed(self):
         committed = []

@@ -464,6 +464,11 @@ async def load(
     sid: str, user_id: str = Header(alias="X-User-ID")
 ):
     _require_owned(sid, _user_id(user_id))
+    if temporal_service.enabled():
+        # Temporal commits in the Worker process. Refresh the API process's
+        # copy before composing a response so turns, transcript and panels all
+        # come from the same committed save.
+        game.reload_persisted_state(sid)
     transcript = game.get_transcript(sid)
     if transcript is None:
         raise HTTPException(404, "存档不存在")
@@ -740,6 +745,9 @@ async def director(
         shadow_sid = f"shadow:{active['id']}" if active else None
         if shadow_sid and store.exists(shadow_sid):
             observed_sid = shadow_sid
+        # The active shadow and the canonical save are both written by the
+        # separate Worker process, so the API must not reuse an older copy.
+        game.reload_persisted_state(observed_sid)
     state = game.get_director_state(observed_sid)
     if state is None:
         raise HTTPException(404, "存档不存在")

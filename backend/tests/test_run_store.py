@@ -93,6 +93,30 @@ class RunStoreTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(self.run_store.AlreadyCommitted):
             await self.run_store.cancel_run(run["id"], user_id="default")
 
+    async def test_reload_replaces_api_cache_after_worker_commit(self):
+        import game
+
+        game._CACHE.pop(self.sid, None)
+        self.assertEqual(game.get_transcript(self.sid), [])
+
+        run, _ = await self._reserve("cache-refresh")
+        await self.run_store.mark_run_started(run["id"])
+        shadow = f"shadow:{run['id']}"
+        self.store.clone_for_run(self.sid, shadow)
+        branch = self.store.load(shadow)
+        transcript = [{"role": "narration", "text": "第十九回合正文"}]
+        self.store.save_state(shadow, branch["messages"], transcript, 1)
+        self.store.save_director_state(shadow, {"event": {"title": "新事件"}})
+
+        await self.run_store.commit_shadow(run["id"], shadow)
+
+        # Simulate the API process: its old in-memory copy survives the Worker
+        # transaction until a persisted read explicitly replaces it.
+        self.assertEqual(game.get_transcript(self.sid), [])
+        game.reload_persisted_state(self.sid)
+        self.assertEqual(game.get_transcript(self.sid), transcript)
+        self.assertEqual(game.get_director_state(self.sid)["event"]["title"], "新事件")
+
     async def test_commit_preserves_live_shadow_trace_identity(self):
         run, _ = await self._reserve()
         await self.run_store.mark_run_started(run["id"])

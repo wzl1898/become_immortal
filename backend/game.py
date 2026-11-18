@@ -181,19 +181,14 @@ def owned_by(session_id: str, user_id: str) -> bool:
     return store.owned_by(session_id, user_id)
 
 
-def _get(session_id: str) -> dict | None:
-    """取活跃状态，缓存未命中则从库加载。"""
-    if session_id in _CACHE:
-        return _CACHE[session_id]
-    data = store.load(session_id)
-    if data is None:
-        return None
+def _state_from_persisted(session_id: str, data: dict) -> dict:
+    """Build the mutable game state used by the legacy engine from a DB row."""
     # 老存档可能含剧情 Agent 生成的状态面板和灵光提示；它们都不是剧情事实。
     # 喂给模型前仅在内存中剥掉，存档原文保持不变。
     for m in data["messages"]:
         if m.get("role") == "assistant":
             m["content"] = _narrative_history_content(m["content"])
-    _CACHE[session_id] = {
+    return {
         "session_id": session_id,
         "story_card": data["story_card"],
         "messages": data["messages"],
@@ -208,7 +203,28 @@ def _get(session_id: str) -> dict | None:
         "summary_turn": int(data.get("summary_turn") or 0),
         "_injected": [],
     }
+
+
+def reload_persisted_state(session_id: str) -> dict | None:
+    """Replace this process's cached copy with the latest committed DB state.
+
+    Temporal Workers commit in a separate process, so evicting their local
+    cache cannot refresh the API process. Read endpoints use this function at
+    their request boundary after a Workflow may have advanced the save.
+    """
+    data = store.load(session_id)
+    if data is None:
+        _CACHE.pop(session_id, None)
+        return None
+    _CACHE[session_id] = _state_from_persisted(session_id, data)
     return _CACHE[session_id]
+
+
+def _get(session_id: str) -> dict | None:
+    """取活跃状态，缓存未命中则从库加载。"""
+    if session_id in _CACHE:
+        return _CACHE[session_id]
+    return reload_persisted_state(session_id)
 
 
 def get_transcript(session_id: str) -> list[dict] | None:
