@@ -8,6 +8,7 @@ const userError = document.getElementById("user-error");
 const form = document.getElementById("input-form");
 const input = document.getElementById("action");
 const sendBtn = document.getElementById("send");
+const cancelRunBtn = document.getElementById("cancel-run");
 const voiceInputBtn = document.getElementById("voice-input");
 const restartBtn = document.getElementById("restart");
 const savesBtn = document.getElementById("saves-btn");
@@ -178,6 +179,9 @@ let currentName = "";
 let busy = false;
 let characterState = {};
 let narrativeObjects = "";
+let saveTurn = 0;
+let saveVersion = 0;
+let currentGeneration = null;
 let traceCursor = 0;
 let traceRefreshActive = false;
 let traceSession = null;
@@ -445,13 +449,14 @@ async function refreshAgentTraces() {
 }
 
 // ---- SSE 流式 ----
-async function streamSSE(url, onDelta, options = {}, onStage = null) {
+async function streamSSE(url, onDelta, options = {}, onStage = null, handlers = {}) {
   const resp = await apiFetch(url, options);
   if (!resp.ok) {
     let msg = `请求失败 ${resp.status}`;
     try { msg = (await resp.json()).detail || msg; } catch (_) {}
     throw new Error(msg);
   }
+  if (handlers.onRun) handlers.onRun(resp.headers.get("X-Run-ID"));
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -467,7 +472,14 @@ async function streamSSE(url, onDelta, options = {}, onStage = null) {
       if (!evt) continue;
       if (evt.event === "delta") onDelta(evt.data.text);
       else if (evt.event === "stage" && onStage) onStage(evt.data);
+      else if (evt.event === "reset" && handlers.onReset) handlers.onReset(evt.data);
       else if (evt.event === "done") doneData = evt.data;
+      else if (evt.event === "canceled") {
+        const error = new Error("当前回合已取消");
+        error.name = "RunCanceledError";
+        error.data = evt.data;
+        throw error;
+      }
       else if (evt.event === "error") throw new Error(evt.data.message);
     }
   }
@@ -632,10 +644,19 @@ function renderNarration(full) {
   if (hint) addBlock("hint", hint);
 }
 
-async function narrate(url, options = {}) {
+async function narrate(url, options = {}, pendingAction = null) {
   const block = addBlock("narration cursor");
   let hintBlock = null;
   let full = "";
+  const controller = new AbortController();
+  const generation = {
+    runId: null,
+    controller,
+    action: pendingAction?.text || "",
+    playerBlock: pendingAction?.block || null,
+    narrativeBlock: block,
+  };
+  currentGeneration = generation;
   if (url.includes("opening")) startLiveLLMRequest("story", "opening");
   try {
     const done = await streamSSE(url, (text) => {
@@ -648,22 +669,42 @@ async function narrate(url, options = {}) {
         hintBlock.textContent = hint;
       }
       storyEl.scrollTop = storyEl.scrollHeight;
-    }, options, (stage) => {
+    }, { ...options, signal: controller.signal }, (stage) => {
       if (!full) block.textContent = `〔${stage.label || "正在准备"}〕`;
       if (stage.key === "director") startLiveLLMRequest("story", "director_plan");
       else if (stage.key === "narrative") startLiveLLMRequest("story", "narrative");
+    }, {
+      onRun: (runId) => {
+        generation.runId = runId;
+        if (runId) cancelRunBtn.classList.remove("hidden");
+      },
+      onReset: () => {
+        full = "";
+        block.textContent = "";
+        if (hintBlock) {
+          hintBlock.remove();
+          hintBlock = null;
+        }
+      },
     });
     // 流结束：状态只采用状态校准 Agent写入后端的结构化快照。
     if (done && done.character_state) renderCharacterState(done.character_state);
     if (done && done.inventory) renderColdItems(done.inventory);
     if (done && done.world_state) renderConstraint(done.world_state);
     if (done && done.director_state) renderDirector(done.director_state, done.character_state?.turn || 0);
+    if (done && Number.isInteger(done.turn)) saveTurn = done.turn;
+    if (done && Number.isInteger(done.version)) saveVersion = done.version;
+    return done;
   } catch (e) {
     block.remove();
     if (hintBlock) hintBlock.remove();
-    addBlock("error", `【出错】${e.message}`);
+    if (e.name !== "RunCanceledError" && e.name !== "AbortError") {
+      addBlock("error", `【出错】${e.message}`);
+    }
     throw e;
   } finally {
+    if (currentGeneration === generation) currentGeneration = null;
+    cancelRunBtn.classList.add("hidden");
     stopLiveLLMRequest("story");
     refreshLLMMetrics({ quiet: true });
     block.classList.remove("cursor");
@@ -689,7 +730,10 @@ async function newGame(storyCardId) {
     worldMemory = [];
     renderCharacterState(data.character_state);
     renderConstraint(data.world_state);
-    await narrate(`/api/opening?sid=${sessionId}`);
+    saveTurn = Number(data.turns) || 0;
+    saveVersion = Number(data.version) || 0;
+    const requestId = crypto.randomUUID();
+    await narrate(`/api/opening?sid=${sessionId}&client_request_id=${encodeURIComponent(requestId)}&base_turn=${saveTurn}&base_version=${saveVersion}`);
   } catch (e) {
     if (!created) storyCardError.textContent = `创建失败：${e.message}`;
     // narrate displays generation errors; the new save remains available to retry.
@@ -707,6 +751,8 @@ async function loadGame(sid, name) {
     setCurrent(sid, name);
     worldMemory = data.world_memory || data.lore || [];
     renderConstraint(data.world_state || null);
+    saveTurn = Number(data.turns) || 0;
+    saveVersion = Number(data.version) || 0;
     storyEl.innerHTML = "";
     clearStatus();
     renderCharacterState(data.character_state);
@@ -719,8 +765,21 @@ async function loadGame(sid, name) {
     if (data.inventory) renderColdItems(data.inventory);
     closeDrawer();
     // 空局（尚未落笔）：直接让 AI 生成开场，而不是停在占位文字上
-    if (!data.transcript.length) {
-      await narrate(`/api/opening?sid=${sid}`);
+    if (data.active_run) {
+      let pending = null;
+      if (data.active_run.action) {
+        const block = addBlock("player", data.active_run.action);
+        pending = { text: data.active_run.action, block };
+      }
+      try {
+        await narrate(`/api/runs/${data.active_run.id}/events`, {}, pending);
+      } catch (error) {
+        if (pending?.block) pending.block.remove();
+        if (pending?.text) input.value = pending.text;
+      }
+    } else if (!data.transcript.length) {
+      const requestId = crypto.randomUUID();
+      await narrate(`/api/opening?sid=${sid}&client_request_id=${encodeURIComponent(requestId)}&base_turn=${saveTurn}&base_version=${saveVersion}`);
     }
   } catch (e) {
     addBlock("error", `【出错】${e.message}`);
@@ -734,18 +793,45 @@ form.addEventListener("submit", async (e) => {
   const text = input.value.trim();
   if (!text || busy || !sessionId) return;
   input.value = "";
-  addBlock("player", text);
+  const playerBlock = addBlock("player", text);
   setBusy(true);
   try {
     await narrate("/api/action", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sid: sessionId, text }),
-    });
+      body: JSON.stringify({
+        sid: sessionId,
+        text,
+        client_request_id: crypto.randomUUID(),
+        base_turn: saveTurn,
+        base_version: saveVersion,
+      }),
+    }, { text, block: playerBlock });
   } catch (_) {
-    // 已展示
+    playerBlock.remove();
+    input.value = text;
   } finally {
     setBusy(false);
+  }
+});
+
+cancelRunBtn.addEventListener("click", async () => {
+  const generation = currentGeneration;
+  if (!generation?.runId || cancelRunBtn.disabled) return;
+  cancelRunBtn.disabled = true;
+  try {
+    await fetchJSON(`/api/runs/${generation.runId}/cancel`, { method: "POST" });
+    generation.controller.abort();
+    generation.narrativeBlock?.remove();
+    generation.playerBlock?.remove();
+    if (generation.action) input.value = generation.action;
+    currentGeneration = null;
+    cancelRunBtn.classList.add("hidden");
+    setBusy(false);
+  } catch (error) {
+    addBlock("error", `【取消失败】${error.message}`);
+  } finally {
+    cancelRunBtn.disabled = false;
   }
 });
 

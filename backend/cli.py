@@ -7,9 +7,12 @@ import math
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
 import tempfile
+import time
+import uuid
 from urllib.parse import urlsplit
 
 if __package__:
@@ -46,6 +49,15 @@ API_ALIASES = {
     ("GET", "/api/inquiry"),
     ("GET", "/api/lore"),
     ("POST", "/api/lore/delete"),
+    # Dynamic run routes have dedicated ``runs`` commands (or are the SSE
+    # transport used by play), so they cannot be represented in ENDPOINTS.
+    ("POST", "/api/runs"),
+    ("GET", "/api/runs"),
+    ("GET", "/api/runs/{run_id}"),
+    ("GET", "/api/runs/{run_id}/nodes"),
+    ("GET", "/api/runs/{run_id}/events"),
+    ("POST", "/api/runs/{run_id}/cancel"),
+    ("POST", "/api/runs/{run_id}/rerun"),
 }
 
 
@@ -150,6 +162,10 @@ def parser():
                 "--wait", action="store_true", help="完成生成后等待后台任务结束"
             )
             command.add_argument("--wait-timeout", type=positive, default=120)
+            if operation[1] in {"opening", "action"}:
+                command.add_argument("--client-request-id")
+                command.add_argument("--base-turn", type=nonnegative)
+                command.add_argument("--base-version", type=nonnegative)
         elif operation == ("traces",):
             command.add_argument("--turn", type=nonnegative)
             command.add_argument("--limit", type=nonnegative, default=100)
@@ -192,6 +208,24 @@ def parser():
     inputs.add_argument("--body", help="JSON 请求体")
     inputs.add_argument("--body-file", help="JSON 文件；- 表示 stdin")
     command.add_argument("--query", action="append", default=[], metavar="KEY=VALUE")
+    command = leaf(("runs", "list"), "列出存档的持久执行")
+    command.add_argument("sid")
+    command.add_argument("--limit", type=nonnegative, default=50)
+    command = leaf(("runs", "show"), "读取一个持久执行")
+    command.add_argument("run_id")
+    command = leaf(("runs", "nodes"), "读取执行的节点与状态")
+    command.add_argument("run_id")
+    command = leaf(("runs", "cancel"), "取消尚未提交的执行")
+    command.add_argument("run_id")
+    command = leaf(("runs", "rerun"), "从指定节点创建 debug 分支")
+    command.add_argument("run_id")
+    command.add_argument("node_key")
+    command.add_argument("--mode", choices=("original", "current"), default="current")
+    command = leaf(("db", "import-sqlite"), "离线导入 SQLite 到 PostgreSQL")
+    command.add_argument("path")
+    import_mode = command.add_mutually_exclusive_group(required=True)
+    import_mode.add_argument("--dry-run", action="store_true")
+    import_mode.add_argument("--apply", action="store_true")
     command = leaf(("run",), "顺序运行 JSON 测试场景，等待后台任务并在首个失败处停止")
     command.add_argument("file", help="场景文件；- 表示 stdin")
     command.add_argument("--wait-timeout", type=positive, default=120)
@@ -412,6 +446,10 @@ def local_command(args):
         if result.returncode:
             raise CLIError("项目测试失败", 7, "tests", returncode=result.returncode)
         return {"ok": True, "pattern": args.pattern}
+    if operation == ("db", "import-sqlite"):
+        import import_sqlite
+
+        return import_sqlite.run(Path(args.path), apply=args.apply)
     if operation == ("serve",):
         if not 1 <= args.port <= 65535:
             raise CLIError("端口必须为 1–65535")
@@ -432,14 +470,56 @@ def local_command(args):
         ):
             if key in os.environ:
                 os.environ[key] = os.environ[key].replace("socks5h://", "socks5://")
-        import uvicorn
+        temporal_enabled = os.getenv("TEMPORAL_ENABLED", "0").lower() in {
+            "1", "true", "yes", "on"
+        }
+        if not temporal_enabled:
+            import uvicorn
 
-        # Keep stdout exclusively for CLI JSON; application logs go to stderr.
-        with contextlib.redirect_stdout(sys.stderr):
-            uvicorn.run(
-                "main:app", host=args.host, port=args.port, timeout_graceful_shutdown=3
+            with contextlib.redirect_stdout(sys.stderr):
+                uvicorn.run(
+                    "main:app", host=args.host, port=args.port, timeout_graceful_shutdown=3
+                )
+            return {"stopped": True}
+
+        env = os.environ.copy()
+        api = subprocess.Popen(
+            [
+                sys.executable, "-m", "uvicorn", "main:app", "--host", args.host,
+                "--port", str(args.port), "--timeout-graceful-shutdown", "3",
+            ],
+            cwd=ROOT / "backend",
+            env=env,
+            stdout=sys.stderr,
+            stderr=sys.stderr,
+        )
+        worker = subprocess.Popen(
+            [sys.executable, "worker.py"],
+            cwd=ROOT / "backend",
+            env=env,
+            stdout=sys.stderr,
+            stderr=sys.stderr,
+        )
+        children = (api, worker)
+        try:
+            while all(process.poll() is None for process in children):
+                time.sleep(0.2)
+            failed = next(process for process in children if process.poll() is not None)
+            raise CLIError(
+                f"服务子进程退出：pid={failed.pid}, code={failed.returncode}",
+                7,
+                "service_exit",
             )
-        return {"stopped": True}
+        finally:
+            for process in children:
+                if process.poll() is None:
+                    process.send_signal(signal.SIGTERM)
+            for process in children:
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
     raise CLIError("未知本地命令")
 
 
@@ -486,6 +566,22 @@ def remote_command(client, args, emit):
             else None
         )
         return client.request(args.method, args.path, params=query, body=body)
+    if operation == ("runs", "list"):
+        return client.request(
+            "GET", "/api/runs", params={"sid": args.sid, "limit": args.limit}
+        )
+    if operation == ("runs", "show"):
+        return client.request("GET", f"/api/runs/{args.run_id}")
+    if operation == ("runs", "nodes"):
+        return client.request("GET", f"/api/runs/{args.run_id}/nodes")
+    if operation == ("runs", "cancel"):
+        return client.request("POST", f"/api/runs/{args.run_id}/cancel")
+    if operation == ("runs", "rerun"):
+        return client.request(
+            "POST",
+            f"/api/runs/{args.run_id}/rerun",
+            body={"node_key": args.node_key, "mode": args.mode},
+        )
     method, path = ENDPOINTS[operation]
     params = {"sid": args.sid} if hasattr(args, "sid") else {}
     body = None
@@ -498,10 +594,39 @@ def remote_command(client, args, emit):
         elif operation == ("memory", "delete"):
             body["index"] = args.index
     if operation[0] == "play":
+        generate_params = None
         if operation[1] != "opening":
             body["q" if operation[1] == "inquiry" else "text"] = input_text(args)
+        if operation[1] in {"opening", "action"}:
+            if args.base_turn is None or args.base_version is None:
+                loaded = client.request("GET", "/api/load", params={"sid": args.sid})
+            else:
+                loaded = {}
+            base_turn = args.base_turn if args.base_turn is not None else loaded.get("turns", 0)
+            base_version = (
+                args.base_version if args.base_version is not None else loaded.get("version", 0)
+            )
+            request_id = args.client_request_id or uuid.uuid4().hex
+            if operation[1] == "opening":
+                generate_params = {
+                    "sid": args.sid,
+                    "client_request_id": request_id,
+                    "base_turn": base_turn,
+                    "base_version": base_version,
+                }
+            else:
+                body.update(
+                    client_request_id=request_id,
+                    base_turn=base_turn,
+                    base_version=base_version,
+                )
         result = client.generate(
-            method, path, sid=args.sid, body=body, emit=emit if args.stream else None
+            method,
+            path,
+            sid=args.sid,
+            body=body,
+            params=generate_params,
+            emit=emit if args.stream else None,
         )
         if args.wait:
             result["jobs"] = client.wait(args.sid, args.wait_timeout)
@@ -558,7 +683,7 @@ def main(argv=None):
         def emit(frame):
             print(json.dumps(frame, ensure_ascii=False), file=sink, flush=True)
 
-        local = args.operation[0] in {"prompts", "serve", "test"} or args.operation in {
+        local = args.operation[0] in {"prompts", "serve", "test", "db"} or args.operation in {
             ("cards", "show"),
             ("cards", "validate"),
         }

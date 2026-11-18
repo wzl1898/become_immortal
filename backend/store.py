@@ -16,6 +16,8 @@ import sqlite3
 import time
 import uuid
 
+import db
+
 import story_cards
 
 DATA_DIR = os.path.abspath(
@@ -27,15 +29,102 @@ DEFAULT_WORLD_SEASON = story_cards.get()["initial"]["time"]["season"]
 DEFAULT_CALENDAR_LABEL = story_cards.get()["initial"]["time"]["calendar_label"]
 
 
-def _conn() -> sqlite3.Connection:
+class _PostgresCursor:
+    def __init__(self, cursor, *, lastrowid=None):
+        self._cursor = cursor
+        self.lastrowid = lastrowid
+
+    @property
+    def rowcount(self):
+        return self._cursor.rowcount
+
+    def fetchone(self):
+        return self._cursor.fetchone()
+
+    def fetchall(self):
+        return self._cursor.fetchall()
+
+    def __iter__(self):
+        return iter(self._cursor)
+
+
+class _PostgresConnection:
+    """Small sqlite3-compatible facade for the established store API."""
+
+    def __init__(self):
+        import psycopg
+        from psycopg.rows import dict_row
+
+        url = db.sync_database_url().replace("postgresql+psycopg://", "postgresql://", 1)
+        self._connection = psycopg.connect(url, row_factory=dict_row)
+
+    @staticmethod
+    def _sql(sql: str) -> str:
+        query = sql.replace("?", "%s")
+        query = re.sub(r"\bORDER BY rowid\b", "ORDER BY id", query, flags=re.I)
+        if re.search(r"^\s*INSERT\s+OR\s+IGNORE\s+INTO\s", query, flags=re.I):
+            query = re.sub(
+                r"^(\s*)INSERT\s+OR\s+IGNORE\s+INTO\s",
+                r"\1INSERT INTO ",
+                query,
+                flags=re.I,
+            ).rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
+        return query
+
+    def execute(self, sql: str, params=()):
+        query = self._sql(sql)
+        wants_id = bool(
+            re.search(r"^\s*INSERT\s+INTO\s+agent_traces\b", query, flags=re.I)
+            and "RETURNING" not in query.upper()
+        )
+        if wants_id:
+            query = query.rstrip().rstrip(";") + " RETURNING id"
+        cursor = self._connection.cursor()
+        cursor.execute(query, params)
+        lastrowid = None
+        if wants_id:
+            returned = cursor.fetchone()
+            lastrowid = returned["id"] if returned else None
+        return _PostgresCursor(cursor, lastrowid=lastrowid)
+
+    def executemany(self, sql: str, params):
+        cursor = self._connection.cursor()
+        cursor.executemany(self._sql(sql), params)
+        return _PostgresCursor(cursor)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        try:
+            if exc_type is None:
+                self._connection.commit()
+            else:
+                self._connection.rollback()
+        finally:
+            self._connection.close()
+
+
+def _conn() -> sqlite3.Connection | _PostgresConnection:
+    if db.is_postgres():
+        return _PostgresConnection()
     os.makedirs(DATA_DIR, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
 
 def init() -> None:
     """建表（幂等），并对老库补齐新列。"""
+    if db.is_postgres():
+        db.metadata.create_all(bind=db.make_sync_engine())
+        with _conn() as conn:
+            _seed_world(conn)
+            _migrate_story_cards(conn)
+            _migrate_lore_to_world_memory(conn)
+            _migrate_character_state(conn)
+        return
     with _conn() as conn:
         conn.execute(
             """
@@ -85,6 +174,10 @@ def init() -> None:
             conn.execute(
                 "ALTER TABLE saves ADD COLUMN story_card TEXT NOT NULL DEFAULT '{}'"
             )
+        if "version" not in cols:
+            conn.execute("ALTER TABLE saves ADD COLUMN version INTEGER NOT NULL DEFAULT 0")
+        if "active_run_id" not in cols:
+            conn.execute("ALTER TABLE saves ADD COLUMN active_run_id TEXT")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_saves_user_updated "
             "ON saves(user_id, updated_at DESC)"
@@ -1242,9 +1335,194 @@ def load(sid: str) -> dict | None:
         "director_state": json.loads(row["director_state"] or "{}"),
         "stage_summary": row["stage_summary"] or "",
         "summary_turn": int(row["summary_turn"] or 0),
+        "version": int(row["version"] or 0) if "version" in row.keys() else 0,
+        "active_run_id": row["active_run_id"] if "active_run_id" in row.keys() else None,
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
+
+
+def clone_for_run(sid: str, shadow_sid: str) -> None:
+    """Create a private branch save used by one Temporal execution.
+
+    The branch is deliberately a full save because the existing constraint and
+    director code reads several normalized world-state tables. It is never
+    listed for a real user and can be discarded after snapshots are durable.
+    """
+    now = time.time()
+    save_columns = (
+        "name, messages, transcript, turns, lore, character_state, world_memory, "
+        "world_entities, inventory, director_state, stage_summary, summary_turn, "
+        "story_card"
+    )
+    with _conn() as conn:
+        existing = conn.execute("SELECT 1 FROM saves WHERE id=?", (shadow_sid,)).fetchone()
+        if existing is not None:
+            return
+        conn.execute(
+            f"""
+            INSERT INTO saves (
+                id, user_id, {save_columns}, version, active_run_id, created_at, updated_at
+            )
+            SELECT ?, '__execution__', {save_columns}, 0, NULL, ?, ?
+            FROM saves WHERE id=?
+            """,
+            (shadow_sid, now, now, sid),
+        )
+        if conn.execute("SELECT 1 FROM saves WHERE id=?", (shadow_sid,)).fetchone() is None:
+            raise ValueError("存档不存在")
+        copy_specs = (
+            (
+                "save_player_location",
+                "region_id, location_id, site_name, location_state, intended_destination_id, lost_risk, updated_at",
+            ),
+            (
+                "save_world_time",
+                "day, minute_of_day, season, calendar_label, updated_at",
+            ),
+            (
+                "save_player_knowledge",
+                "knowledge_type, target_id, status, reliability, source, detail_level, notes, created_at, updated_at",
+            ),
+            (
+                "save_opportunity_states",
+                "opportunity_id, state, notes, updated_at",
+            ),
+            (
+                "save_realm_states",
+                "realm_id, state, notes, updated_at",
+            ),
+        )
+        for table, columns in copy_specs:
+            conn.execute(
+                f"INSERT INTO {table} (save_id, {columns}) "
+                f"SELECT ?, {columns} FROM {table} WHERE save_id=?",
+                (shadow_sid, sid),
+            )
+        conn.execute(
+            """
+            INSERT INTO save_opportunity_rewards (
+                payoff_id, save_id, opportunity_id, reward_kind, reward_id,
+                status, created_turn, triggered_turn, updated_at
+            )
+            SELECT payoff_id || ':' || ?, ?, opportunity_id, reward_kind, reward_id,
+                   status, created_turn, triggered_turn, updated_at
+            FROM save_opportunity_rewards WHERE save_id=?
+            """,
+            (shadow_sid, shadow_sid, sid),
+        )
+
+
+def delete_run_clone(shadow_sid: str) -> None:
+    with _conn() as conn:
+        for table in (
+            "save_opportunity_rewards",
+            "save_realm_states",
+            "save_opportunity_states",
+            "save_player_knowledge",
+            "save_world_time",
+            "save_player_location",
+            "llm_request_metrics",
+            "agent_traces",
+        ):
+            conn.execute(f"DELETE FROM {table} WHERE save_id=?", (shadow_sid,))
+        conn.execute("DELETE FROM saves WHERE id=?", (shadow_sid,))
+
+
+def restore_run_clone(shadow_sid: str, snapshot: dict) -> None:
+    """Restore a branch save from a ledger snapshot for a debug rerun."""
+    save = snapshot.get("save") if isinstance(snapshot, dict) else None
+    world = snapshot.get("world") if isinstance(snapshot, dict) else None
+    if not isinstance(save, dict):
+        raise ValueError("快照缺少 save 状态")
+    encoded = lambda key, default: json.dumps(  # noqa: E731
+        save.get(key, default), ensure_ascii=False
+    )
+    with _conn() as conn:
+        conn.execute(
+            """
+            UPDATE saves SET messages=?, transcript=?, turns=?, lore=?,
+                character_state=?, world_memory=?, world_entities=?, inventory=?,
+                director_state=?, stage_summary=?, summary_turn=?, updated_at=?
+            WHERE id=?
+            """,
+            (
+                encoded("messages", []),
+                encoded("transcript", []),
+                int(save.get("turns") or 0),
+                encoded("lore", []),
+                encoded("character_state", {}),
+                encoded("world_memory", []),
+                encoded("world_entities", {}),
+                encoded("inventory", []),
+                encoded("director_state", {}),
+                str(save.get("stage_summary") or ""),
+                int(save.get("summary_turn") or 0),
+                time.time(),
+                shadow_sid,
+            ),
+        )
+        if not isinstance(world, dict):
+            return
+        location = world.get("location")
+        if isinstance(location, dict):
+            conn.execute(
+                """
+                UPDATE save_player_location SET region_id=?, location_id=?, site_name=?,
+                    location_state=?, intended_destination_id=?, lost_risk=?, updated_at=?
+                WHERE save_id=?
+                """,
+                (
+                    location.get("region_id"),
+                    location.get("location_id"),
+                    location.get("site_name") or "",
+                    location.get("location_state") or "安全",
+                    location.get("intended_destination_id"),
+                    location.get("lost_risk") or "无",
+                    time.time(),
+                    shadow_sid,
+                ),
+            )
+        clock = world.get("time")
+        if isinstance(clock, dict):
+            conn.execute(
+                """
+                UPDATE save_world_time SET day=?, minute_of_day=?, season=?,
+                    calendar_label=?, updated_at=? WHERE save_id=?
+                """,
+                (
+                    int(clock.get("day") or 1),
+                    int(clock.get("minute_of_day") or 0),
+                    clock.get("season") or "",
+                    clock.get("calendar_label") or "",
+                    time.time(),
+                    shadow_sid,
+                ),
+            )
+        knowledge = world.get("knowledge")
+        if isinstance(knowledge, list):
+            conn.execute("DELETE FROM save_player_knowledge WHERE save_id=?", (shadow_sid,))
+            for item in knowledge:
+                conn.execute(
+                    """
+                    INSERT INTO save_player_knowledge (
+                        save_id, knowledge_type, target_id, status, reliability,
+                        source, detail_level, notes, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        shadow_sid,
+                        item.get("knowledge_type"),
+                        item.get("target_id"),
+                        item.get("status"),
+                        item.get("reliability") or "medium",
+                        item.get("source") or "",
+                        item.get("detail_level") or "",
+                        item.get("notes") or "",
+                        float(item.get("created_at") or time.time()),
+                        float(item.get("updated_at") or time.time()),
+                    ),
+                )
 
 
 def exists(sid: str) -> bool:

@@ -1111,7 +1111,13 @@ async def run_inquiry_react(
     raise RuntimeError("问询 Agent 超过记忆搜索次数上限")
 
 
-async def commit(session_id: str, user_content: str | None, assistant_content: str) -> None:
+async def commit(
+    session_id: str,
+    user_content: str | None,
+    assistant_content: str,
+    *,
+    durable_postprocessing: bool = False,
+) -> None:
     """把一轮对话写入会话历史 + transcript，并落盘。
 
     开场时 user_content 传 None：LLM 历史里放占位以保持交替，
@@ -1174,9 +1180,50 @@ async def commit(session_id: str, user_content: str | None, assistant_content: s
     store.save_opportunity_reward_binding(
         session_id, (state.get("director_state") or {}).get("last_payoff")
     )
-    _schedule_memory_extraction(session_id, user_content, assistant_content, state["turns"])
-    _schedule_director_audit(session_id, user_content, assistant_content, state["turns"])
-    _schedule_narrative_observer(session_id, user_content, assistant_content, state["turns"])
+    if durable_postprocessing:
+        await _run_durable_postprocessing(
+            session_id, user_content, assistant_content, state["turns"]
+        )
+    else:
+        _schedule_memory_extraction(session_id, user_content, assistant_content, state["turns"])
+        _schedule_director_audit(session_id, user_content, assistant_content, state["turns"])
+        _schedule_narrative_observer(session_id, user_content, assistant_content, state["turns"])
+
+
+async def _run_durable_postprocessing(
+    session_id: str,
+    user_content: str | None,
+    assistant_content: str,
+    turn: int,
+) -> None:
+    """Run every state-affecting postprocessor before a Temporal CAS commit."""
+    state = _CACHE.get(session_id)
+    plan = copy.deepcopy(
+        ((state or {}).get("director_state") or {}).get("current_plan")
+    )
+    if isinstance(plan, dict):
+        event = ((state or {}).get("director_state") or {}).get("event") or {}
+        plan["event_end_condition"] = event.get("end_condition", "")
+        plan["event_core"] = event.get("core", "")
+    await _extract_and_store_memory(session_id, user_content, assistant_content, turn)
+    if isinstance(plan, dict):
+        await _run_director_audit(
+            session_id, user_content, assistant_content, turn, plan
+        )
+    await _run_narrative_observer(
+        session_id, user_content, assistant_content, turn
+    )
+
+
+async def wait_for_preparation_tasks(session_id: str) -> None:
+    """Wait for causal/next-event work spawned while preparing a durable turn."""
+    tasks = [
+        task
+        for task, info in list(background._TASKS.items())
+        if info.get("session_id") == session_id and not task.done()
+    ]
+    if tasks:
+        await asyncio.gather(*tasks)
 
 
 def rollback_prepared_action(session_id: str) -> None:
@@ -2706,32 +2753,44 @@ async def _call_director_agent(
     trace_turn = int((state or {}).get("turns") or 0) + 1
     result = None
     reason = ""
-    try:
-        raw = await asyncio.wait_for(
-            complete_chat(
-                messages,
-                temperature=0.25,
-                max_tokens=max_tokens,
-                config=DIRECTOR_LLM_CONFIG,
-                request_type=request_type,
-                session_id=session_id,
-                turn=trace_turn,
-            ),
-            timeout=DIRECTOR_PLANNER_TIMEOUT_SECONDS,
-        )
-        result = _extract_json_object(raw)
-        if result is None:
+    attempts = 0
+    for attempt in range(1, 4):
+        attempts = attempt
+        try:
+            raw = await asyncio.wait_for(
+                complete_chat(
+                    messages,
+                    temperature=0.25,
+                    max_tokens=max_tokens,
+                    config=DIRECTOR_LLM_CONFIG,
+                    request_type=request_type,
+                    session_id=session_id,
+                    turn=trace_turn,
+                ),
+                timeout=DIRECTOR_PLANNER_TIMEOUT_SECONDS,
+            )
+            result = _extract_json_object(raw)
+            if result is not None:
+                break
             reason = "invalid_json"
-    except asyncio.TimeoutError:
-        reason = "timeout"
-        _LOG.warning("%s timed out after %ss; using fallback", request_type, DIRECTOR_PLANNER_TIMEOUT_SECONDS)
-    except Exception as exc:  # noqa: BLE001
-        reason = type(exc).__name__
-        _LOG.exception("%s failed", request_type)
+        except asyncio.TimeoutError:
+            reason = "timeout"
+        except Exception as exc:  # noqa: BLE001
+            reason = type(exc).__name__
+        if attempt < 3:
+            await asyncio.sleep(2 ** (attempt - 1))
+    if result is None:
+        _LOG.warning(
+            "%s exhausted %s attempts (%s); using fallback",
+            request_type,
+            attempts,
+            reason,
+        )
     return result, {
         "source": "llm" if result is not None else "fallback",
         "model": DIRECTOR_LLM_CONFIG.model if result is not None else "local",
         "fallback_reason": reason,
+        "attempts": attempts,
     }
 
 

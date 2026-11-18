@@ -390,6 +390,18 @@ html, body {
 }
 #send:disabled { opacity: 0.4; cursor: default; }
 #send:not(:disabled):hover { background: var(--accent-soft); }
+.cancel-run {
+  flex: none;
+  border: 1px solid var(--danger);
+  background: transparent;
+  color: var(--danger);
+  padding: 0 16px;
+  border-radius: 8px;
+  cursor: pointer;
+  font: inherit;
+}
+.cancel-run:hover { background: rgba(196, 110, 110, 0.1); }
+.cancel-run:disabled { opacity: 0.45; cursor: default; }
 
 .actions { display: flex; align-items: center; gap: 10px; }
 .user-btn { color: var(--player); max-width: 112px; overflow: hidden;
@@ -429,6 +441,7 @@ html, body {
   #action { min-width: 0; height: 44px; padding: 10px 12px; border-radius: 8px; }
   .voice-input { min-width: 58px; height: 44px; padding: 0 8px; font-size: 12px; }
   #send { flex: none; height: 44px; padding: 0 16px; border-radius: 8px; }
+  .cancel-run { height: 44px; padding: 0 12px; }
 }
 
 /* 抽屉 */

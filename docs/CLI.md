@@ -53,6 +53,12 @@ sid=$(python3 -c 'import json; print(json.load(open("/tmp/new-story.json"))["ses
 | `tokens SID` | 模型 token 总量与 Agent 分组统计 |
 | `jobs show SID` | 当前存档正在运行的后台任务 |
 | `jobs wait SID [--wait-timeout SECONDS] [--interval SECONDS]` | 有界等待后台任务结束 |
+| `runs list SID` | 列出存档的持久回合执行 |
+| `runs show RUN_ID` | 读取执行状态、错误和 Temporal 标识 |
+| `runs nodes RUN_ID` | 读取逻辑节点及重试结果 |
+| `runs cancel RUN_ID` | 取消尚未提交的回合并立即释放输入 |
+| `runs rerun RUN_ID NODE_KEY [--mode original\|current]` | 从节点快照创建不提交存档的调试分支 |
+| `db import-sqlite PATH --dry-run\|--apply` | 校验或导入旧 SQLite 数据库 |
 | `prompts list` | 本地通用模板与必需变量清单 |
 | `prompts show NAME` | 模板原文 |
 | `prompts render NAME --vars JSON` | 严格变量替换；支持 `--vars-file PATH` 或 `-` 读取 stdin |
@@ -81,7 +87,8 @@ printf '%s\n' '查看记录中的 $() 和 `符号`' | ./story play action "$sid"
 - `--output` 将结果写到指定文件，结束时替换目标文件；失败时写入错误对象。流式实时消费请使用 stdout 重定向，而非 `--output`。
 - 参数错误、HTTP 错误和生成错误在 stderr 输出 `{"error":{"type":"…","message":"…"}}`。默认非流式失败不会把部分正文输出成成功结果。
 - `serve` 与 `test` 的日志也写 stderr；这两类命令的 stderr 包含人类可读诊断。
-- CLI 不自动重试写操作。连接中断或等待超时时，已经完成的写入不会回滚，应先 `saves load SID`、`jobs show SID`、`traces SID` 确认状态，再决定是否重试。
+- 开场和行动会自动携带 `client_request_id`；SSE 断线后 CLI 使用持久事件 ID 续传，不会重复创建回合。显式重试时也可传入原 `--client-request-id`。
+- 连接中断或等待超时时，应先使用 `saves load SID`、`jobs show SID`、`runs list SID` 确认状态；不要用新的 request ID 盲目重提同一行动。
 - `--timeout` 默认 120 秒，是 HTTP 读取超时；`--wait-timeout` 默认 120 秒，是后台等待的总时限。
 - HTTP 客户端忽略机器的代理环境变量。内网服务请先通过 `lumier-relay` 建立本地转发，再将 `--url` 指向本地端口。
 
@@ -96,7 +103,7 @@ printf '%s\n' '查看记录中的 $() 和 `符号`' | ./story play action "$sid"
 | `7` | 场景断言失败或项目测试失败 |
 | `130` | 用户中断 |
 
-`jobs` 观察记忆提取、冲突观察、因果生成、下一事件生成和执行审计等后台任务，不改变它们的调度。`idle` 仅表示当前服务进程内没有该存档的后台任务，不表示模型成功或剧情正确；仍需检查审计、Trace 和测试断言。该状态接口用于单进程本地服务；重启后不会恢复未完成任务。请串行操作同一存档，避免其他客户端同时提交新回合。
+启用 Temporal 后，`jobs` 映射 PostgreSQL 中的持久 run/node 状态，服务重启后仍可观察和恢复；`idle` 只表示没有活动回合，不替代业务成功检查。未启用 Temporal 时保留原进程内后台任务语义。
 
 ## 场景测试
 

@@ -25,7 +25,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from fastapi import FastAPI, Header, HTTPException  # noqa: E402
+from fastapi import FastAPI, Header, HTTPException, Request  # noqa: E402
 from fastapi.responses import HTMLResponse, StreamingResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
@@ -33,6 +33,9 @@ from pydantic import BaseModel  # noqa: E402
 import game  # noqa: E402
 import story_cards  # noqa: E402
 import background  # noqa: E402
+import run_store  # noqa: E402
+import store  # noqa: E402
+import temporal_service  # noqa: E402
 from llm import stream_chat  # noqa: E402
 
 app = FastAPI(title="become_immortal")
@@ -41,11 +44,19 @@ app = FastAPI(title="become_immortal")
 # 不设则完全无影响，正常游玩。
 LIVE_RELOAD = os.getenv("LIVE_RELOAD") == "1"
 _USER_ID_RE = re.compile(r"^[A-Za-z0-9._%~-]{1,64}$")
+_CANCEL_TASKS: dict[str, tuple[str, asyncio.Task]] = {}
 
 
 @app.on_event("startup")
-def _startup() -> None:
+async def _startup() -> None:
     game.init()
+    await run_store.init()
+    await temporal_service.startup()
+
+
+@app.on_event("shutdown")
+async def _shutdown() -> None:
+    await temporal_service.shutdown()
 
 FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
 
@@ -155,6 +166,23 @@ class SidBody(BaseModel):
 class ActionBody(BaseModel):
     sid: str
     text: str
+    client_request_id: str | None = None
+    base_turn: int | None = None
+    base_version: int | None = None
+
+
+class RunCreateBody(BaseModel):
+    sid: str
+    input_kind: str
+    text: str | None = None
+    client_request_id: str | None = None
+    base_turn: int | None = None
+    base_version: int | None = None
+
+
+class RerunBody(BaseModel):
+    node_key: str
+    mode: str = "current"
 
 
 class InquiryBody(BaseModel):
@@ -175,6 +203,225 @@ def _require_owned(sid: str, user_id: str) -> None:
         raise HTTPException(404, "存档不存在")
 
 
+def _run_store_http_error(exc: run_store.RunStoreError) -> HTTPException:
+    if isinstance(exc, (run_store.SaveNotFound, run_store.RunNotFound)):
+        return HTTPException(404, str(exc))
+    if isinstance(exc, run_store.AlreadyCommitted):
+        return HTTPException(409, str(exc))
+    if isinstance(exc, (run_store.TurnConflict, run_store.ActiveRunConflict)):
+        return HTTPException(409, str(exc))
+    return HTTPException(500, str(exc))
+
+
+async def _create_and_start_run(
+    sid: str,
+    *,
+    input_kind: str,
+    action: str | None,
+    client_request_id: str | None,
+    base_turn: int | None,
+    base_version: int | None,
+) -> dict:
+    try:
+        run, created = await run_store.reserve_primary_run(
+            sid,
+            input_kind=input_kind,
+            action=action,
+            client_request_id=client_request_id,
+            base_turn=base_turn,
+            base_version=base_version,
+        )
+    except run_store.RunStoreError as exc:
+        raise _run_store_http_error(exc) from exc
+    if run["status"] in {"starting", "running"}:
+        try:
+            await temporal_service.start_run(run)
+        except temporal_service.TemporalUnavailable as exc:
+            raise HTTPException(
+                503,
+                {
+                    "message": str(exc),
+                    "run_id": run["id"],
+                    "retry_with_same_client_request_id": bool(client_request_id),
+                },
+            ) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                503,
+                {"message": f"Temporal 启动失败：{exc}", "run_id": run["id"]},
+            ) from exc
+    return (await run_store.get_run(run["id"])) or run
+
+
+def _persistent_sse(event: dict) -> str:
+    return (
+        f"id: {event['sequence']}\n"
+        f"event: {event['event_type']}\n"
+        f"data: {json.dumps(event['payload'], ensure_ascii=False)}\n\n"
+    )
+
+
+async def _run_event_stream(run_id: str, after: int = 0):
+    cursor = max(0, int(after))
+    terminal = {"done", "error", "canceled"}
+    idle_polls = 0
+    while True:
+        events = await run_store.list_events(run_id, cursor)
+        if events:
+            idle_polls = 0
+            for event in events:
+                cursor = int(event["sequence"])
+                yield _persistent_sse(event)
+                if event["event_type"] in terminal:
+                    return
+        else:
+            run = await run_store.get_run(run_id)
+            if run is None:
+                yield _sse("error", {"message": "执行不存在"})
+                return
+            if run["status"] in run_store.TERMINAL_STATUSES:
+                # Terminal status and event are committed together. One extra
+                # poll closes a race with a replica/driver visibility boundary.
+                idle_polls += 1
+                if idle_polls >= 2:
+                    return
+            elif idle_polls and idle_polls % 40 == 0:
+                yield ": keepalive\n\n"
+            idle_polls += 1
+        await asyncio.sleep(0.25)
+
+
+@app.post("/api/runs")
+async def create_run(
+    body: RunCreateBody,
+    user_id: str = Header(alias="X-User-ID"),
+):
+    user_id = _user_id(user_id)
+    _require_owned(body.sid, user_id)
+    input_kind = body.input_kind.strip().lower()
+    if input_kind not in {"opening", "action"}:
+        raise HTTPException(400, "input_kind 必须是 opening 或 action")
+    action = (body.text or "").strip() if input_kind == "action" else None
+    if input_kind == "action" and not action:
+        raise HTTPException(400, "行动不能为空")
+    return await _create_and_start_run(
+        body.sid,
+        input_kind=input_kind,
+        action=action,
+        client_request_id=body.client_request_id,
+        base_turn=body.base_turn,
+        base_version=body.base_version,
+    )
+
+
+@app.get("/api/runs")
+async def runs(
+    sid: str,
+    limit: int = 50,
+    user_id: str = Header(alias="X-User-ID"),
+):
+    user_id = _user_id(user_id)
+    _require_owned(sid, user_id)
+    return {"runs": await run_store.list_runs(sid, user_id=user_id, limit=limit)}
+
+
+@app.get("/api/runs/{run_id}")
+async def run_detail(run_id: str, user_id: str = Header(alias="X-User-ID")):
+    run = await run_store.get_run(run_id, user_id=_user_id(user_id))
+    if run is None:
+        raise HTTPException(404, "执行不存在")
+    return run
+
+
+@app.get("/api/runs/{run_id}/nodes")
+async def run_nodes(run_id: str, user_id: str = Header(alias="X-User-ID")):
+    run = await run_store.get_run(run_id, user_id=_user_id(user_id))
+    if run is None:
+        raise HTTPException(404, "执行不存在")
+    return {"nodes": await run_store.list_nodes_with_attempts(run_id)}
+
+
+@app.get("/api/runs/{run_id}/events")
+async def run_events(
+    run_id: str,
+    after: int = 0,
+    last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+    user_id: str = Header(alias="X-User-ID"),
+):
+    run = await run_store.get_run(run_id, user_id=_user_id(user_id))
+    if run is None:
+        raise HTTPException(404, "执行不存在")
+    cursor = after
+    if last_event_id:
+        try:
+            cursor = max(cursor, int(last_event_id))
+        except ValueError as exc:
+            raise HTTPException(400, "Last-Event-ID 必须是整数") from exc
+    return StreamingResponse(
+        _run_event_stream(run_id, cursor),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Run-ID": run_id},
+    )
+
+
+async def _request_temporal_cancel(run: dict) -> None:
+    await temporal_service.cancel_run(run)
+    await run_store.finalize_canceled(run["id"])
+    await temporal_service.wait_for_activity_drain(run)
+    shadow_sid = f"shadow:{run['id']}"
+    game._CACHE.pop(shadow_sid, None)
+    store.delete_run_clone(shadow_sid)
+
+
+def _schedule_temporal_cancel(run: dict) -> asyncio.Task:
+    existing = _CANCEL_TASKS.get(run["id"])
+    if existing is not None and not existing[1].done():
+        return existing[1]
+    task = asyncio.create_task(
+        _request_temporal_cancel(run), name=f"cancel-run:{run['id']}"
+    )
+    _CANCEL_TASKS[run["id"]] = (run["sid"], task)
+
+    def forget(completed: asyncio.Task) -> None:
+        _CANCEL_TASKS.pop(run["id"], None)
+        if not completed.cancelled():
+            completed.exception()
+
+    task.add_done_callback(forget)
+    return task
+
+
+@app.post("/api/runs/{run_id}/cancel")
+async def cancel_run(run_id: str, user_id: str = Header(alias="X-User-ID")):
+    try:
+        run = await run_store.cancel_run(run_id, user_id=_user_id(user_id))
+    except run_store.RunStoreError as exc:
+        raise _run_store_http_error(exc) from exc
+    _schedule_temporal_cancel(run)
+    return {"ok": True, "run_id": run_id, "status": "canceling"}
+
+
+@app.post("/api/runs/{run_id}/rerun")
+async def rerun(
+    run_id: str,
+    body: RerunBody,
+    user_id: str = Header(alias="X-User-ID"),
+):
+    try:
+        debug_run = await run_store.create_debug_run(
+            run_id,
+            body.node_key,
+            mode=body.mode,
+            user_id=_user_id(user_id),
+        )
+        await temporal_service.start_run(debug_run)
+    except run_store.RunStoreError as exc:
+        raise _run_store_http_error(exc) from exc
+    except temporal_service.TemporalUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
+    return debug_run
+
+
 @app.post("/api/new")
 async def new_game(
     body: NewGameBody | None = None,
@@ -188,12 +435,15 @@ async def new_game(
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     card = game.get_story_card_info(sid)
+    persisted = store.load(sid) or {}
     return {
         "session_id": sid,
         "name": name or card["default_save_name"],
         "story_card": card,
         "character_state": game.get_character_state(sid),
         "world_state": game.get_world_state(sid),
+        "turns": int(persisted.get("turns") or 0),
+        "version": int(persisted.get("version") or 0),
     }
 
 
@@ -217,6 +467,10 @@ async def load(
     transcript = game.get_transcript(sid)
     if transcript is None:
         raise HTTPException(404, "存档不存在")
+    persisted = store.load(sid) or {}
+    active_run = None
+    if temporal_service.enabled():
+        active_run = await run_store.active_run_summary(sid, user_id=_user_id(user_id))
     return {
         "session_id": sid,
         "story_card": game.get_story_card_info(sid),
@@ -227,6 +481,9 @@ async def load(
         "inventory": game.get_inventory(sid) or [],
         "director_state": game.get_director_state(sid) or {},
         "world_state": game.get_world_state(sid) or {},
+        "turns": int(persisted.get("turns") or 0),
+        "version": int(persisted.get("version") or 0),
+        "active_run": active_run,
     }
 
 
@@ -249,17 +506,53 @@ async def delete(
     body: SidBody,
     user_id: str = Header(alias="X-User-ID"),
 ):
-    if not game.delete(body.sid, _user_id(user_id)):
+    user_id = _user_id(user_id)
+    if temporal_service.enabled():
+        pending = await run_store.inflight_runs(body.sid, user_id=user_id)
+        cancel_tasks = [
+            task
+            for sid, task in _CANCEL_TASKS.values()
+            if sid == body.sid and not task.done()
+        ]
+        for run in pending:
+            if run["status"] in {"starting", "running"}:
+                try:
+                    run = await run_store.cancel_run(run["id"], user_id=user_id)
+                except run_store.RunStoreError:
+                    continue
+            cancel_tasks.append(_schedule_temporal_cancel(run))
+        if cancel_tasks:
+            await asyncio.gather(*set(cancel_tasks))
+    if not game.delete(body.sid, user_id):
         raise HTTPException(404, "存档不存在")
     return {"ok": True}
 
 
 @app.get("/api/opening")
 async def opening(
-    sid: str, user_id: str = Header(alias="X-User-ID")
+    sid: str,
+    client_request_id: str | None = None,
+    base_turn: int | None = None,
+    base_version: int | None = None,
+    user_id: str = Header(alias="X-User-ID"),
 ):
-    if not game.owned_by(sid, _user_id(user_id)):
+    user_id = _user_id(user_id)
+    if not game.owned_by(sid, user_id):
         raise HTTPException(404, "会话不存在，请重新开始")
+    if temporal_service.enabled():
+        run = await _create_and_start_run(
+            sid,
+            input_kind="opening",
+            action=None,
+            client_request_id=client_request_id,
+            base_turn=base_turn,
+            base_version=base_version,
+        )
+        return StreamingResponse(
+            _run_event_stream(run["id"]),
+            media_type="text/event-stream",
+            headers={"X-Run-ID": run["id"], "Cache-Control": "no-cache"},
+        )
     return StreamingResponse(
         _opening_stream(sid),
         media_type="text/event-stream",
@@ -293,16 +586,35 @@ async def _action_stream(sid: str, text: str):
         yield chunk
 
 
-def _action_response(sid: str, text: str, user_id: str) -> StreamingResponse:
+async def _action_response(
+    sid: str,
+    text: str,
+    user_id: str,
+    *,
+    client_request_id: str | None = None,
+    base_turn: int | None = None,
+    base_version: int | None = None,
+) -> StreamingResponse:
     if not game.owned_by(sid, user_id):
         raise HTTPException(404, "会话不存在，请重新开始")
     text = (text or "").strip()
     if not text:
         raise HTTPException(400, "行动不能为空")
-    return StreamingResponse(
-        _action_stream(sid, text),
-        media_type="text/event-stream",
-    )
+    if temporal_service.enabled():
+        run = await _create_and_start_run(
+            sid,
+            input_kind="action",
+            action=text,
+            client_request_id=client_request_id,
+            base_turn=base_turn,
+            base_version=base_version,
+        )
+        return StreamingResponse(
+            _run_event_stream(run["id"]),
+            media_type="text/event-stream",
+            headers={"X-Run-ID": run["id"], "Cache-Control": "no-cache"},
+        )
+    return StreamingResponse(_action_stream(sid, text), media_type="text/event-stream")
 
 
 @app.post("/api/action")
@@ -310,16 +622,33 @@ async def action(
     body: ActionBody,
     user_id: str = Header(alias="X-User-ID"),
 ):
-    return _action_response(body.sid, body.text, _user_id(user_id))
+    return await _action_response(
+        body.sid,
+        body.text,
+        _user_id(user_id),
+        client_request_id=body.client_request_id,
+        base_turn=body.base_turn,
+        base_version=body.base_version,
+    )
 
 
 @app.get("/api/action")
 async def action_legacy(
     sid: str,
     text: str,
+    client_request_id: str | None = None,
+    base_turn: int | None = None,
+    base_version: int | None = None,
     user_id: str = Header(alias="X-User-ID"),
 ):
-    return _action_response(sid, text, _user_id(user_id))
+    return await _action_response(
+        sid,
+        text,
+        _user_id(user_id),
+        client_request_id=client_request_id,
+        base_turn=base_turn,
+        base_version=base_version,
+    )
 
 
 @app.get("/api/character-state")
@@ -457,8 +786,28 @@ async def agent_traces(
 
 @app.get("/api/jobs")
 async def jobs(sid: str, user_id: str = Header(alias="X-User-ID")):
-    """Observe in-process background tasks; idle does not imply model success."""
-    _require_owned(sid, _user_id(user_id))
+    """Observe durable Temporal work, with legacy tasks when disabled."""
+    user_id = _user_id(user_id)
+    _require_owned(sid, user_id)
+    if temporal_service.enabled():
+        active = await run_store.active_run_summary(sid, user_id=user_id)
+        if not active:
+            return {"session_id": sid, "idle": True, "pending": []}
+        nodes = await run_store.list_nodes(active["id"])
+        return {
+            "session_id": sid,
+            "idle": active["status"] not in run_store.ACTIVE_STATUSES,
+            "pending": [
+                {
+                    "run_id": active["id"],
+                    "kind": node["node_key"],
+                    "status": node["status"],
+                    "started_at": node.get("started_at"),
+                }
+                for node in nodes
+                if node["status"] in {"pending", "running"}
+            ],
+        }
     return background.status(sid)
 
 

@@ -8,7 +8,8 @@
 - 你在输入框自由输入任何行动（不是选项菜单）。
 - AI 根据世界逻辑推进剧情，选择有真实后果。
 - 网页端流式打字机效果，边生成边显示。「新建故事」可重新选卡开局。
-- **自动存档**：每一手都写入 SQLite，重启不丢。点「存档」可查看所有故事、读档重放、改名或删除。启动时自动续上最近一局。
+- **自动存档**：每一手由独立 Temporal Workflow 执行，所有后处理完成后以 PostgreSQL CAS 原子提交；失败或取消不会污染正式存档。
+- **可取消与可恢复**：生成期间可取消当前回合并立即重新输入；刷新页面会重新附着持久 SSE，模型节点失败会按策略重试。
 - **用户隔离**：访问页面后必须先输入 `userid`，每个用户只会看到和操作自己的存档；已有存档使用 `default` 进入。
 - **主角状态与物品记忆**：AI 每回合输出身体状态与关键物件，后端保存最新版主角状态并维护物品影子库；状态和近期相关物品会注入后续生成，冷物品收进折叠区，玩家提及时再召回。
 - **世界记忆**：点「记忆」可查看长期剧情事实，也可打听主角此刻理应知道的背景；问答与每轮提取出的关键情节会按需召回，约束后续剧情。
@@ -16,7 +17,7 @@
 
 ## 技术栈
 
-- 后端：FastAPI + httpx，SSE 流式转发
+- 后端：FastAPI + Temporal + SQLAlchemy + PostgreSQL，持久 SSE 流式转发
 - 前端：原生 HTML/CSS/JS，`fetch` 读 SSE 流
 - 本地召回：fastembed + BGE-small-zh，用于冷物品语义召回；不可用时自动降级为只保留热物品
 - 模型：同时支持 **OpenAI 协议**（DeepSeek / 通义 / Kimi / 本地 vLLM / 兼容网关等）和 **Anthropic 协议**（Anthropic 官方或兼容网关），用 `LLM_PROTOCOL` 切换
@@ -28,13 +29,17 @@
 python3.11 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 
-# 2. 配置模型
+# 2. 配置模型与基础设施
 cp .env.example .env
 # 编辑 .env 填入 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL
+docker compose up -d
 
-# 3. 启动
-cd backend
-../.venv/bin/python -m uvicorn main:app --reload --host 0.0.0.0 --port 8888 --timeout-graceful-shutdown 3
+# 首次迁移旧 SQLite（先检查，再显式写入；不会删除源文件）
+./story db import-sqlite backend/data/saves.db --dry-run
+./story db import-sqlite backend/data/saves.db --apply
+
+# 3. 同时启动 API 与 Temporal Worker
+./story serve --host 0.0.0.0 --port 8888
 ```
 
 电脑本机访问 `http://127.0.0.1:8888`；同一局域网的手机访问电脑的局域网 IP，例如
@@ -51,6 +56,9 @@ cd backend
 ```bash
 ./story health
 ./story saves create --user agent-test --card orbital
+./story runs list SAVE_ID --user agent-test
+./story runs cancel RUN_ID --user agent-test
+./story runs rerun RUN_ID narrative --mode current --user agent-test
 ./story test
 # 独立目录与端口启动测试服务
 ./story serve --port 8901 --data-dir /tmp/story-agent-test --no-embed
@@ -76,6 +84,11 @@ cd backend
 | `EMBED_ENABLED` | 是否启用冷物品语义召回；设 `0` 可关闭 | `1` |
 | `EMBED_MODEL` | fastembed 模型名 | `BAAI/bge-small-zh-v1.5` |
 | `STORY_DATA_DIR` | 独立 SQLite 存档目录，默认 `backend/data` | `/tmp/story-agent-test` |
+| `DATABASE_URL` | 应用 PostgreSQL 异步连接地址 | `postgresql+asyncpg://.../become_immortal` |
+| `TEMPORAL_ENABLED` | 是否启用持久回合 Workflow；启用后生成不回退旧链路 | `1` |
+| `TEMPORAL_ADDRESS` | Temporal Frontend 地址 | `127.0.0.1:7233` |
+| `TEMPORAL_NAMESPACE` | Temporal namespace | `default` |
+| `TEMPORAL_TASK_QUEUE` | API 与 Worker 共享的任务队列 | `become-immortal-turns` |
 
 旧配置 `DIRECTOR_LLM_MAX_TOKENS` 仍兼容：未设置三个专职 Agent 上限时，它会作为共同上限。
 
@@ -100,6 +113,11 @@ LLM_MODEL=claude-sonnet-5
 
 ```
 backend/
+  db.py        # SQLAlchemy 表定义与数据库连接
+  run_store.py # 执行账本、事件流、取消栅栏与最终 CAS
+  temporal_workflows.py   # TurnWorkflow / DebugRerunWorkflow
+  temporal_activities.py  # 分支执行、Narrative 流与后处理 Activity
+  worker.py    # Temporal Worker 入口
   cli.py       # 命令行入口：HTTP/SSE、本地工具和场景测试
   cli_client.py # CLI 的 JSON/SSE 传输与退出码
   background.py # 按存档观察后台任务，不改变 Agent 调度
@@ -121,8 +139,11 @@ examples/cli/  # Agent 可执行的 JSON 场景
 
 ## 存档与持久化
 
-- 存档落在 `backend/data/saves.db`（SQLite，已在 `.gitignore` 中忽略）。
-- 每完成一手（行动 + 续写）自动写盘，进程重启不丢。
+- 正式存档和执行账本位于应用 PostgreSQL；Temporal 使用独立数据库保存 Workflow History。
+- `backend/data/saves.db` 仅作为旧数据的只读导入来源和隔离单测后端。
+- `execution_runs/nodes/llm_attempts/state_snapshots/execution_events` 保存请求、节点、真实模型尝试、节点边界状态和可续传 SSE；完整 Prompt 与 token delta 不写入 Temporal History。
+- 每个开场或行动使用独立 `TurnWorkflow`，ID 为 `turn:{sid}:{target_turn}:{run_id}`。正式存档只在最后一次带版本、回合和活动 run 条件的 CAS 中更新。
+- 取消会先写持久栅栏并释放 `active_run_id`，再请求 Temporal Cancel，因此旧 Worker 即使稍后恢复也无法提交。
 - 每个存档包含：`messages`（喂给 LLM 的上下文，按 40 轮截断省 token）、`transcript`（展示用完整剧情，只增不删）、`character_state`（主角当前状态快照）、`world_memory`（长期世界记忆）与 `inventory`（物品影子库）。旧库中的 `lore` 会自动迁移为 `qa` 类型世界记忆。
 - 每局另外保存完整的 `story_card` 快照，修改本地卡片只影响之后的新局；旧修仙存档自动补齐故事卡信息，保留原剧情和当前位置。
 - 存档通过必填的 `X-User-ID` 请求头隔离，已有存档仍属于 `default` 用户。该机制适合可信环境下的本地多人区分，不提供密码鉴权。

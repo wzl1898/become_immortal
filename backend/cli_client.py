@@ -15,12 +15,12 @@ class CLIError(Exception):
 
 def sse_events(lines):
     """Decode SSE frames, including comments, CRLF and multi-line data."""
-    event, data = "message", []
+    event, data, event_id = "message", [], None
     for line in lines:
         if not line:
             if data:
-                yield _decode(event, data)
-            event, data = "message", []
+                yield _decode(event, data, event_id)
+            event, data, event_id = "message", [], None
             continue
         if line.startswith(":"):
             continue
@@ -29,21 +29,26 @@ def sse_events(lines):
             value = value[1:]
         if field == "event":
             event = value
+        elif field == "id":
+            event_id = value
         elif field == "data":
             data.append(value)
     if data:
         # The caller still requires an explicit done event, even on clean EOF.
-        yield _decode(event, data)
+        yield _decode(event, data, event_id)
 
 
-def _decode(event, lines):
+def _decode(event, lines, event_id=None):
     try:
         data = json.loads("\n".join(lines))
     except ValueError as exc:
         raise CLIError("SSE 返回了无效 JSON", 5, "protocol") from exc
     if not isinstance(data, dict):
         raise CLIError("SSE 数据必须为对象", 5, "protocol")
-    return {"event": event, "data": data}
+    frame = {"event": event, "data": data}
+    if event_id is not None:
+        frame["id"] = event_id
+    return frame
 
 
 class Client:
@@ -98,42 +103,62 @@ class Client:
         except httpx.HTTPError as exc:
             raise CLIError(str(exc), 4, "transport") from exc
 
-    def generate(self, method, path, *, sid, body=None, emit=None):
-        full = []
-        try:
-            with self.http.stream(
-                method,
-                path,
-                params={"sid": sid} if method == "GET" else None,
-                json=body,
-            ) as response:
-                self._check(response)
-                if "text/event-stream" not in response.headers.get("content-type", ""):
-                    raise CLIError("生成接口没有返回 SSE 流", 5, "protocol")
-                for frame in sse_events(response.iter_lines()):
-                    event, data = frame["event"], frame["data"]
-                    if emit:
-                        emit(frame)
-                    if event == "delta":
-                        text = data.get("text")
-                        if not isinstance(text, str):
-                            raise CLIError("delta 缺少文本", 5, "protocol")
-                        full.append(text)
-                    elif event == "error":
-                        raise CLIError(data.get("message", "生成失败"), 5, "generation")
-                    elif event == "done":
-                        return {
-                            "session_id": sid,
-                            "text": "".join(full),
-                            "result": data,
-                        }
-            raise CLIError(
-                "生成流在 done 事件前结束；请读档确认结果，勿自动重放行动",
-                5,
-                "incomplete_stream",
-            )
-        except httpx.HTTPError as exc:
-            raise CLIError(str(exc), 4, "transport") from exc
+    def generate(self, method, path, *, sid, body=None, params=None, emit=None):
+        full, run_id, last_event_id = [], None, None
+        current_method, current_path, current_body = method, path, body
+        for reconnect in range(4):
+            headers = {"Last-Event-ID": last_event_id} if last_event_id else None
+            try:
+                with self.http.stream(
+                    current_method,
+                    current_path,
+                    params=(params or {"sid": sid}) if current_method == "GET" and current_path == path else None,
+                    json=current_body,
+                    headers=headers,
+                ) as response:
+                    self._check(response)
+                    if "text/event-stream" not in response.headers.get("content-type", ""):
+                        raise CLIError("生成接口没有返回 SSE 流", 5, "protocol")
+                    run_id = response.headers.get("X-Run-ID") or run_id
+                    for frame in sse_events(response.iter_lines()):
+                        event, data = frame["event"], frame["data"]
+                        if frame.get("id"):
+                            last_event_id = frame["id"]
+                        if emit:
+                            emit(frame)
+                        if event == "delta":
+                            text = data.get("text")
+                            if not isinstance(text, str):
+                                raise CLIError("delta 缺少文本", 5, "protocol")
+                            full.append(text)
+                        elif event == "reset":
+                            full.clear()
+                        elif event == "canceled":
+                            raise CLIError("当前回合已取消", 5, "canceled", run_id=run_id)
+                        elif event == "error":
+                            raise CLIError(data.get("message", "生成失败"), 5, "generation")
+                        elif event == "done":
+                            return {
+                                "session_id": sid,
+                                "run_id": run_id,
+                                "text": "".join(full),
+                                "result": data,
+                            }
+            except httpx.HTTPError as exc:
+                if not run_id or reconnect >= 3:
+                    raise CLIError(str(exc), 4, "transport") from exc
+            if not run_id:
+                break
+            current_method = "GET"
+            current_path = f"/api/runs/{run_id}/events"
+            current_body = None
+        raise CLIError(
+            "生成流在 done 事件前结束；可使用 runs show 检查持久执行状态",
+            5,
+            "incomplete_stream",
+            run_id=run_id,
+            last_event_id=last_event_id,
+        )
 
     def wait(self, sid, timeout=120, interval=0.25):
         deadline = time.monotonic() + timeout
