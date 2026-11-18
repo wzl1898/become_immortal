@@ -28,7 +28,7 @@ DEFAULTS = {
     "output": "reports/autoplay-{ts}.html",
     "player_agent": {
         "model": None,
-        "user_profile": {},
+        "user_profile": "",
         "temperature": 0.9,
         "max_tokens": 200,
         "timeout": 60,
