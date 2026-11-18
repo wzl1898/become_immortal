@@ -4570,13 +4570,16 @@ def get_agent_token_stats(session_id: str) -> dict | None:
 def get_agent_traces(
     session_id: str, *, turn: int | None = None, limit: int = 100,
     include_content: bool = False, updated_after: float | None = None,
+    additional_session_ids: tuple[str, ...] = (),
 ) -> list[dict] | None:
     if not exists(session_id):
         return None
-    store.reap_stale_agent_traces(session_id)
+    for trace_sid in (session_id, *additional_session_ids):
+        if store.exists(trace_sid):
+            store.reap_stale_agent_traces(trace_sid)
     return store.list_agent_traces(
         session_id, turn=turn, limit=limit, include_content=include_content,
-        updated_after=updated_after,
+        updated_after=updated_after, additional_sids=additional_session_ids,
     )
 
 

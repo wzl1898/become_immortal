@@ -93,6 +93,28 @@ class RunStoreTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(self.run_store.AlreadyCommitted):
             await self.run_store.cancel_run(run["id"], user_id="default")
 
+    async def test_commit_preserves_live_shadow_trace_identity(self):
+        run, _ = await self._reserve()
+        await self.run_store.mark_run_started(run["id"])
+        shadow = f"shadow:{run['id']}"
+        self.store.clone_for_run(self.sid, shadow)
+        trace_id = self.store.record_agent_trace({
+            "save_id": shadow,
+            "turn": 1,
+            "agent_type": "director_event",
+            "protocol": "openai",
+            "model": "test",
+            "status": "success",
+        })
+        branch = self.store.load(shadow)
+        self.store.save_state(shadow, branch["messages"], branch["transcript"], 1)
+
+        await self.run_store.commit_shadow(run["id"], shadow)
+
+        canonical = self.store.list_agent_traces(self.sid)
+        self.assertEqual([trace["id"] for trace in canonical], [trace_id])
+        self.assertEqual(self.store.list_agent_traces(shadow), [])
+
     async def test_cancellation_fences_late_activity_events_and_completion(self):
         run, _ = await self._reserve()
         await self.run_store.cancel_run(run["id"], user_id="default")

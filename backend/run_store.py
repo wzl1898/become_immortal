@@ -1068,18 +1068,15 @@ async def _copy_shadow_tables(
                     values["payoff_id"] = str(values["payoff_id"])[: -len(suffix)]
             await connection.execute(insert(table).values(**values))
 
-    # Diagnostics are append-only. Preserve the real provider calls made on
-    # the isolated save so the existing trace/metrics APIs remain complete;
-    # the execution ledger keeps the same calls associated with their nodes.
+    # Re-home diagnostics instead of copying them. The live trace API exposes
+    # these rows while they belong to the shadow save, so preserving IDs keeps
+    # the same frontend record stable across the final commit.
     for table in (db.llm_request_metrics, db.agent_traces):
-        rows = (
-            await connection.execute(select(table).where(table.c.save_id == shadow_sid))
-        ).mappings().all()
-        for source in rows:
-            values = dict(source)
-            values.pop("id", None)
-            values["save_id"] = canonical_sid
-            await connection.execute(insert(table).values(**values))
+        await connection.execute(
+            update(table)
+            .where(table.c.save_id == shadow_sid)
+            .values(save_id=canonical_sid)
+        )
 
 
 async def active_run_summary(sid: str, *, user_id: str) -> dict | None:

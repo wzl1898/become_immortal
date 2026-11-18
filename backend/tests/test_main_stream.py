@@ -1,7 +1,7 @@
 import asyncio
 import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import main
 
@@ -12,6 +12,35 @@ def _event_payload(raw: str) -> dict:
 
 
 class MainStreamTests(unittest.TestCase):
+    def test_agent_traces_include_active_temporal_shadow(self):
+        active = {"id": "run-1"}
+        with patch.object(main, "_require_owned"), patch.object(
+            main.temporal_service, "enabled", return_value=True
+        ), patch.object(
+            main.run_store, "active_run_summary", AsyncMock(return_value=active)
+        ), patch.object(main.game, "get_agent_traces", return_value=[]) as get_traces:
+            result = asyncio.run(main.agent_traces("save-1", user_id="default"))
+
+        self.assertEqual(result, {"traces": [], "cursor": 0})
+        self.assertEqual(
+            get_traces.call_args.kwargs["additional_session_ids"],
+            ("shadow:run-1",),
+        )
+
+    def test_director_reads_active_temporal_shadow(self):
+        active = {"id": "run-1"}
+        with patch.object(main, "_require_owned"), patch.object(
+            main.temporal_service, "enabled", return_value=True
+        ), patch.object(
+            main.run_store, "active_run_summary", AsyncMock(return_value=active)
+        ), patch.object(main.store, "exists", return_value=True), patch.object(
+            main.game, "get_director_state", return_value={"event": {"summary": "冲突"}}
+        ) as get_state, patch.object(main.game, "get_turns", return_value=2):
+            result = asyncio.run(main.director("save-1", user_id="default"))
+
+        self.assertEqual(result["director_state"]["event"]["summary"], "冲突")
+        get_state.assert_called_once_with("shadow:run-1")
+
     def test_empty_model_output_is_not_committed(self):
         committed = []
         rolled_back = []

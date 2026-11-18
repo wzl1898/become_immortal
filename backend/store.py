@@ -1049,15 +1049,18 @@ def finish_agent_trace(trace_id: int, trace: dict) -> None:
 def list_agent_traces(
     sid: str, *, turn: int | None = None, limit: int = 100,
     include_content: bool = False, updated_after: float | None = None,
+    additional_sids: tuple[str, ...] = (),
 ) -> list[dict] | None:
-    """Read trace summaries, or complete payloads when explicitly requested."""
+    """Read traces for a save and any internal execution branches."""
     limit = max(1, min(int(limit), 500))
     with _conn() as conn:
         if conn.execute("SELECT 1 FROM saves WHERE id=?", (sid,)).fetchone() is None:
             return None
+        trace_sids = list(dict.fromkeys((sid, *additional_sids)))
+        placeholders = ", ".join("?" for _ in trace_sids)
         content_columns = ", input_messages, raw_output, error_message" if include_content else ""
-        clauses = ["save_id=?"]
-        params: list = [sid]
+        clauses = [f"save_id IN ({placeholders})"]
+        params: list = trace_sids
         if turn is not None:
             clauses.append("turn=?")
             params.append(int(turn))

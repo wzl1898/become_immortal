@@ -732,11 +732,18 @@ async def director(
     sid: str, user_id: str = Header(alias="X-User-ID")
 ):
     """读取实时事件骨架与异步执行审计状态。"""
-    _require_owned(sid, _user_id(user_id))
-    state = game.get_director_state(sid)
+    user_id = _user_id(user_id)
+    _require_owned(sid, user_id)
+    observed_sid = sid
+    if temporal_service.enabled():
+        active = await run_store.active_run_summary(sid, user_id=user_id)
+        shadow_sid = f"shadow:{active['id']}" if active else None
+        if shadow_sid and store.exists(shadow_sid):
+            observed_sid = shadow_sid
+    state = game.get_director_state(observed_sid)
     if state is None:
         raise HTTPException(404, "存档不存在")
-    return {"director_state": state, "turns": game.get_turns(sid) or 0}
+    return {"director_state": state, "turns": game.get_turns(observed_sid) or 0}
 
 
 @app.get("/api/llm-metrics")
@@ -772,11 +779,18 @@ async def agent_traces(
     user_id: str = Header(alias="X-User-ID"),
 ):
     """Read Agent traces, optionally returning only records changed since a cursor."""
-    _require_owned(sid, _user_id(user_id))
+    user_id = _user_id(user_id)
+    _require_owned(sid, user_id)
+    additional_session_ids: tuple[str, ...] = ()
+    if temporal_service.enabled():
+        active = await run_store.active_run_summary(sid, user_id=user_id)
+        if active:
+            additional_session_ids = (f"shadow:{active['id']}",)
     items = game.get_agent_traces(
         sid, turn=turn, limit=limit,
         include_content=include_content or turn is not None,
         updated_after=updated_after,
+        additional_session_ids=additional_session_ids,
     )
     if items is None:
         raise HTTPException(404, "存档不存在")

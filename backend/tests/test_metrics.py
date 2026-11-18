@@ -81,6 +81,31 @@ class LLMMetricStoreTests(unittest.TestCase):
                 self.assertEqual(changed[0]["total_tokens"], 120)
                 self.assertEqual(changed[0]["cache_hit_tokens"], 60)
 
+    def test_agent_traces_include_active_execution_branch(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "saves.db")
+            with patch.object(store, "DB_PATH", db_path):
+                store.init()
+                sid = store.create("test", [])
+                shadow_sid = "shadow:active-run"
+                store.clone_for_run(sid, shadow_sid)
+                canonical_id = store.record_agent_trace({
+                    "save_id": sid, "turn": 1, "agent_type": "director_event",
+                    "protocol": "openai", "model": "test", "status": "success",
+                })
+                shadow_id = store.record_agent_trace({
+                    "save_id": shadow_sid, "turn": 2, "agent_type": "director_hook",
+                    "protocol": "openai", "model": "test", "status": "running",
+                })
+
+                traces = store.list_agent_traces(
+                    sid, include_content=True, additional_sids=(shadow_sid,)
+                )
+
+                self.assertEqual([trace["id"] for trace in traces], [canonical_id, shadow_id])
+                self.assertEqual(traces[1]["save_id"], shadow_sid)
+                self.assertEqual(traces[1]["status"], "running")
+
     def test_aggregates_token_usage_overall_and_by_agent(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "saves.db")
